@@ -228,9 +228,21 @@ def gate_protocol_complete() -> GateResult:
 
     failures: list[str] = []
 
-    for field in ("Name", "Formula", "Units"):
+    mode_match = re.search(r"^\s*-\s*Mode:\s*(\w+)\s*$", text, flags=re.MULTILINE)
+    if mode_match is None:
+        failures.append("missing_mode_line")
+    else:
+        protocol_mode = mode_match.group(1).strip().lower()
+        if mode is not None and protocol_mode != mode:
+            failures.append(f"mode_mismatch:{protocol_mode}!={mode}")
+
+    for field in ("Name", "Units"):
         if re.search(rf"^\s*-\s*{field}:\s*$", text, flags=re.MULTILINE):
             failures.append(f"primary_metric_{field.lower()}_blank")
+
+    # Support both `- Formula:` and `- Formula (daily):` styles, but fail if left blank.
+    if re.search(r"^\s*-\s*Formula[^:]*:\s*$", text, flags=re.MULTILINE):
+        failures.append("primary_metric_formula_blank")
 
     required_sections = [
         "Rollup inclusion criteria",
@@ -360,6 +372,19 @@ def gate_task_hygiene() -> GateResult:
                 if key not in frontmatter:
                     failures.append(f"{path}:frontmatter_missing_key:{key}")
 
+            list_keys = [
+                "dependencies",
+                "allowed_paths",
+                "disallowed_paths",
+                "outputs",
+                "gates",
+                "stop_conditions",
+            ]
+            for key in list_keys:
+                value = frontmatter.get(key)
+                if not isinstance(value, list):
+                    failures.append(f"{path}:frontmatter_key_not_list:{key}")
+
             task_id = frontmatter.get("task_id")
             if isinstance(task_id, str):
                 if not path.name.startswith(task_id):
@@ -377,7 +402,15 @@ def gate_task_hygiene() -> GateResult:
             if isinstance(priority, str) and priority not in VALID_TASK_PRIORITIES:
                 failures.append(f"{path}:invalid_priority:{priority}")
 
-        for heading in ("## Status", "## Notes / Decisions"):
+        required_headings = [
+            "## Context",
+            "## Inputs",
+            "## Outputs",
+            "## Success Criteria",
+            "## Status",
+            "## Notes / Decisions",
+        ]
+        for heading in required_headings:
             if heading not in text:
                 failures.append(f"{path}:missing_heading:{heading}")
 

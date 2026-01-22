@@ -20,3 +20,6 @@ jobs:
 
       - name: Run quality gates
         run: make gate
+
+      - name: Run tests
+        run: make test

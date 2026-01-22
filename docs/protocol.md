@@ -4,13 +4,13 @@ This file is the canonical definition set for this repo. If definitions conflict
 
 ## Research mode
 
-- Mode: empirical (see `contracts/project.yaml`)
+- Mode: empirical
 
 ## Primary metric
 
 - Name: Settlement Take Rate (STR)
-- Formula (daily):
-  - `STR_t = (Σ_i RentPaid_{i,t}) / (Σ_i L2Fees_{i,t})`
+- Formula: `STR_t = (Σ_i RentPaid_{i,t}) / (Σ_i L2Fees_{i,t})`
+- Frequency: daily
 - Units: Unitless ratio (0–1+); primary computation uses **ETH-native series** (USD series is secondary for interpretation only).
 
 Definitions:

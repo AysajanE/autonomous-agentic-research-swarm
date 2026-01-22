@@ -69,7 +69,7 @@ def main(argv: list[str]) -> None:
         )
     source = argv[1]
     snapshot_dir = Path(argv[2])
-    command = argv[3]
+    command = " ".join(argv[3:])
 
     manifest = build_manifest(source=source, snapshot_dir=snapshot_dir, command=command)
     now = datetime.now(timezone.utc)

@@ -26,6 +26,7 @@ If a conflict remains: STOP and mark the task `blocked` with `@human`.
 ## 2) Non-negotiable repo rules
 1) **No agent-to-agent chat coordination.** Only coordination files and artifacts.
 2) **Do not edit outside allowed paths** listed in your task.
+   - `allowed_paths` governs project artifacts; editing your assigned task file (in allowed sections) and writing a handoff note in `.orchestrator/handoff/` are always permitted.
 3) **Never change protocol definitions** unless your task is in Workstream W0 and explicitly authorizes it.
 4) **Raw snapshots are append-only.** Never overwrite `data/raw/` artifacts in-place.
 5) **No “helpful refactors”** outside task scope.

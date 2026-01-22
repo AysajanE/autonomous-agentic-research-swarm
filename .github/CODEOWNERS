@@ -3,6 +3,5 @@ docs/protocol.md @AysajanE
 contracts/ @AysajanE
 .orchestrator/ @AysajanE
 registry/ @AysajanE
-data/schemas/ @AysajanE
 .github/workflows/ @AysajanE
 scripts/quality_gates.py @AysajanE

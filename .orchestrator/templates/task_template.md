@@ -8,6 +8,11 @@ dependencies: []
 allowed_paths:
   - "<path>/"
 disallowed_paths:
+  - "docs/protocol.md"
+  - "contracts/"
+  - "registry/"
+  - ".orchestrator/templates/"
+  - ".orchestrator/workstreams.md"
   - "data/raw/"
 outputs:
   - "<output path>"
