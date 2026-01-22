@@ -1,0 +1,10 @@
+# Panel schema (template)
+#
+# Define the canonical analysis panel schema here.
+#
+# Example fields (edit to fit your project):
+# - date: YYYY-MM-DD (UTC)
+# - rollup_id: stable internal key
+# - l2_fees_eth: float
+# - rent_paid_eth: float
+# - str: float

@@ -2,6 +2,10 @@
 
 This file is the canonical definition set for this repo. If definitions conflict, stop and mark the relevant task `blocked` with `@human`.
 
+## Research mode
+
+- Mode: empirical (see `contracts/project.yaml`)
+
 ## Primary metric
 
 - Name: Settlement Take Rate (STR)

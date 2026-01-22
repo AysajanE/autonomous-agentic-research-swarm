@@ -1,0 +1,12 @@
+project_name: "l2-l1-rent-analysis"
+mode: empirical
+primary_question: "Is Ethereum L1’s settlement take rate on rollup economics rising, stable, or decaying as L2 usage scales?"
+primary_outputs:
+  - "reports/validation/"
+  - "reports/figures/"
+risk_policy:
+  stop_conditions:
+    - "definition ambiguity"
+    - "missing credentials"
+    - "validation failure beyond tolerance"
+    - "need to edit outside allowed paths"

@@ -1,0 +1,12 @@
+name: exp_001_template
+description: "Template experiment spec (fill in for modeling projects)."
+seeds:
+  - 1
+  - 2
+  - 3
+parameters: {}
+solver:
+  name: "..."
+  version: "..."
+outputs:
+  results_dir: "reports/models/exp_001/"

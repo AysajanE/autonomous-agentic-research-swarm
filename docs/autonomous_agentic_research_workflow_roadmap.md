@@ -17,6 +17,18 @@ It is designed to work with **subscription CLIs/IDEs** (e.g., Claude Code, Codex
 
 ---
 
+## 1.5) Research modes (required)
+
+Every project must declare a mode:
+
+- **Empirical**: data collection + cleaning + validation + estimation
+- **Modeling**: formal model/spec + solution method + experiments/simulation + validation
+- **Hybrid**: both (empirical informs model; model generates counterfactuals)
+
+Mode determines which repo modules and contracts are mandatory.
+
+---
+
 ## 2) The core architecture (Planner → Workers → Judge)
 
 ### Roles
@@ -55,9 +67,11 @@ Everything important must live on disk in version control:
    - Non-negotiables, safety, scope rules, and “how we work here”.
    - Optional: add nested `AGENTS.md` in subdirectories for local rules.
 
-2. **Protocol lock**
-   - Canonical definitions (metrics, units, regimes, inclusion criteria).
-   - The protocol is the highest-authority reference for downstream tasks.
+2. **Contracts & locks (protocol/model spec)**
+   - Canonical definitions that downstream work must not reinterpret.
+   - Empirical: metrics, units, inclusion criteria, regimes, tolerances.
+   - Modeling: notation, variables, constraints/objective, assumptions, regimes, solver config, evaluation metrics.
+   - The contract files are the highest-authority reference for downstream tasks.
 
 3. **Workstreams + ownership boundaries**
    - Workstream definitions (“who owns what”).
@@ -71,40 +85,127 @@ Everything important must live on disk in version control:
 5. **Handoff notes**
    - Short integration notes for cross-task dependencies (paths, commands, assumptions).
 
-6. **Quality gates**
-   - Deterministic checks that run fast (structure checks, schema checks, unit tests, basic data sanity).
+6. **Provenance manifests**
+   - Every externally-derived artifact (data pull, instance set, experiment run) must have a manifest:
+     - source/input identifiers
+     - timestamp (UTC)
+     - command used
+     - file list + hashes (sha256)
+     - software environment fingerprint (version info)
+
+7. **Quality gates**
+   - Deterministic checks that run fast (structure checks, contract checks, unit tests, basic sanity).
+
+### Gate layers (recommended)
+1) Structure gates: required files/dirs exist
+2) Contract gates: protocol/model spec complete (no TODO stubs)
+3) Task hygiene gates: valid task states/required sections
+4) Repro gates: can rebuild key artifacts deterministically
+5) Scientific sanity gates: domain-specific invariants (identities, constraints feasibility, baseline replication)
 
 ---
 
 ## 4) Reusable repo skeleton (minimum viable)
 
-This repo uses the following coordination skeleton (copy to new projects as-is and customize the protocol + workstreams):
+Recommended universal skeleton (copy to new projects as-is and then customize contracts + workstreams):
 
 ```text
-.orchestrator/
-  backlog/          # tasks not started
-  active/           # tasks in progress
-  blocked/          # blocked tasks (must include @human note)
-  done/             # completed tasks
-  handoff/          # cross-task notes
-  templates/        # task + handoff templates
-  workstreams.md    # ownership boundaries
-docs/
-  protocol.md       # protocol lock (definitions)
-scripts/
-  quality_gates.py  # fast deterministic checks
-Makefile            # `make gate`
-AGENTS.md           # global coordination contract
+.orchestrator/              # coordination control plane
+docs/                       # narrative docs, protocol overview
+contracts/                  # canonical specs (schemas/model specs/instances/experiments)
+scripts/                    # gates + automation
+src/                        # code (etl/analysis/model/validation)
+reports/                    # figures/tables/paper/deck/status
+AGENTS.md
+Makefile
+README.md
 ```
 
 Recommended control-plane mode (bootstrapping): **PR-synchronized**
 - Workers operate in isolated branches/worktrees.
 - Status updates become visible when branches are pushed/PR’d (not real-time).
 
-If you want deeper modularity for larger projects, expand to:
-- `src/etl/`, `src/analysis/`, `src/validation/`
-- `data/raw/` (append-only snapshots), `data/processed/`, `data/schemas/`
-- `reports/` (figures, paper, deck)
+Mode-specific expansions:
+
+- Empirical-heavy:
+  - `src/etl/`, `data/raw/`, `data/processed/`, `contracts/schemas/`
+- Modeling-heavy:
+  - `src/model/`, `contracts/model_spec.*`, `contracts/instances/`, `contracts/experiments/`
+- Hybrid:
+  - both, plus an explicit link contract that maps data → model parameters
+
+---
+
+## 4.5) Universal contract set (standardize across projects)
+
+To keep projects reusable, standardize a small set of canonical contract files that everything else depends on.
+
+### 4.5.1 `contracts/project.yaml` (always)
+
+Contains research mode and high-level invariants:
+
+```yaml
+project_name: "..."
+mode: empirical | modeling | hybrid
+primary_question: "..."
+primary_outputs:
+  - "reports/..."
+risk_policy:
+  stop_conditions:
+    - "definition ambiguity"
+    - "missing credentials"
+    - "validation failure beyond tolerance"
+```
+
+### 4.5.2 Empirical contracts
+
+- `contracts/schemas/`
+  - `contracts/schemas/panel_schema.yaml`
+  - `contracts/schemas/raw_<source>_schema.yaml`
+- `contracts/data_dictionary.md`
+
+### 4.5.3 Modeling contracts
+
+- `contracts/model_spec.*` (model spec lock)
+- `contracts/instances/` (benchmark instances / instance sets)
+- `contracts/experiments/` (experiment specs: parameters, seeds, solver config)
+
+Model spec template:
+
+```md
+# Model Spec Lock
+
+## Objective / question
+## Notation and sets
+## Decision variables
+## Constraints
+## Objective function
+## Assumptions (explicit)
+## Baselines / benchmark cases
+## Solver / method
+- exact / heuristic / simulation / proof
+- environment and versions
+## Outputs (required)
+- artifact paths
+- evaluation metrics
+```
+
+---
+
+## 4.6) Nested `AGENTS.md` placement rules (for reuse)
+
+Always add these nested agent contracts:
+
+1. `.orchestrator/AGENTS.md` — control plane discipline
+2. `contracts/AGENTS.md` — “don’t casually edit the spec”
+3. `scripts/AGENTS.md` — “gates must be deterministic & fast”
+4. `src/AGENTS.md` — code standards and module boundaries
+5. `reports/AGENTS.md` — output naming, reproducibility, and “no hand-edits”
+
+Add these depending on project mode:
+
+- Empirical: `src/etl/AGENTS.md`, `data/AGENTS.md`
+- Modeling: `src/model/AGENTS.md`, `contracts/instances/AGENTS.md`, `contracts/experiments/AGENTS.md`
 
 ---
 
@@ -171,11 +272,21 @@ To run unattended you need:
 **Deliverables**
 - `.orchestrator/` lifecycle folders + templates
 - `AGENTS.md` rules
-- `docs/protocol.md` protocol lock
+- `contracts/` directory with templates (canonical specs live here)
+- `reports/` directory baseline (predictable, reviewable outputs)
+- Provenance manifest conventions (every “result” has a manifest + repro command)
+- Nested `AGENTS.md` files in sensitive directories (control plane, contracts, scripts, src, reports)
+- `docs/protocol.md` protocol lock (or `contracts/model_spec.*` for modeling projects)
 - `make gate` runs fast and deterministically
 
 **Success**
 - A new agent can start a task without extra human context.
+
+**Stage 0 exit gate (universal)**
+- `make gate` passes
+- Contracts exist and are non-stub (protocol/model spec complete enough to start work)
+- Workstreams filled with ownership boundaries
+- At least 2 example tasks exist with success criteria and allowed paths
 
 ### Stage 1 — Parallel manual swarm (2–6 workers)
 
@@ -186,6 +297,12 @@ To run unattended you need:
 
 **Success**
 - Multiple tasks progress in parallel without file conflicts or definition drift.
+
+**Stage 1 exit gate**
+- At least 3 tasks completed in parallel without:
+  - definition changes midstream
+  - cross-workstream file edits
+- Judge can merge using only gates + task criteria (no detective work)
 
 ### Stage 2 — Semi-automation (“job controller” scripts)
 
@@ -198,6 +315,12 @@ To run unattended you need:
 
 **Success**
 - Overnight progress without manual task launching.
+
+**Stage 2 exit gate**
+- One overnight run produces:
+  - ≥2 completed tasks
+  - a status report under `reports/status/`
+  - blocked tasks with minimal human questions
 
 ### Stage 3 — Continuous supervisor loop
 
@@ -226,17 +349,37 @@ To run unattended you need:
 ## 9) New-project bootstrap checklist (copy/paste)
 
 1. Copy the skeleton:
-   - `AGENTS.md`, `.orchestrator/`, `docs/protocol.md`, `scripts/quality_gates.py`, `Makefile`
+   - `AGENTS.md`, `.orchestrator/`, `contracts/`, `docs/`, `scripts/quality_gates.py`, `src/`, `reports/`, `Makefile`
 2. Customize:
-   - Protocol lock (definitions, regimes, inclusion criteria, tolerances)
+   - Set **Research mode** in `contracts/project.yaml` (empirical | modeling | hybrid)
+   - Contracts & locks:
+     - Empirical/hybrid: `docs/protocol.md`
+     - Modeling/hybrid: `contracts/model_spec.*`
    - Workstreams (`.orchestrator/workstreams.md`)
-3. Create Phase 0 tasks:
-   - Protocol lock
-   - Data dictionary / schemas
+3. Create 3 Phase 0 tasks:
+   - Contract lock (protocol/model spec)
    - Quality gates expansion
+   - First deliverable (empirical: first ETL; modeling: baseline solver on benchmark instances)
 4. Run:
    - `make gate`
 5. Start small:
    - 1 planner + 2 workers + 1 judge
 6. Only then scale:
    - add more workers and increase parallel tasks
+
+---
+
+## 10) Universal bootstrap runbook (30 minutes)
+
+1. Copy the skeleton into a new repo.
+2. Fill `contracts/project.yaml` (mode, primary question, outputs, stop conditions).
+3. Fill the primary lock:
+   - Empirical: `docs/protocol.md`
+   - Modeling: `contracts/model_spec.*`
+4. Fill `.orchestrator/workstreams.md` with hard ownership boundaries.
+5. Create three tasks in `.orchestrator/backlog/`:
+   - contract lock
+   - gate expansion
+   - first deliverable
+6. Run `make gate`.
+7. Start with: 1 Planner + 2 Workers + 1 Judge.
