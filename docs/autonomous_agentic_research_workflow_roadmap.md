@@ -4,6 +4,8 @@ This document defines a reusable, file-based workflow for running multiple AI co
 
 It is designed to work with **subscription CLIs/IDEs** (e.g., Claude Code, Codex CLI) and does **not** assume API-based agent frameworks.
 
+For the concrete “how to run this swarm” commands (worktrees, headless runs, fresh starts), see `docs/runbook_swarm.md`.
+
 ---
 
 ## 1) Design goals
@@ -98,6 +100,7 @@ Everything important must live on disk in version control:
      - command used
      - file list + hashes (sha256)
      - software environment fingerprint (version info)
+   - Helper: `python scripts/make_raw_manifest.py <source> <snapshot_dir> <command...>`
 
 7. **Results catalog**
    - A single index of key outputs and how to reproduce them.
@@ -254,12 +257,28 @@ If a task is larger, split it until it becomes interface-driven.
 
 ### Task template
 
-Use `.orchestrator/templates/task_template.md`.
+Use a task template under `.orchestrator/templates/`:
+
+- Generic (tight-by-default): `.orchestrator/templates/task_template.md`
+- W0 protocol/contracts: `.orchestrator/templates/task_template_w0_protocol.md`
+- W1/W2 ETL: `.orchestrator/templates/task_template_w1_w2_etl.md`
+
+Copyable examples live under `.orchestrator/templates/examples/`.
+
+The generic template is intentionally conservative (it disallows protocol/contracts/registry edits by default). Use the workstream-specific templates (or explicitly override) when needed.
 
 **Non-negotiable sections:**
+- `## Context` (why this exists; how it ties to contracts/protocol)
+- `## Inputs` (what it reads; links/paths)
 - `## Outputs` (paths are your integration contract)
 - `## Success Criteria` (what “done” means)
 - `## Status` and `## Notes / Decisions` (the only sections workers edit)
+
+**YAML frontmatter is required** (for automation and validation). List-like keys must be lists:
+`dependencies`, `allowed_paths`, `disallowed_paths`, `outputs`, `gates`, `stop_conditions`.
+
+**Allowed paths semantics (important):**
+`allowed_paths` governs *project artifacts*. Editing the assigned task file (in allowed sections) and writing a handoff note in `.orchestrator/handoff/` are always permitted.
 
 ---
 
@@ -277,7 +296,7 @@ Choose one (in increasing robustness):
 ### Integration mechanism (preferred)
 
 - Every task integrates via PR (or at least a branch merge after judge checks).
-- The Judge runs `make gate` (and any task-specific commands) before merging.
+- The Judge runs `make gate` and `make test` (and any task-specific commands) before merging.
 
 ---
 
@@ -303,6 +322,7 @@ To run unattended you need:
 - `contracts/` directory with templates (canonical specs live here)
 - `reports/` directory baseline (predictable, reviewable outputs)
 - Provenance manifest conventions (every “result” has a manifest + repro command)
+- A minimal test harness: `tests/` + `make test` (fast, deterministic; runs on golden samples only)
 - Pinned environment spec (choose one per project):
   - Python: `pyproject.toml` + lock (`uv.lock`/`poetry.lock`) or `requirements.txt` (prefer hashes)
   - Modeling with solvers: solver versions pinned and recorded
@@ -312,6 +332,8 @@ To run unattended you need:
   - Modeling: `contracts/instances/benchmark_small/` (tiny tracked instances)
 - Nested `AGENTS.md` files in sensitive directories (control plane, contracts, scripts, src, reports)
 - `docs/protocol.md` protocol lock (or `contracts/model_spec.*` for modeling projects)
+- CI merge firewall: `.github/workflows/ci.yml` runs `make gate` and `make test`
+- Optional GitHub automation (disabled by default) lives under `docs/optional/`
 - `make gate` runs fast and deterministically
 
 **Success**
@@ -319,6 +341,7 @@ To run unattended you need:
 
 **Stage 0 exit gate (universal)**
 - `make gate` passes
+- `make test` passes
 - Contracts exist and are non-stub (protocol/model spec complete enough to start work)
 - Workstreams filled with ownership boundaries
 - At least 2 example tasks exist with success criteria and allowed paths
@@ -329,7 +352,7 @@ To run unattended you need:
 - Workstreams filled in `.orchestrator/workstreams.md`
 - Worktrees/branches per task
 - Judge process (human or agent) running gates and merging
-- Optional but recommended: CI runs `make gate` (and lightweight tests if present) on PRs
+- Optional but recommended: CI runs `make gate` and `make test` on PRs
 
 **Success**
 - Multiple tasks progress in parallel without file conflicts or definition drift.
@@ -351,6 +374,8 @@ To run unattended you need:
 
 **Task metadata requirement (for automation)**
 - Every task file must include **YAML frontmatter** (machine-readable metadata) before the Markdown body.
+- For automation safety, list fields must be lists:
+  `dependencies`, `allowed_paths`, `disallowed_paths`, `outputs`, `gates`, `stop_conditions`.
 
 **Dependency/readiness model (for automation)**
 
@@ -407,7 +432,7 @@ If a dependency or required contract is missing:
 ## 9) New-project bootstrap checklist (copy/paste)
 
 1. Copy the skeleton:
-   - `AGENTS.md`, `.orchestrator/`, `contracts/`, `docs/`, `scripts/quality_gates.py`, `src/`, `reports/`, `Makefile`
+   - `AGENTS.md`, `.orchestrator/`, `contracts/`, `docs/`, `scripts/`, `src/`, `reports/`, `tests/`, `Makefile`, `.github/`
 2. Customize:
    - Set **Research mode** in `contracts/project.yaml` (empirical | modeling | hybrid)
    - Contracts & locks:
@@ -420,10 +445,13 @@ If a dependency or required contract is missing:
    - First deliverable (empirical: first ETL; modeling: baseline solver on benchmark instances)
 4. Run:
    - `make gate`
+   - `make test`
 5. Start small:
    - 1 planner + 2 workers + 1 judge
 6. Only then scale:
    - add more workers and increase parallel tasks
+7. Follow the operational runbook:
+   - `docs/runbook_swarm.md`
 
 ---
 
@@ -439,5 +467,5 @@ If a dependency or required contract is missing:
    - contract lock
    - gate expansion
    - first deliverable
-6. Run `make gate`.
-7. Start with: 1 Planner + 2 Workers + 1 Judge.
+6. Run `make gate` and `make test`.
+7. Start with: 1 Planner + 2 Workers + 1 Judge (follow `docs/runbook_swarm.md`).
