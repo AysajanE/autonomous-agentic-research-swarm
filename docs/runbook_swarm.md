@@ -54,7 +54,13 @@ claude -p "Role: Worker. Task: .orchestrator/active/${TASK_ID}__*.md. Follow AGE
 **Codex CLI (example; adjust to your installed version):**
 
 ```bash
-codex -p "Role: Worker. Task: .orchestrator/active/${TASK_ID}__*.md. Follow AGENTS.md."
+# Non-interactive worker run (matches the style used by scripts/swarm.py):
+codex -a on-request exec --sandbox workspace-write -C . \
+  "Role: Worker. Task: .orchestrator/active/${TASK_ID}__*.md. Follow AGENTS.md."
+
+# Fully unattended (no approval prompts; external sandbox only):
+codex -a never exec --sandbox workspace-write -C . \
+  "Role: Worker. Task: .orchestrator/active/${TASK_ID}__*.md. Follow AGENTS.md."
 ```
 
 ## 4) PR-synchronized status cadence (recommended)

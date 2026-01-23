@@ -9,6 +9,7 @@ This file is the canonical reference for tables/fields/units/keys used in the pr
 - Purpose: Analysis-ready daily rollup panel used to compute Settlement Take Rate (STR).
 - Primary key: (`date_utc`, `rollup_id`)
 - Grain: daily × rollup (UTC)
+- Row inclusion rule: rows exist **iff** both `l2_fees_eth` and `rent_paid_eth` are present (missingness is represented by omitting the row, not by nulls).
 - Source(s):
   - Primary denominator (`l2_fees_eth`): growthepie (ETH-native series)
   - Vendor series (`rent_paid_eth`, `profit_eth`): growthepie (secondary; on-chain may supersede)

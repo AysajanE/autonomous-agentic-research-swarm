@@ -19,6 +19,7 @@ Definitions:
 - Aggregation: the sum is over the **in-scope rollup universe** for day *t*.
 - Denominator rule: if `Σ_i L2Fees_{i,t} == 0`, then `STR_t = NaN` (undefined; do not coerce to 0).
 - Missingness rule (panel rows): if either `L2Fees_{i,t}` or `RentPaid_{i,t}` is missing for a rollup-day, exclude that rollup-day from both numerator and denominator sums for ecosystem-level aggregates.
+- Panel construction rule: emit a `daily_rollup_panel` row **iff** both `l2_fees_eth` and `rent_paid_eth` are present (encode missingness via row omission, not nulls).
 
 ## Rollup inclusion criteria
 

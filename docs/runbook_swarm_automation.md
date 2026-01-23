@@ -140,6 +140,10 @@ Notes:
 - `--unattended` disables approval prompts (Codex uses `-a never`; Claude uses `--permission-mode bypassPermissions`).
 - For ETL tasks (W1/W2), the runner enables network access inside the Codex workspace-write sandbox via a config override.
 - Timeouts are drift control: if a worker times out, the task stays `State: active` with a note.
+- Supervisor freshness: in unattended mode the supervisor hard-syncs its checkout to `origin/<base-branch>` each tick. Don’t do manual work in the supervisor checkout; use separate worktrees/branches.
+- Recovery loop: in unattended mode the supervisor will periodically re-run a bounded “repair” pass for open task PRs that are failing checks or merge-conflicting and haven’t changed recently.
+  - Defaults: `--repair-after-seconds 14400` (4h), `--max-repairs-per-tick 1`
+  - Disable: set `--max-repairs-per-tick 0`
 
 ## 2) Start the Planner sweep loop (recommended; keeps lifecycle folders aligned)
 

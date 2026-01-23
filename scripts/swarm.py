@@ -540,6 +540,60 @@ def ensure_worktree(*, task: Task, worktree_parent: Path, base_ref: str) -> tupl
     return wt_path, branch
 
 
+def _find_worktree_path_for_branch(branch: str) -> Path | None:
+    try:
+        cp = _run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=_repo_root(),
+            capture=True,
+            check=True,
+        )
+        current_path: Path | None = None
+        current_branch: str | None = None
+        for line in (cp.stdout or "").splitlines():
+            if line.startswith("worktree "):
+                current_path = Path(line.split(" ", 1)[1].strip())
+                current_branch = None
+                continue
+            if line.startswith("branch "):
+                ref = line.split(" ", 1)[1].strip()
+                if ref.startswith("refs/heads/"):
+                    current_branch = ref.removeprefix("refs/heads/")
+            if current_path is not None and current_branch == branch:
+                return current_path
+    except Exception:
+        return None
+    return None
+
+
+def ensure_worktree_for_branch(*, branch: str, task_id: str, worktree_parent: Path, remote: str) -> Path:
+    """Get or create a worktree for an existing task branch (used for repair runs)."""
+    existing = _find_worktree_path_for_branch(branch)
+    if existing is not None:
+        return existing
+
+    wt_path = worktree_parent / f"wt-{task_id}"
+    if wt_path.exists():
+        raise SystemExit(f"Worktree path already exists but is not registered for branch {branch}: {wt_path}")
+
+    # Ensure remote refs are up-to-date for the branch.
+    _run(["git", "fetch", remote], cwd=_repo_root(), check=True)
+
+    branch_exists = False
+    try:
+        _run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=_repo_root())
+        branch_exists = True
+    except subprocess.CalledProcessError:
+        branch_exists = False
+
+    if branch_exists:
+        _run(["git", "worktree", "add", str(wt_path), branch], cwd=_repo_root())
+    else:
+        _run(["git", "worktree", "add", str(wt_path), "-b", branch, f"{remote}/{branch}"], cwd=_repo_root())
+
+    return wt_path
+
+
 def _tmux(*args: str, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess[str]:
     tmux = _which_or_none("tmux")
     if tmux is None:
@@ -587,19 +641,22 @@ def _git_has_changes(cwd: Path) -> bool:
     return bool((cp.stdout or "").strip())
 
 
-def _git_changed_paths(cwd: Path) -> list[str]:
-    cp = _run(["git", "status", "--porcelain"], cwd=cwd, capture=True, check=True)
-    paths: list[str] = []
+def _git_status_entries(cwd: Path) -> list[dict[str, str]]:
+    cp = _run(["git", "status", "--porcelain=v1"], cwd=cwd, capture=True, check=True)
+    entries: list[dict[str, str]] = []
     for line in (cp.stdout or "").splitlines():
         if len(line) < 4:
             continue
-        path = line[3:].strip()
-        if " -> " in path:
-            # rename; take dest path
-            path = path.split(" -> ", 1)[1].strip()
-        if path:
-            paths.append(path)
-    return sorted(set(paths))
+        xy = line[:2]
+        path_part = line[3:].strip()
+        old_path = ""
+        new_path = path_part
+        if " -> " in path_part:
+            old_path, new_path = path_part.split(" -> ", 1)
+            old_path = old_path.strip()
+            new_path = new_path.strip()
+        entries.append({"xy": xy, "path": new_path, "old_path": old_path})
+    return entries
 
 
 def _path_is_allowed(
@@ -611,11 +668,15 @@ def _path_is_allowed(
 ) -> tuple[bool, str | None]:
     norm = path.replace("\\", "/")
 
-    # Always allow task file edits and handoff notes.
-    if norm in task_file_paths:
-        return True, None
-    if norm.startswith(".orchestrator/handoff/"):
-        return True, None
+    # Enforce control-plane governance:
+    # - allow only the current task file, and handoff notes
+    # - disallow everything else under `.orchestrator/`
+    if norm.startswith(".orchestrator/"):
+        if norm in task_file_paths:
+            return True, None
+        if norm.startswith(".orchestrator/handoff/"):
+            return True, None
+        return False, "orchestrator_write_forbidden"
 
     for bad in disallowed_paths:
         if bad and norm.startswith(bad):
@@ -690,6 +751,15 @@ def _require_unattended_ack() -> None:
         "Refusing to run with --unattended without SWARM_UNATTENDED_I_UNDERSTAND=1 "
         "(safety interlock; run only in an external sandbox with no secrets)."
     )
+
+
+def _supervisor_sync_to_remote_base(*, repo: Path, remote: str, base_branch: str) -> None:
+    """Hard-sync the supervisor checkout to the remote base branch.
+
+    This prevents "local main drift" in long-running unattended loops.
+    """
+    _run(["git", "fetch", remote], cwd=repo, check=True)
+    _run(["git", "checkout", "-B", base_branch, f"{remote}/{base_branch}"], cwd=repo, check=True)
 
 
 def _codex_exec_cmd(
@@ -794,6 +864,213 @@ def _maybe_auto_merge(
     args.append("--squash" if squash else "--merge")
     args.extend(["--delete-branch", branch])
     _run(args, cwd=cwd, check=False)
+
+
+def _parse_iso_datetime(value: str) -> _dt.datetime | None:
+    try:
+        v = value.strip()
+        if v.endswith("Z"):
+            v = v[:-1] + "+00:00"
+        dt = _dt.datetime.fromisoformat(v)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_dt.timezone.utc)
+        return dt.astimezone(_dt.timezone.utc)
+    except Exception:
+        return None
+
+
+def _summarize_pr_checks(pr: dict[str, Any]) -> tuple[str, list[str]]:
+    """Return (status, failing_check_names)."""
+    rollup = pr.get("statusCheckRollup")
+    if not isinstance(rollup, list):
+        return "unknown", []
+
+    failing: list[str] = []
+    states: list[str] = []
+    for item in rollup:
+        if not isinstance(item, dict):
+            continue
+        state = item.get("state") or item.get("conclusion") or ""
+        if isinstance(state, str):
+            states.append(state.upper())
+        name = item.get("name")
+        if not isinstance(name, str):
+            name = "unknown"
+
+    failing_states = {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT"}
+    pending_states = {"PENDING", "IN_PROGRESS", "EXPECTED"}
+    success_states = {"SUCCESS", "SKIPPED", "NEUTRAL"}
+
+    for item in rollup:
+        if not isinstance(item, dict):
+            continue
+        state = item.get("state") or item.get("conclusion") or ""
+        if not isinstance(state, str):
+            continue
+        s = state.upper()
+        if s in failing_states:
+            name = item.get("name")
+            failing.append(name if isinstance(name, str) else "unknown")
+
+    if any(s in failing_states for s in states):
+        return "failing", sorted(set(failing))
+    if any(s in pending_states for s in states):
+        return "pending", []
+    if states and all(s in success_states for s in states):
+        return "success", []
+    return "unknown", []
+
+
+def _maybe_spawn_repairs(args: argparse.Namespace, repo: Path) -> None:
+    """Best-effort recovery loop for stuck/failing task PRs.
+
+    Crude but effective: if an open task PR is failing checks or merge-conflicting and has not
+    changed recently, run a bounded "repair" worker pass in the PR branch worktree.
+    """
+    if not args.unattended:
+        return
+    if args.max_repairs_per_tick <= 0:
+        return
+    gh = _which_or_none("gh")
+    if gh is None:
+        return
+
+    try:
+        cp = _run(
+            [
+                gh,
+                "pr",
+                "list",
+                "--state",
+                "open",
+                "--base",
+                args.base_branch,
+                "--json",
+                "number,headRefName,url,updatedAt,mergeable,statusCheckRollup",
+            ],
+            capture=True,
+            check=True,
+            cwd=repo,
+        )
+        prs = json.loads(cp.stdout or "[]")
+    except Exception:
+        return
+
+    if not isinstance(prs, list):
+        return
+
+    now = _dt.datetime.now(tz=_dt.timezone.utc)
+    candidates: list[dict[str, Any]] = []
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        head = pr.get("headRefName")
+        if not isinstance(head, str):
+            continue
+        task_id = _parse_task_id_from_branch(head)
+        if task_id is None:
+            continue
+        updated_at_raw = pr.get("updatedAt")
+        updated_at = _parse_iso_datetime(updated_at_raw) if isinstance(updated_at_raw, str) else None
+        if updated_at is None:
+            continue
+        age_seconds = (now - updated_at).total_seconds()
+        if age_seconds < float(args.repair_after_seconds):
+            continue
+
+        checks_status, failing_checks = _summarize_pr_checks(pr)
+        mergeable = pr.get("mergeable")
+        mergeable_s = mergeable if isinstance(mergeable, str) else "unknown"
+
+        needs_repair = checks_status == "failing" or mergeable_s.upper() == "CONFLICTING"
+        if not needs_repair:
+            continue
+
+        candidates.append(
+            {
+                "task_id": task_id,
+                "branch": head,
+                "pr_number": pr.get("number"),
+                "url": pr.get("url"),
+                "checks_status": checks_status,
+                "failing_checks": failing_checks,
+                "mergeable": mergeable_s,
+                "age_seconds": age_seconds,
+            }
+        )
+
+    candidates_sorted = sorted(candidates, key=lambda x: float(x.get("age_seconds", 0.0)), reverse=True)
+    if not candidates_sorted:
+        return
+
+    wt_parent = Path(args.worktree_parent).expanduser().resolve() if args.worktree_parent else repo.parent
+    wt_parent.mkdir(parents=True, exist_ok=True)
+
+    repairs_started = 0
+    for cand in candidates_sorted:
+        if repairs_started >= int(args.max_repairs_per_tick):
+            break
+        task_id = str(cand["task_id"])
+        branch = str(cand["branch"])
+        try:
+            wt_path = ensure_worktree_for_branch(
+                branch=branch,
+                task_id=task_id,
+                worktree_parent=wt_parent,
+                remote=args.remote,
+            )
+        except Exception:
+            continue
+
+        reason = (
+            f"Auto-repair: PR {cand.get('url')} "
+            f"(checks={cand.get('checks_status')}, mergeable={cand.get('mergeable')}, "
+            f"failing_checks={','.join(cand.get('failing_checks') or [])})"
+        )
+
+        run_cmd = [
+            sys.executable,
+            "scripts/swarm.py",
+            "run-task",
+            "--task-id",
+            task_id,
+            "--base-branch",
+            args.base_branch,
+            "--remote",
+            args.remote,
+            "--codex-sandbox",
+            args.codex_sandbox,
+            "--final-state",
+            args.final_state,
+            "--repair-context",
+            reason,
+        ]
+        if args.unattended:
+            run_cmd.append("--unattended")
+        if args.max_worker_seconds:
+            run_cmd.extend(["--max-worker-seconds", str(args.max_worker_seconds)])
+        if args.max_review_seconds:
+            run_cmd.extend(["--max-review-seconds", str(args.max_review_seconds)])
+        if args.codex_model:
+            run_cmd.extend(["--codex-model", args.codex_model])
+        if args.create_pr:
+            run_cmd.append("--create-pr")
+        if args.auto_merge:
+            run_cmd.append("--auto-merge")
+
+        if args.runner == "tmux":
+            tmux_ensure_session(args.tmux_session, repo)
+            window_name = f"repair-{task_id}-{_utc_timestamp_compact()[9:15]}"
+            tmux_spawn_task_window(
+                session=args.tmux_session,
+                window_name=window_name,
+                workdir=wt_path,
+                command=run_cmd,
+            )
+        else:
+            _run(run_cmd, cwd=wt_path, check=False)
+
+        repairs_started += 1
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -953,6 +1230,10 @@ def cmd_tmux_start(args: argparse.Namespace) -> int:
         loop_cmd.extend(["--max-worker-seconds", str(args.max_worker_seconds)])
     if args.max_review_seconds:
         loop_cmd.extend(["--max-review-seconds", str(args.max_review_seconds)])
+    if args.repair_after_seconds:
+        loop_cmd.extend(["--repair-after-seconds", str(args.repair_after_seconds)])
+    if args.max_repairs_per_tick is not None:
+        loop_cmd.extend(["--max-repairs-per-tick", str(args.max_repairs_per_tick)])
     if args.codex_model:
         loop_cmd.extend(["--codex-model", args.codex_model])
     if args.claude_model:
@@ -982,11 +1263,14 @@ def cmd_loop(args: argparse.Namespace) -> int:
     print(f"Swarm loop started (interval={interval}s). Repo: {repo}")
     while True:
         try:
-            # Keep local view of remote fresh so claimed-task detection is accurate.
-            _run(["git", "fetch", args.remote], cwd=repo, check=False)
+            _supervisor_sync_to_remote_base(repo=repo, remote=args.remote, base_branch=args.base_branch)
             cmd_tick(args)
+            _maybe_spawn_repairs(args, repo)
         except Exception as exc:
             print(f"[loop] tick failed: {exc}", file=sys.stderr)
+            if args.unattended:
+                # Fail loudly in unattended mode; persistent sync/auth failures otherwise cause silent stalls.
+                return 1
         try:
             time_to_sleep = interval
             # Sleep in small increments so Ctrl-C works responsively even in tmux.
@@ -1041,6 +1325,15 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             "Respect allowed/disallowed paths in the task frontmatter.",
             "Workers: edit ONLY the task file sections `## Status` and `## Notes / Decisions`.",
             "Run the task gates/commands before declaring success.",
+            *(["Repair context: " + str(args.repair_context)] if args.repair_context else []),
+            *(
+                [
+                    "This is an automated repair pass. Focus on making the PR mergeable and checks pass.",
+                    "Do not broaden scope; make the smallest change that fixes the failure.",
+                ]
+                if args.repair_context
+                else []
+            ),
         ]
     )
     worker_cmd = _codex_exec_cmd(
@@ -1079,10 +1372,22 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         if cp.returncode != 0:
             gate_ok = False
 
-    changed = _git_changed_paths(repo)
-    task_paths = {f".orchestrator/{d}/{task_file.name}" for d in ["active", "backlog", "ready_for_review", "blocked", "done"]}
+    status_entries = _git_status_entries(repo)
+    changed = sorted({e["path"] for e in status_entries if e.get("path")})
+    task_rel = task_file.relative_to(repo).as_posix()
+    task_paths = {task_rel}
     ownership_ok = True
     ownership_failures: list[dict[str, str]] = []
+    for entry in status_entries:
+        xy = entry.get("xy", "")
+        p = entry.get("path", "")
+        old = entry.get("old_path", "")
+        if old == task_rel and p != task_rel:
+            ownership_ok = False
+            ownership_failures.append({"path": f"{old} -> {p}", "reason": "task_file_moved"})
+        if ("D" in xy) and p == task_rel:
+            ownership_ok = False
+            ownership_failures.append({"path": p, "reason": "task_file_deleted"})
     for p in changed:
         ok, reason = _path_is_allowed(
             path=p,
@@ -1137,6 +1442,8 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         if not ownership_ok:
             why.append("path_ownership_violation")
         note = f"@human Judge blocked: {', '.join(why)}. Review log: {review_path.as_posix()}"
+    if args.repair_context:
+        note = f"{note} Repair context: {args.repair_context}"
 
     # Update task status (do NOT move file; Planner action is separate via sweep_tasks.py)
     _update_task_status_and_notes(task_path=task_file, new_state=new_state, note_line=note)
@@ -1208,6 +1515,8 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--unattended", action="store_true")
     tick.add_argument("--max-worker-seconds", type=int, default=0)
     tick.add_argument("--max-review-seconds", type=int, default=0)
+    tick.add_argument("--repair-after-seconds", type=int, default=14400)
+    tick.add_argument("--max-repairs-per-tick", type=int, default=1)
     tick.add_argument("--create-pr", action="store_true")
     tick.add_argument("--auto-merge", action="store_true")
     tick.add_argument("--final-state", choices=["ready_for_review", "done"], default="ready_for_review")
@@ -1229,6 +1538,8 @@ def build_parser() -> argparse.ArgumentParser:
     loop.add_argument("--unattended", action="store_true")
     loop.add_argument("--max-worker-seconds", type=int, default=0)
     loop.add_argument("--max-review-seconds", type=int, default=0)
+    loop.add_argument("--repair-after-seconds", type=int, default=14400)
+    loop.add_argument("--max-repairs-per-tick", type=int, default=1)
     loop.add_argument("--create-pr", action="store_true")
     loop.add_argument("--auto-merge", action="store_true")
     loop.add_argument("--final-state", choices=["ready_for_review", "done"], default="ready_for_review")
@@ -1250,6 +1561,8 @@ def build_parser() -> argparse.ArgumentParser:
     tmux_start.add_argument("--unattended", action="store_true")
     tmux_start.add_argument("--max-worker-seconds", type=int, default=0)
     tmux_start.add_argument("--max-review-seconds", type=int, default=0)
+    tmux_start.add_argument("--repair-after-seconds", type=int, default=14400)
+    tmux_start.add_argument("--max-repairs-per-tick", type=int, default=1)
     tmux_start.add_argument("--create-pr", action="store_true")
     tmux_start.add_argument("--auto-merge", action="store_true")
     tmux_start.add_argument("--final-state", choices=["ready_for_review", "done"], default="ready_for_review")
@@ -1264,6 +1577,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_task.add_argument("--unattended", action="store_true")
     run_task.add_argument("--max-worker-seconds", type=int, default=0, help="If >0, timeout Codex worker execution")
     run_task.add_argument("--max-review-seconds", type=int, default=0, help="If >0, timeout optional Codex review")
+    run_task.add_argument("--repair-context", default=None, help="Optional context string for automated repair passes")
     run_task.add_argument("--create-pr", action="store_true")
     run_task.add_argument("--auto-merge", action="store_true")
     run_task.add_argument("--final-state", choices=["ready_for_review", "done"], default="ready_for_review")
