@@ -13,4 +13,4 @@ Naming convention:
 - `data/raw_manifest/<source>_<YYYY-MM-DD>.json`
 
 Helper:
-- `python scripts/make_raw_manifest.py <source> <snapshot_dir> <command>`
+- `python scripts/make_raw_manifest.py <source> <snapshot_dir> --as-of <YYYY-MM-DD> -- <command...>`

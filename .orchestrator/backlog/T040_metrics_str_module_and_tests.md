@@ -7,8 +7,8 @@ priority: high
 dependencies:
   - "T030"
 allowed_paths:
-  - "src/analysis/"
-  - "tests/"
+  - "src/analysis/metrics_str.py"
+  - "tests/test_metrics_str.py"
 disallowed_paths:
   - "docs/protocol.md"
   - "contracts/"
@@ -37,7 +37,7 @@ This task focuses on **deterministic metric construction** using only the commit
 ## Inputs
 
 - `docs/protocol.md` (read-only): STR definition + ETH-native priority
-- `contracts/schemas/panel_schema.yaml` (read-only): required field names/units
+- `contracts/schemas/panel_schema_str_v1.yaml` (read-only): required field names/units
 - `data/samples/growthepie/vendor_daily_rollup_panel_sample.csv` (committed)
 
 ## Outputs

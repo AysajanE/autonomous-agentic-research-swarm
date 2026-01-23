@@ -14,6 +14,9 @@ import re
 import platform
 import sys
 import json
+import subprocess
+import csv
+import os
 
 
 @dataclass
@@ -143,6 +146,7 @@ def gate_repo_structure() -> GateResult:
         Path("data"),
         Path("data/AGENTS.md"),
         Path("data/samples"),
+        Path("data/processed_manifest"),
         Path("reports"),
         Path("reports/AGENTS.md"),
         Path("reports/catalog.yaml"),
@@ -151,6 +155,10 @@ def gate_repo_structure() -> GateResult:
         Path("src"),
         Path("src/AGENTS.md"),
         Path("tests"),
+        Path("registry"),
+        Path("registry/AGENTS.md"),
+        Path("registry/CHANGELOG.md"),
+        Path("registry/rollup_registry_v1.csv"),
     ]
     mode = _parse_project_mode(Path("contracts/project.yaml"))
     if mode in {"empirical", "hybrid"}:
@@ -158,6 +166,8 @@ def gate_repo_structure() -> GateResult:
             [
                 Path("docs/protocol.md"),
                 Path("contracts/schemas/panel_schema.yaml"),
+                Path("contracts/schemas/panel_schema_str_v1.yaml"),
+                Path("contracts/schemas/panel_schema_decomp_v1.yaml"),
             ]
         )
     if mode in {"modeling", "hybrid"}:
@@ -433,6 +443,178 @@ def gate_task_hygiene() -> GateResult:
     return GateResult(ok=(len(failures) == 0), details={"failures": failures})
 
 
+def gate_task_dependencies() -> GateResult:
+    failures: list[str] = []
+    task_dirs = [
+        Path(".orchestrator/backlog"),
+        Path(".orchestrator/active"),
+        Path(".orchestrator/ready_for_review"),
+        Path(".orchestrator/blocked"),
+        Path(".orchestrator/done"),
+    ]
+
+    task_files: list[Path] = []
+    for task_dir in task_dirs:
+        if not task_dir.exists():
+            continue
+        for p in task_dir.glob("*.md"):
+            if p.name == "README.md":
+                continue
+            task_files.append(p)
+
+    id_to_path: dict[str, Path] = {}
+    deps_map: dict[str, list[str]] = {}
+
+    for path in sorted(task_files):
+        fm = _parse_task_frontmatter(_read_text(path)) or {}
+        task_id = fm.get("task_id")
+        deps = fm.get("dependencies")
+        if not isinstance(task_id, str):
+            continue
+        if task_id in id_to_path:
+            failures.append(f"duplicate_task_id:{task_id}:{id_to_path[task_id]}:{path}")
+            continue
+        id_to_path[task_id] = path
+        deps_list: list[str] = []
+        if isinstance(deps, list):
+            deps_list = [d for d in deps if isinstance(d, str)]
+        deps_map[task_id] = deps_list
+
+    # Validate dependency IDs exist and are well-formed.
+    for task_id, deps in deps_map.items():
+        for dep in deps:
+            if not re.fullmatch(r"T\d{3}", dep):
+                failures.append(f"{id_to_path.get(task_id)}:invalid_dependency_id:{dep}")
+                continue
+            if dep == task_id:
+                failures.append(f"{id_to_path.get(task_id)}:self_dependency:{dep}")
+                continue
+            if dep not in id_to_path:
+                failures.append(f"{id_to_path.get(task_id)}:missing_dependency:{dep}")
+
+    # Detect cycles (simple DFS).
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def _dfs(node: str, stack: list[str]) -> None:
+        if node in visited:
+            return
+        if node in visiting:
+            # cycle: include from first occurrence
+            if node in stack:
+                i = stack.index(node)
+                cycle = stack[i:] + [node]
+                failures.append(f"dependency_cycle:{'->'.join(cycle)}")
+            return
+        visiting.add(node)
+        stack.append(node)
+        for dep in deps_map.get(node, []):
+            if dep in id_to_path:
+                _dfs(dep, stack)
+        stack.pop()
+        visiting.remove(node)
+        visited.add(node)
+
+    for task_id in sorted(id_to_path.keys()):
+        _dfs(task_id, [])
+
+    return GateResult(ok=(len(failures) == 0), details={"failures": failures})
+
+
+def _git_changed_paths_against_base(base_ref: str) -> tuple[list[str], str | None]:
+    try:
+        cp2 = subprocess.run(
+            ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        if cp2.returncode != 0:
+            return [], "git_diff_failed"
+        paths = [p.strip() for p in (cp2.stdout or "").splitlines() if p.strip()]
+        return paths, None
+    except Exception:
+        return [], "git_diff_exception"
+
+
+def _resolve_base_ref(candidate_refs: list[str]) -> str | None:
+    for ref in candidate_refs:
+        try:
+            cp = subprocess.run(
+                ["git", "rev-parse", "--verify", ref],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            if cp.returncode == 0:
+                return ref
+        except Exception:
+            continue
+    return None
+
+
+def gate_contract_change_discipline() -> GateResult:
+    """If contracts/protocol change, require a decision log + contract changelog update.
+
+    Best-effort: compares against a base ref if available. Deterministic and offline.
+    """
+    env_base = os.environ.get("GATE_BASE_REF")
+    base_ref = env_base or _resolve_base_ref(["origin/main", "main"])
+    if base_ref is None:
+        return GateResult(ok=True, details={"skipped": True, "reason": "base_ref_missing", "candidates": ["origin/main", "main"]})
+
+    changed, err = _git_changed_paths_against_base(base_ref)
+    if err is not None:
+        return GateResult(ok=True, details={"skipped": True, "reason": err, "base_ref": base_ref})
+
+    def _is_contract_change(p: str) -> bool:
+        if p == "docs/protocol.md":
+            return True
+        if p.startswith("contracts/") and p not in {"contracts/decisions.md", "contracts/CHANGELOG.md"}:
+            return True
+        return False
+
+    contract_changed = any(_is_contract_change(p) for p in changed)
+    if not contract_changed:
+        return GateResult(ok=True, details={"base_ref": base_ref, "contract_changed": False})
+
+    required = {"contracts/decisions.md", "contracts/CHANGELOG.md"}
+    missing = sorted(r for r in required if r not in changed)
+    ok = len(missing) == 0
+    return GateResult(
+        ok=ok,
+        details={
+            "base_ref": base_ref,
+            "contract_changed": True,
+            "missing_required_updates": missing,
+        },
+    )
+
+
+def gate_registry_change_discipline() -> GateResult:
+    """If registry files change, require registry/CHANGELOG.md update (best-effort diff)."""
+    env_base = os.environ.get("GATE_BASE_REF")
+    base_ref = env_base or _resolve_base_ref(["origin/main", "main"])
+    if base_ref is None:
+        return GateResult(ok=True, details={"skipped": True, "reason": "base_ref_missing", "candidates": ["origin/main", "main"]})
+
+    changed, err = _git_changed_paths_against_base(base_ref)
+    if err is not None:
+        return GateResult(ok=True, details={"skipped": True, "reason": err, "base_ref": base_ref})
+
+    registry_changed = any(p.startswith("registry/") and p != "registry/CHANGELOG.md" for p in changed)
+    if not registry_changed:
+        return GateResult(ok=True, details={"base_ref": base_ref, "registry_changed": False})
+
+    ok = "registry/CHANGELOG.md" in changed
+    return GateResult(
+        ok=ok,
+        details={"base_ref": base_ref, "registry_changed": True, "missing_registry_changelog": (not ok)},
+    )
+
+
 def gate_raw_manifest_validity() -> GateResult:
     """Validate any tracked raw provenance manifests under data/raw_manifest/.
 
@@ -495,7 +677,7 @@ def gate_panel_schema_nonempty() -> GateResult:
     if mode == "modeling":
         return GateResult(ok=True, details={"skipped": True, "mode": mode})
 
-    path = Path("contracts/schemas/panel_schema.yaml")
+    path = Path("contracts/schemas/panel_schema_str_v1.yaml")
     if not path.exists():
         return GateResult(ok=False, details={"missing": str(path), "mode": mode})
 
@@ -508,6 +690,43 @@ def gate_panel_schema_nonempty() -> GateResult:
     return GateResult(ok=False, details={"path": str(path), "mode": mode, "failure": "comment_only"})
 
 
+def gate_sample_panel_integrity() -> GateResult:
+    """Best-effort integrity checks for committed golden samples (if present)."""
+    sample = Path("data/samples/growthepie/vendor_daily_rollup_panel_sample.csv")
+    if not sample.exists():
+        return GateResult(ok=True, details={"skipped": True, "reason": "sample_missing"})
+
+    required_cols = {"date_utc", "rollup_id", "l2_fees_eth", "rent_paid_eth"}
+    failures: list[str] = []
+
+    rows: list[dict[str, str]] = []
+    with sample.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            return GateResult(ok=False, details={"failures": ["missing_header"]})
+        cols = set(reader.fieldnames)
+        missing = sorted(c for c in required_cols if c not in cols)
+        if missing:
+            failures.append(f"missing_columns:{','.join(missing)}")
+        for row in reader:
+            rows.append(row)
+
+    # Non-negativity (where parseable).
+    for i, row in enumerate(rows[:2000]):  # safety cap for gates
+        for col in ["l2_fees_eth", "rent_paid_eth", "profit_eth"]:
+            if col not in row or row[col] in ("", None):
+                continue
+            try:
+                v = float(row[col])
+            except ValueError:
+                failures.append(f"row{i}:invalid_number:{col}")
+                continue
+            if v < 0:
+                failures.append(f"row{i}:negative:{col}")
+
+    return GateResult(ok=(len(failures) == 0), details={"sample": str(sample), "failures": failures})
+
+
 def main() -> None:
     results = {
         "repo_structure": gate_repo_structure(),
@@ -518,7 +737,11 @@ def main() -> None:
         "panel_schema_nonempty": gate_panel_schema_nonempty(),
         "workstreams_complete": gate_workstreams_complete(),
         "task_hygiene": gate_task_hygiene(),
+        "task_dependencies": gate_task_dependencies(),
+        "contract_change_discipline": gate_contract_change_discipline(),
+        "registry_change_discipline": gate_registry_change_discipline(),
         "raw_manifest_validity": gate_raw_manifest_validity(),
+        "sample_panel_integrity": gate_sample_panel_integrity(),
     }
     ok = all(r.ok for r in results.values())
     for name, r in results.items():

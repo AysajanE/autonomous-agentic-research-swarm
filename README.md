@@ -20,7 +20,7 @@ This template is a lightweight, *file-based* orchestration system for running mu
 
 ## Minimal operating procedure
 1. Fill project contracts (Phase 0):
-   - Empirical/hybrid: `docs/protocol.md` + `contracts/schemas/panel_schema.yaml`
+   - Empirical/hybrid: `docs/protocol.md` + `contracts/schemas/panel_schema_str_v1.yaml`
    - Modeling/hybrid: `contracts/model_spec.*` + `contracts/instances/benchmark_small/`
 2. Planner creates tasks in `.orchestrator/backlog/` with success criteria.
 3. Start multiple Workers (tmux panes) and assign each a task file.
@@ -32,6 +32,23 @@ This template is a lightweight, *file-based* orchestration system for running mu
 
 See `docs/runbook_swarm.md`.
 Automation (tmux supervisor loop): `docs/runbook_swarm_automation.md`.
+
+## Vertical slice quickstart (STR)
+
+Once tasks `T030` → `T060` are implemented/merged and the golden sample exists at
+`data/samples/growthepie/vendor_daily_rollup_panel_sample.csv`, you should be able to generate the first STR artifact via:
+
+```bash
+make gate
+make test
+python src/validation/validate_vendor_panel.py --sample
+python src/analysis/plot_str_timeseries_sample.py
+```
+
+Expected outputs:
+- `reports/validation/vendor_panel_validation.md`
+- `reports/validation/vendor_panel_validation.json`
+- `reports/figures/str_timeseries_sample.svg`
 
 ## Safety defaults
 - Don’t run “auto-approve everything” on your laptop.

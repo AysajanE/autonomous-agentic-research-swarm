@@ -6,7 +6,7 @@ role: Worker
 priority: medium
 dependencies: []
 allowed_paths:
-  - "<path>/"
+  - "<path/to/file_or_small_prefix>"
 disallowed_paths:
   - "docs/protocol.md"
   - "contracts/"

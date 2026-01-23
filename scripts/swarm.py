@@ -10,6 +10,10 @@ Design goals:
   - Worker:  Codex CLI
   - Judge:   deterministic gates (make) + optional Codex review
 
+Governance (Option A):
+- This script updates task `State:` and notes, but does NOT move task files across lifecycle folders.
+- Use `python scripts/sweep_tasks.py` (Planner) to move task files based on `State:`.
+
 Safety:
 - Unattended mode disables approval prompts in Codex/Claude. ONLY run in an external sandbox
   (VM/devcontainer/Codespaces) that contains ONLY this repo and no sensitive files (see AGENTS.md).
@@ -44,6 +48,7 @@ class Task:
     role: str
     priority: str
     dependencies: list[str]
+    parallel_ok: bool
     allowed_paths: list[str]
     disallowed_paths: list[str]
     outputs: list[str]
@@ -72,6 +77,7 @@ def _run(
     check: bool = True,
     capture: bool = False,
     env: dict[str, str] | None = None,
+    timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if capture:
         return subprocess.run(
@@ -82,6 +88,7 @@ def _run(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=env,
+            timeout=timeout_seconds,
         )
     return subprocess.run(
         cmd,
@@ -89,6 +96,7 @@ def _run(
         check=check,
         text=True,
         env=env,
+        timeout=timeout_seconds,
     )
 
 
@@ -203,6 +211,10 @@ def load_task(path: Path) -> Task:
     priority = _get_str("priority").lower()
 
     dependencies = _coerce_list(fm.get("dependencies"))
+    parallel_ok = False
+    raw_parallel_ok = fm.get("parallel_ok")
+    if isinstance(raw_parallel_ok, str):
+        parallel_ok = raw_parallel_ok.strip().lower() in {"1", "true", "yes"}
     allowed_paths = _coerce_list(fm.get("allowed_paths"))
     disallowed_paths = _coerce_list(fm.get("disallowed_paths"))
     outputs = _coerce_list(fm.get("outputs"))
@@ -220,6 +232,7 @@ def load_task(path: Path) -> Task:
         role=role,
         priority=priority,
         dependencies=dependencies,
+        parallel_ok=parallel_ok,
         allowed_paths=allowed_paths,
         disallowed_paths=disallowed_paths,
         outputs=outputs,
@@ -267,6 +280,26 @@ def claimed_task_ids(remote: str, base_branch: str) -> set[str]:
     """Detect claimed tasks via open PRs (preferred) or remote branches (fallback)."""
     claimed: set[str] = set()
 
+    # Local fallback (no network): any task-prefixed branch currently attached to a worktree.
+    try:
+        cp = _run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture=True,
+            check=True,
+            cwd=_repo_root(),
+        )
+        for line in (cp.stdout or "").splitlines():
+            if not line.startswith("branch "):
+                continue
+            ref = line.split(" ", 1)[1].strip()
+            if ref.startswith("refs/heads/"):
+                branch = ref.removeprefix("refs/heads/")
+                tid = _parse_task_id_from_branch(branch)
+                if tid is not None:
+                    claimed.add(tid)
+    except Exception:
+        pass
+
     gh = _which_or_none("gh")
     if gh is not None:
         try:
@@ -288,9 +321,6 @@ def claimed_task_ids(remote: str, base_branch: str) -> set[str]:
                             claimed.add(tid)
         except Exception:
             pass
-
-    if claimed:
-        return claimed
 
     # Fallback: any remote branch with prefix T###_
     try:
@@ -327,6 +357,54 @@ def ready_backlog_tasks(*, done_ids: set[str], claimed_ids: set[str]) -> list[Ta
     return ready
 
 
+def _compute_workstream_locks(*, repo: Path, claimed_ids: set[str]) -> tuple[set[str], set[str]]:
+    """Return (locked_workstreams, parallel_only_workstreams).
+
+    - If any claimed task in a workstream is not parallel_ok, the workstream is locked.
+    - If only parallel_ok tasks are claimed for a workstream, the workstream is parallel-only.
+    """
+    locked: set[str] = set()
+    parallel_only: set[str] = set()
+    for tid in claimed_ids:
+        tf = _find_task_file_anywhere(tid, repo)
+        if tf is None:
+            continue
+        try:
+            t = load_task(tf)
+        except Exception:
+            continue
+        if t.parallel_ok:
+            parallel_only.add(t.workstream)
+        else:
+            locked.add(t.workstream)
+    parallel_only.difference_update(locked)
+    return locked, parallel_only
+
+
+def _apply_workstream_concurrency_filters(
+    *,
+    tasks: list[Task],
+    locked_workstreams: set[str],
+    parallel_only_workstreams: set[str],
+    capacity: int,
+) -> list[Task]:
+    """Filter a task list to enforce simple workstream-level concurrency rules."""
+    selected: list[Task] = []
+    selected_workstreams: set[str] = set()
+    for t in tasks:
+        if t.workstream in locked_workstreams:
+            continue
+        if t.workstream in parallel_only_workstreams and not t.parallel_ok:
+            continue
+        if t.workstream in selected_workstreams and not t.parallel_ok:
+            continue
+        selected.append(t)
+        selected_workstreams.add(t.workstream)
+        if len(selected) >= max(0, capacity):
+            break
+    return selected
+
+
 def _priority_rank(priority: str) -> int:
     return {"high": 0, "medium": 1, "low": 2}.get(priority, 9)
 
@@ -355,6 +433,7 @@ def choose_tasks_claude(
             "workstream": t.workstream,
             "priority": t.priority,
             "dependencies": t.dependencies,
+            "parallel_ok": t.parallel_ok,
         }
         for t in ready
     ]
@@ -378,6 +457,7 @@ def choose_tasks_claude(
             f"- Select at most {capacity} task_ids.",
             "- Prefer higher priority tasks.",
             "- Prefer tasks that unblock dependencies.",
+            "- Start at most ONE task per workstream unless tasks are marked parallel_ok=true.",
             "- Return ONLY the JSON object required by the schema (selected_task_ids, optional rationale).",
             "",
             "Ready tasks (JSON):",
@@ -599,11 +679,13 @@ def _find_task_file_anywhere(task_id: str, cwd: Path) -> Path | None:
     return None
 
 
-def _move_task_file(*, src: Path, dest_dir: Path) -> Path:
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / src.name
-    _run(["git", "mv", str(src), str(dest)], cwd=_repo_root())
-    return dest
+def _require_unattended_ack() -> None:
+    if os.environ.get("SWARM_UNATTENDED_I_UNDERSTAND") == "1":
+        return
+    raise SystemExit(
+        "Refusing to run with --unattended without SWARM_UNATTENDED_I_UNDERSTAND=1 "
+        "(safety interlock; run only in an external sandbox with no secrets)."
+    )
 
 
 def _codex_exec_cmd(
@@ -720,10 +802,19 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 def cmd_tick(args: argparse.Namespace) -> int:
     repo = _repo_root()
+    if args.unattended:
+        _require_unattended_ack()
 
     done_ids = done_task_ids()
     claimed_ids = claimed_task_ids(args.remote, args.base_branch)
     ready = ready_backlog_tasks(done_ids=done_ids, claimed_ids=claimed_ids)
+    locked_workstreams, parallel_only_workstreams = _compute_workstream_locks(repo=repo, claimed_ids=claimed_ids)
+    ready = _apply_workstream_concurrency_filters(
+        tasks=sorted(ready, key=lambda t: (_priority_rank(t.priority), t.task_id)),
+        locked_workstreams=locked_workstreams,
+        parallel_only_workstreams=parallel_only_workstreams,
+        capacity=len(ready),
+    )
 
     if not ready:
         print("No ready tasks in backlog.")
@@ -744,6 +835,12 @@ def cmd_tick(args: argparse.Namespace) -> int:
     else:
         selected = choose_tasks_heuristic(ready, capacity)
 
+    selected = _apply_workstream_concurrency_filters(
+        tasks=selected,
+        locked_workstreams=locked_workstreams,
+        parallel_only_workstreams=parallel_only_workstreams,
+        capacity=capacity,
+    )
     if not selected:
         print("Planner selected no tasks.")
         return 0
@@ -777,6 +874,10 @@ def cmd_tick(args: argparse.Namespace) -> int:
         ]
         if args.unattended:
             run_cmd.append("--unattended")
+        if args.max_worker_seconds:
+            run_cmd.extend(["--max-worker-seconds", str(args.max_worker_seconds)])
+        if args.max_review_seconds:
+            run_cmd.extend(["--max-review-seconds", str(args.max_review_seconds)])
         if args.codex_model:
             run_cmd.extend(["--codex-model", args.codex_model])
         if args.create_pr:
@@ -807,6 +908,8 @@ def cmd_tick(args: argparse.Namespace) -> int:
 
 def cmd_tmux_start(args: argparse.Namespace) -> int:
     repo = _repo_root()
+    if args.unattended:
+        _require_unattended_ack()
     tmux_ensure_session(args.tmux_session, repo)
     loop_cmd = [
         sys.executable,
@@ -835,6 +938,10 @@ def cmd_tmux_start(args: argparse.Namespace) -> int:
         loop_cmd.extend(["--worktree-parent", args.worktree_parent])
     if args.unattended:
         loop_cmd.append("--unattended")
+    if args.max_worker_seconds:
+        loop_cmd.extend(["--max-worker-seconds", str(args.max_worker_seconds)])
+    if args.max_review_seconds:
+        loop_cmd.extend(["--max-review-seconds", str(args.max_review_seconds)])
     if args.codex_model:
         loop_cmd.extend(["--codex-model", args.codex_model])
     if args.claude_model:
@@ -858,6 +965,8 @@ def cmd_tmux_start(args: argparse.Namespace) -> int:
 
 def cmd_loop(args: argparse.Namespace) -> int:
     repo = _repo_root()
+    if args.unattended:
+        _require_unattended_ack()
     interval = max(5, int(args.interval_seconds))
     print(f"Swarm loop started (interval={interval}s). Repo: {repo}")
     while True:
@@ -884,6 +993,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
 
     # Guardrails for unattended mode.
     if args.unattended:
+        _require_unattended_ack()
         print(
             "WARNING: --unattended disables approval prompts. ONLY run in an external sandbox with no secrets (see AGENTS.md).",
             file=sys.stderr,
@@ -896,11 +1006,8 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     task = load_task(task_file)
     allow_network = task.workstream in {"W1", "W2"}
 
-    # Claim: move backlog -> active (if needed) and set State=active
-    if task_file.parts[-2] == "backlog":
-        active_dir = repo / ".orchestrator" / "active"
-        _run(["git", "mv", str(task_file), str(active_dir / task_file.name)], cwd=repo)
-        task_file = active_dir / task_file.name
+    # Claim: set State=active (do NOT move lifecycle folders; Planner sweeps separately)
+    if task.state == "backlog":
         _update_task_status_and_notes(
             task_path=task_file,
             new_state="active",
@@ -934,7 +1041,21 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         workdir=repo,
         output_last_message=worker_last_msg,
     )
-    _run(worker_cmd, cwd=repo, check=False)
+    worker_timeout = int(args.max_worker_seconds) if args.max_worker_seconds else None
+    try:
+        _run(worker_cmd, cwd=repo, check=False, timeout_seconds=worker_timeout)
+    except subprocess.TimeoutExpired:
+        timeout_note = (
+            f"Worker timed out after {worker_timeout}s; leaving task active. "
+            f"Last message: {worker_last_msg.as_posix()}"
+        )
+        _update_task_status_and_notes(task_path=task_file, new_state="active", note_line=timeout_note)
+        if _git_has_changes(repo):
+            _run(["git", "add", "-A"], cwd=repo)
+            _run(["git", "commit", "-m", f"{task.task_id}: worker timeout"], cwd=repo, check=False)
+            _run(["git", "push", "-u", args.remote, _git_current_branch(repo)], cwd=repo, check=False)
+        print(json.dumps({"task_id": task.task_id, "state": "active", "error": "worker_timeout"}, indent=2))
+        return 1
 
     # Judge: run declared gates (deterministic) + enforce path ownership
     gate_ok = True
@@ -979,7 +1100,16 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             base_branch=args.base_branch,
             workdir=repo,
         )
-        cp = _run(review_cmd, cwd=repo, capture=True, check=False)
+        try:
+            cp = _run(
+                review_cmd,
+                cwd=repo,
+                capture=True,
+                check=False,
+                timeout_seconds=int(args.max_review_seconds) if args.max_review_seconds else None,
+            )
+        except subprocess.TimeoutExpired:
+            cp = subprocess.CompletedProcess(args=review_cmd, returncode=124, stdout="")
         review_path.write_text(cp.stdout or "", encoding="utf-8")
     except Exception:
         pass
@@ -997,12 +1127,8 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             why.append("path_ownership_violation")
         note = f"@human Judge blocked: {', '.join(why)}. Review log: {review_path.as_posix()}"
 
-    # Update task status + move file to lifecycle folder (Planner action)
+    # Update task status (do NOT move file; Planner action is separate via sweep_tasks.py)
     _update_task_status_and_notes(task_path=task_file, new_state=new_state, note_line=note)
-    dest_dir = repo / ".orchestrator" / new_state
-    if task_file.parts[-2] != new_state:
-        _run(["git", "mv", str(task_file), str(dest_dir / task_file.name)], cwd=repo)
-        task_file = dest_dir / task_file.name
 
     # Commit + push
     if _git_has_changes(repo):
@@ -1069,6 +1195,8 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--claude-model", default=None)
     tick.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
     tick.add_argument("--unattended", action="store_true")
+    tick.add_argument("--max-worker-seconds", type=int, default=0)
+    tick.add_argument("--max-review-seconds", type=int, default=0)
     tick.add_argument("--create-pr", action="store_true")
     tick.add_argument("--auto-merge", action="store_true")
     tick.add_argument("--final-state", choices=["ready_for_review", "done"], default="ready_for_review")
@@ -1088,6 +1216,8 @@ def build_parser() -> argparse.ArgumentParser:
     loop.add_argument("--claude-model", default=None)
     loop.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
     loop.add_argument("--unattended", action="store_true")
+    loop.add_argument("--max-worker-seconds", type=int, default=0)
+    loop.add_argument("--max-review-seconds", type=int, default=0)
     loop.add_argument("--create-pr", action="store_true")
     loop.add_argument("--auto-merge", action="store_true")
     loop.add_argument("--final-state", choices=["ready_for_review", "done"], default="ready_for_review")
@@ -1107,6 +1237,8 @@ def build_parser() -> argparse.ArgumentParser:
     tmux_start.add_argument("--claude-model", default=None)
     tmux_start.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
     tmux_start.add_argument("--unattended", action="store_true")
+    tmux_start.add_argument("--max-worker-seconds", type=int, default=0)
+    tmux_start.add_argument("--max-review-seconds", type=int, default=0)
     tmux_start.add_argument("--create-pr", action="store_true")
     tmux_start.add_argument("--auto-merge", action="store_true")
     tmux_start.add_argument("--final-state", choices=["ready_for_review", "done"], default="ready_for_review")
@@ -1119,6 +1251,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_task.add_argument("--codex-model", default=None)
     run_task.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
     run_task.add_argument("--unattended", action="store_true")
+    run_task.add_argument("--max-worker-seconds", type=int, default=0, help="If >0, timeout Codex worker execution")
+    run_task.add_argument("--max-review-seconds", type=int, default=0, help="If >0, timeout optional Codex review")
     run_task.add_argument("--create-pr", action="store_true")
     run_task.add_argument("--auto-merge", action="store_true")
     run_task.add_argument("--final-state", choices=["ready_for_review", "done"], default="ready_for_review")

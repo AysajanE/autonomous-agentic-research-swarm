@@ -17,12 +17,18 @@ Definitions:
 - `L2Fees_{i,t}`: total fees paid by users on rollup *i* on day *t*.
 - `RentPaid_{i,t}`: total fees paid by rollup *i* to Ethereum L1 for settlement/DA/proofs on day *t*.
 - Aggregation: the sum is over the **in-scope rollup universe** for day *t*.
+- Denominator rule: if `Σ_i L2Fees_{i,t} == 0`, then `STR_t = NaN` (undefined; do not coerce to 0).
+- Missingness rule (panel rows): if either `L2Fees_{i,t}` or `RentPaid_{i,t}` is missing for a rollup-day, exclude that rollup-day from both numerator and denominator sums for ecosystem-level aggregates.
 
 ## Rollup inclusion criteria
 
 In-scope rollups must:
 - Be an L2 rollup (optimistic or ZK) that posts data to **Ethereum L1 mainnet**.
 - Have a stable identifier in the project universe and be attributable in at least one primary data source.
+
+Rollup universe representation:
+- The canonical rollup identifier is `rollup_id` (see `registry/rollup_registry_v1.csv`).
+- The universe may be time-varying (rollups may enter/exit); when a registry is present, prefer `start_date_utc` / `end_date_utc` + `status` to define active periods.
 
 Out of scope:
 - Non-Ethereum DA/settlement chains (may be discussed as competition, but excluded from STR computation).
@@ -51,12 +57,17 @@ Daily regime boundaries are evaluated in **UTC**.
   - Treat dates `>= 2024-03-13` as **post-Dencun** for daily panels.
 - Analysis start date: 2022-01-01 (UTC)
 
+## Regime definitions (derived)
+
+- Post-Dencun regime: `date_utc >= 2024-03-13` (UTC).
+- Blob fee floor regime (post-Dencun only): identify contiguous runs of ≥7 days where `l1_blob_base_fee_gwei <= 1.05 × min(l1_blob_base_fee_gwei)` over the post-Dencun sample window.
+
 ## Validation tolerances
 
 Unless overridden by a task:
 
 - Accounting identity (vendor series): `profit ≈ fees − rent_paid`
-  - Tolerance: 0.5–1.0% (unit-dependent; document the chosen tolerance)
+  - Tolerance (ETH): `abs(profit − (fees − rent_paid)) <= max(1e-9, 0.01 × max(abs(fees), abs(rent_paid), 1e-9))`
 - Cross-source reconciliation (monthly aggregates, top rollups):
   - Target tolerance: 5–10%; otherwise explain and document the cause
 - Blob usage cross-check (sample month):

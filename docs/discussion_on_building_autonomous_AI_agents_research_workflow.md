@@ -187,7 +187,7 @@ In research, contradictions usually come from definition drift. Your repo should
 * `protocol/definitions.yaml` (STR formula(s), units, denominators, date cutoffs),
 * `protocol/inclusion.yaml` (rollup list rules),
 * `registry/rollup_registry.csv` (attribution map, versioned),
-* `schemas/panel_schema.yaml` (analysis dataset schema).
+* `contracts/schemas/panel_schema_str_v1.yaml` (analysis dataset schema).
 
 Workers don’t edit those casually; they propose changes via PR, and the Protocol Owner (human or protocol-agent) must approve.
 
@@ -1726,4 +1726,3 @@ To make this concrete, I created a **minimal “research swarm template”** zip
 [8]: https://github.com/ryanmac/code-conductor "https://github.com/ryanmac/code-conductor"
 [9]: https://github.com/ruvnet/claude-flow "https://github.com/ruvnet/claude-flow"
 [10]: https://openai.com/index/introducing-codex/ "https://openai.com/index/introducing-codex/"
-

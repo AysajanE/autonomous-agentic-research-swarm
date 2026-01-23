@@ -1,9 +1,5 @@
 version: 1
-description: "Canonical analysis panel schema (edit per project)."
-fields:
-  - name: date
-    type: date
-    description: "UTC date (YYYY-MM-DD)"
-  - name: unit_id
-    type: string
-    description: "Stable unit identifier (e.g., rollup_id, address, region)"
+description: "Schema entrypoints (use versioned schema files for canonical field lists)."
+schemas:
+  str: "contracts/schemas/panel_schema_str_v1.yaml"
+  decomposition: "contracts/schemas/panel_schema_decomp_v1.yaml"

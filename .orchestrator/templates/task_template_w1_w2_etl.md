@@ -6,10 +6,10 @@ role: Worker
 priority: medium
 dependencies: []
 allowed_paths:
-  - "src/etl/"
-  - "data/raw/"
-  - "data/raw_manifest/"
-  - "data/processed/"
+  - "src/etl/<script>.py"
+  - "data/raw/<source>/"
+  - "data/raw_manifest/<source>_"
+  - "data/processed/<source>/"
 disallowed_paths:
   - "docs/protocol.md"
   - "contracts/"

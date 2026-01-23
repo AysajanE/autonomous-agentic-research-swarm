@@ -100,7 +100,7 @@ Everything important must live on disk in version control:
      - command used
      - file list + hashes (sha256)
      - software environment fingerprint (version info)
-   - Helper: `python scripts/make_raw_manifest.py <source> <snapshot_dir> <command...>`
+   - Helper: `python scripts/make_raw_manifest.py <source> <snapshot_dir> --as-of <YYYY-MM-DD> -- <command...>`
 
 7. **Results catalog**
    - A single index of key outputs and how to reproduce them.
@@ -181,7 +181,9 @@ risk_policy:
 ### 4.5.2 Empirical contracts
 
 - `contracts/schemas/`
-  - `contracts/schemas/panel_schema.yaml`
+  - `contracts/schemas/panel_schema.yaml` (entrypoints)
+  - `contracts/schemas/panel_schema_str_v1.yaml` (STR panel)
+  - `contracts/schemas/panel_schema_decomp_v1.yaml` (decomposition stub)
   - `contracts/schemas/raw_<source>_schema.yaml`
 - `contracts/data_dictionary.md`
 

@@ -1,0 +1,46 @@
+version: 1
+table: daily_l1_rent_decomposition
+description: "Daily Ethereum L1 rent decomposition used for burn vs tips and blob vs calldata analysis."
+grain:
+  - date_utc
+fields:
+  - name: date_utc
+    type: date
+    units: "YYYY-MM-DD (UTC)"
+    nullable: false
+    description: "UTC date for daily aggregation."
+  - name: l1_base_fee_burn_eth
+    type: number
+    units: "ETH"
+    nullable: false
+    description: "ETH burned via EIP-1559 base fee (execution layer)."
+  - name: l1_blob_fee_burn_eth
+    type: number
+    units: "ETH"
+    nullable: false
+    description: "ETH burned via EIP-4844 blob base fee."
+  - name: l1_priority_fee_eth
+    type: number
+    units: "ETH"
+    nullable: false
+    description: "ETH paid as priority fees (tips) to proposers/builders."
+  - name: l1_total_rent_eth
+    type: number
+    units: "ETH"
+    nullable: false
+    description: "Total L1 rent (burn + tips). Must equal l1_base_fee_burn_eth + l1_blob_fee_burn_eth + l1_priority_fee_eth."
+  - name: l1_blob_gas_used
+    type: integer
+    units: "blob gas"
+    nullable: true
+    description: "Total blob gas used on date_utc (optional; used for cross-checks)."
+  - name: l1_calldata_gas_used
+    type: integer
+    units: "gas"
+    nullable: true
+    description: "Total calldata gas proxy on date_utc (optional; used for cross-checks)."
+  - name: l1_blob_base_fee_gwei
+    type: number
+    units: "gwei"
+    nullable: true
+    description: "Blob base fee level (gwei) on date_utc; used for regime classification (optional)."

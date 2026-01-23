@@ -7,11 +7,11 @@ priority: high
 dependencies:
   - "T020"
 allowed_paths:
-  - "src/etl/"
-  - "data/raw/"
-  - "data/raw_manifest/"
-  - "data/processed/"
-  - "data/samples/"
+  - "src/etl/growthepie_fetch.py"
+  - "data/raw/growthepie/"
+  - "data/raw_manifest/growthepie_"
+  - "data/processed/growthepie/"
+  - "data/samples/growthepie/"
 disallowed_paths:
   - "docs/protocol.md"
   - "contracts/"
@@ -46,7 +46,7 @@ This task builds a reproducible ETL that:
 ## Inputs
 
 - `docs/protocol.md` (read-only): primary metric units + source priority
-- `contracts/schemas/panel_schema.yaml` (read-only): expected fields for the panel
+- `contracts/schemas/panel_schema_str_v1.yaml` (read-only): expected fields for the STR panel
 - growthepie API:
   - `https://api.growthepie.com/v1/master.json`
   - `https://api.growthepie.com/v1/export/{metric_key}.json`
@@ -80,7 +80,7 @@ This task builds a reproducible ETL that:
 - `make gate`
 - Example (replace placeholders):
   - `python src/etl/growthepie_fetch.py --run-date 2026-01-22`
-  - `python scripts/make_raw_manifest.py growthepie data/raw/growthepie/2026-01-22 "python src/etl/growthepie_fetch.py --run-date 2026-01-22"`
+  - `python scripts/make_raw_manifest.py growthepie data/raw/growthepie/2026-01-22 --as-of 2026-01-22 -- python src/etl/growthepie_fetch.py --run-date 2026-01-22`
 
 ## Status
 

@@ -8,8 +8,9 @@ dependencies:
   - "T030"
   - "T040"
 allowed_paths:
-  - "src/validation/"
-  - "reports/validation/"
+  - "src/validation/validate_vendor_panel.py"
+  - "reports/validation/vendor_panel_validation.json"
+  - "reports/validation/vendor_panel_validation.md"
 disallowed_paths:
   - "docs/protocol.md"
   - "contracts/"

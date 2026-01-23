@@ -8,14 +8,18 @@ dependencies:
   - "T000"
   - "T010"
 allowed_paths:
-  - "contracts/"
-  - "docs/"
+  - "contracts/schemas/panel_schema.yaml"
+  - "contracts/schemas/panel_schema_str_v1.yaml"
+  - "contracts/data_dictionary.md"
+  - "contracts/decisions.md"
+  - "contracts/CHANGELOG.md"
+  - "docs/protocol.md"
 disallowed_paths:
   - "src/"
   - "registry/"
   - "data/raw/"
 outputs:
-  - "contracts/schemas/panel_schema.yaml"
+  - "contracts/schemas/panel_schema_str_v1.yaml"
   - "contracts/data_dictionary.md"
   - "contracts/decisions.md"
 gates:
@@ -43,7 +47,7 @@ This task defines the canonical fields/units and documents them in the project d
 
 ## Outputs
 
-- Update `contracts/schemas/panel_schema.yaml` to include (at minimum) the fields required to compute STR from ETH-native series:
+- Update `contracts/schemas/panel_schema_str_v1.yaml` to include (at minimum) the fields required to compute STR from ETH-native series:
   - date (UTC day)
   - rollup_id (stable identifier; document the convention)
   - l2_fees_eth
@@ -58,7 +62,8 @@ This task defines the canonical fields/units and documents them in the project d
 
 ## Success Criteria
 
-- [ ] `contracts/schemas/panel_schema.yaml` is no longer a stub and has a clear “minimum viable STR panel” section
+- [ ] `contracts/schemas/panel_schema.yaml` points to the canonical versioned schema file(s)
+- [ ] `contracts/schemas/panel_schema_str_v1.yaml` exists and defines the minimum daily rollup panel required for STR
 - [ ] `contracts/data_dictionary.md` includes a filled-in table entry for the STR panel
 - [ ] `contracts/decisions.md` records the schema decision with rationale
 - [ ] `make gate` passes

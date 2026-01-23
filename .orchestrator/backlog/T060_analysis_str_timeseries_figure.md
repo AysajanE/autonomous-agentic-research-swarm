@@ -8,8 +8,8 @@ dependencies:
   - "T040"
   - "T050"
 allowed_paths:
-  - "src/analysis/"
-  - "reports/figures/"
+  - "src/analysis/plot_str_timeseries_sample.py"
+  - "reports/figures/str_timeseries_sample.svg"
 disallowed_paths:
   - "docs/protocol.md"
   - "contracts/"

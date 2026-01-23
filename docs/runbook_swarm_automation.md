@@ -8,6 +8,10 @@ opens GitHub PRs — without interactive permission prompts.
 external sandbox (VM/devcontainer/Codespaces) containing *only* this repo and no sensitive files.
 See `AGENTS.md`.
 
+**Governance (Option A):** the automation updates task `State:` and appends notes, but it does **not**
+move task files between lifecycle folders. Use `python scripts/sweep_tasks.py` as the Planner sweep
+step to align folders with `State:`.
+
 ## Prereqs
 
 - `tmux` installed (recommended for overnight runs).
@@ -33,6 +37,8 @@ python scripts/swarm.py plan
 This starts a tmux session and launches a `supervisor` window that ticks every 5 minutes.
 
 ```bash
+export SWARM_UNATTENDED_I_UNDERSTAND=1
+
 python scripts/swarm.py tmux-start \
   --tmux-session swarm \
   --planner claude \
@@ -46,6 +52,21 @@ Notes:
 - `--unattended` disables approval prompts (Codex uses `-a never`; Claude uses `--permission-mode bypassPermissions`).
 - For ETL tasks (W1/W2), the runner enables Codex network access inside the workspace-write sandbox
   via a config override.
+- Consider bounding individual worker runs with `--max-worker-seconds` (prevents runaway sessions).
+
+## Planner sweep (move task files by State)
+
+After merging PRs (or when updating lifecycle folders in your branch), run:
+
+```bash
+make sweep
+```
+
+Dry-run:
+
+```bash
+python scripts/sweep_tasks.py --dry-run
+```
 
 ## Monitor
 
@@ -80,4 +101,3 @@ Or run locally (sequential, no tmux):
 ```bash
 python scripts/swarm.py tick --runner local --planner heuristic --max-workers 1 --unattended
 ```
-

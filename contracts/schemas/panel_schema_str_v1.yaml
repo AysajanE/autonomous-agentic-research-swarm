@@ -1,0 +1,38 @@
+version: 1
+table: daily_rollup_panel
+description: "Minimum daily rollup panel schema required to compute STR (ETH-native primary)."
+grain:
+  - date_utc
+  - rollup_id
+fields:
+  - name: date_utc
+    type: date
+    units: "YYYY-MM-DD (UTC)"
+    nullable: false
+    description: "UTC date for daily aggregation."
+  - name: rollup_id
+    type: string
+    units: "slug"
+    nullable: false
+    description: "Stable rollup identifier (see registry/rollup_registry_v1.csv)."
+  - name: l2_fees_eth
+    type: number
+    units: "ETH"
+    nullable: false
+    description: "Total user fees paid on the rollup on date_utc (ETH-native series)."
+  - name: rent_paid_eth
+    type: number
+    units: "ETH"
+    nullable: false
+    description: "Total fees paid by the rollup to Ethereum L1 for settlement/DA/proofs on date_utc (ETH-native series)."
+  - name: profit_eth
+    type: number
+    units: "ETH"
+    nullable: true
+    description: "Vendor-provided profit series when available; used only for sanity checks (profit ≈ fees − rent)."
+  - name: txcount
+    type: integer
+    units: "count"
+    nullable: true
+    description: "Transaction count on date_utc when provided by the source."
+

@@ -17,3 +17,8 @@ swarm-plan:
 
 swarm-tick:
 	python scripts/swarm.py tick
+
+.PHONY: sweep
+
+sweep:
+	python scripts/sweep_tasks.py
