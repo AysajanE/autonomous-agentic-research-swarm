@@ -97,9 +97,36 @@ Reason this is preferred over `--global` in a sandbox:
 Alternative (recommended for team repos / longer runs):
 - Use a dedicated bot identity (e.g., `swarm-bot` with a GitHub noreply email) so automation commits are clearly attributable.
 
+### Codex configuration (recommended for swarm)
+
+Create or update `~/.codex/config.toml` with the following recommended settings:
+
+```toml
+model = "gpt-5.2-codex"
+model_reasoning_effort = "xhigh"  # Recommended for swarm automation
+tool_output_token_limit = 25000
+model_auto_compact_token_limit = 233000
+
+[features]
+ghost_commit = false
+unified_exec = true
+apply_patch_freeform = true
+web_search_request = true
+skills = true
+shell_snapshot = true
+
+[projects."/path/to/your/repo"]
+trust_level = "trusted"
+```
+
+Important notes:
+- `model_reasoning_effort = "xhigh"` is recommended for swarm automation to improve task execution quality
+- Update the `[projects."/path/to/your/repo"]` section to match your actual repository path
+- See the [Codex config reference](https://developers.openai.com/codex/config-reference) for more details
+
 ### Confirm repo is ready to start tasks
 
-This prints the set of “ready” backlog tasks (dependencies satisfied, not already claimed):
+This prints the set of "ready" backlog tasks (dependencies satisfied, not already claimed):
 
 ```bash
 python scripts/swarm.py plan

@@ -1284,7 +1284,7 @@ def phase_4_gate():
 **~/.codex/config.toml (Codex):**
 ```toml
 model = "gpt-5.2-codex"
-model_reasoning_effort = "high"
+model_reasoning_effort = "xhigh"  # Recommended for swarm automation
 tool_output_token_limit = 25000
 model_auto_compact_token_limit = 233000
 
