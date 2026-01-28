@@ -118,6 +118,8 @@ tmux set-environment -g SWARM_UNATTENDED_I_UNDERSTAND 1
 python scripts/swarm.py tmux-start \
   --tmux-session swarm \
   --planner claude \
+  --codex-model gpt-5.2 \
+  --claude-model opus \
   --max-workers 2 \
   --interval-seconds 300 \
   --unattended \
