@@ -69,10 +69,14 @@ This task defines the canonical fields/units and documents them in the project d
 - [ ] `make gate` passes
 
 ## Status
-
-- State: backlog
-- Last updated: 2026-01-22
-
+- State: ready_for_review
+- Last updated: 2026-01-29
 ## Notes / Decisions
 
 - 2026-01-22: Task created (Planner) to lock minimal schema before ETL/metrics work starts.
+
+
+- 2026-01-29: Claimed by swarm runner; starting worker (branch: T020_define_panel_schema_and_data_dictionary).
+
+
+- 2026-01-29: Judge: gates ok; ownership ok. Review log: /home/vscode/swarm-worktrees/wt-T020/data/tmp/swarm_logs/T020_20260129T005757Z_judge_review.txt
