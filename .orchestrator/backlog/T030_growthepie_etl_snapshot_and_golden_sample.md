@@ -83,14 +83,10 @@ This task builds a reproducible ETL that:
   - `python scripts/make_raw_manifest.py growthepie data/raw/growthepie/2026-01-22 --as-of 2026-01-22 -- python src/etl/growthepie_fetch.py --run-date 2026-01-22`
 
 ## Status
-- State: done
-- Last updated: 2026-01-29
+
+- State: backlog
+- Last updated: 2026-01-22
+
 ## Notes / Decisions
 
 - 2026-01-22: Task created (Planner) as first real W1 ETL vertical slice.
-
-
-- 2026-01-29: Claimed by swarm runner; starting worker (branch: T030_growthepie_etl_snapshot_and_golden_sample).
-
-
-- 2026-01-29: Judge: gates ok; ownership ok. Review log: /home/vscode/swarm-worktrees/wt-T030/data/tmp/swarm_logs/T030_20260129T154706Z_judge_review.txt
