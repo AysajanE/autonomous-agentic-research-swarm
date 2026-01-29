@@ -69,7 +69,7 @@ This task defines the canonical fields/units and documents them in the project d
 - [ ] `make gate` passes
 
 ## Status
-- State: ready_for_review
+- State: done
 - Last updated: 2026-01-29
 ## Notes / Decisions
 
