@@ -37,6 +37,7 @@ from typing import Any, Iterable
 
 VALID_TASK_STATES = {"backlog", "active", "blocked", "ready_for_review", "done"}
 VALID_TASK_PRIORITIES = {"low", "medium", "high"}
+_PREFLIGHT_STRICT_SYNC_CACHE: set[tuple[str, bool, bool]] = set()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -636,6 +637,225 @@ def _git_current_branch(cwd: Path) -> str:
     return (cp.stdout or "").strip()
 
 
+def _git_config_get(cwd: Path, key: str) -> str | None:
+    """Best-effort `git config --get <key>` helper (no external deps)."""
+    cp = _run(["git", "config", "--get", key], cwd=cwd, capture=True, check=False)
+    if cp.returncode != 0:
+        return None
+    value = (cp.stdout or "").strip()
+    return value or None
+
+
+def _git_remote_exists(cwd: Path, remote: str) -> bool:
+    cp = _run(["git", "remote", "get-url", remote], cwd=cwd, capture=True, check=False)
+    return cp.returncode == 0
+
+
+def _require_git_identity(*, cwd: Path, reason: str) -> None:
+    """Hard-fail if git identity is missing.
+
+    Why:
+    - `swarm.py` makes commits (task State/Notes, etc.). If identity is missing,
+      `git commit` can fail, and prior versions of this repo used `check=False`
+      in places (a deliberate "don't crash" choice that becomes a footgun).
+    - In unattended or PR-driven operation, a "local-only" run is a governance
+      problem: other machines may see tasks as unclaimed and duplicate work.
+    """
+    name = _git_config_get(cwd, "user.name")
+    email = _git_config_get(cwd, "user.email")
+    if name and email:
+        return
+
+    missing: list[str] = []
+    if not name:
+        missing.append("user.name")
+    if not email:
+        missing.append("user.email")
+
+    raise SystemExit(
+        "\n".join(
+            [
+                f"Preflight failed ({reason}): missing git identity: {', '.join(missing)}.",
+                "Fix by configuring an identity (repo-local recommended):",
+                '  git config user.name  "swarm-bot"',
+                '  git config user.email "swarm-bot@users.noreply.github.com"',
+                "Then re-run the swarm command.",
+            ]
+        )
+    )
+
+
+def _require_git_push_access(*, cwd: Path, remote: str, reason: str, timeout_seconds: int = 30) -> None:
+    """Hard-fail if we cannot push to the configured remote (auth/permissions).
+
+    Uses a dry-run push so we don't mutate remote state, but still exercises
+    authentication. Also forces `GIT_TERMINAL_PROMPT=0` to fail fast instead of
+    hanging on interactive credential prompts (critical for unattended runs).
+    """
+    if not _git_remote_exists(cwd, remote):
+        raise SystemExit(
+            "\n".join(
+                [
+                    f"Preflight failed ({reason}): git remote {remote!r} is not configured in this repo.",
+                    "Fix by adding/configuring the remote, e.g.:",
+                    f"  git remote add {remote} <url>",
+                ]
+            )
+        )
+
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    cp = _run(
+        ["git", "push", "--dry-run", remote, "HEAD"],
+        cwd=cwd,
+        capture=True,
+        check=False,
+        env=env,
+        timeout_seconds=timeout_seconds,
+    )
+    if cp.returncode == 0:
+        return
+
+    out = (cp.stdout or "").strip()
+    if len(out) > 2000:
+        out = out[-2000:]
+    raise SystemExit(
+        "\n".join(
+            [
+                f"Preflight failed ({reason}): cannot push to remote {remote!r} (auth/permission issue).",
+                "This would cause a 'ghost run' where work happens locally but is never shared.",
+                "Fix by authenticating git credentials for the remote, then verify:",
+                f"  git push --dry-run {remote} HEAD",
+                "",
+                "Output:",
+                out or "(no output)",
+            ]
+        )
+    )
+
+
+def _require_gh_auth(*, cwd: Path, reason: str, timeout_seconds: int = 20) -> None:
+    """Hard-fail if GitHub CLI is missing or not authenticated.
+
+    Required when `--create-pr` is requested: otherwise we would run tasks but
+    fail to open PRs, breaking the PR-synchronized control plane.
+    """
+    gh = _which_or_none("gh")
+    if gh is None:
+        raise SystemExit(
+            "\n".join(
+                [
+                    f"Preflight failed ({reason}): `gh` not found on PATH but --create-pr was requested.",
+                    "Install GitHub CLI and authenticate (or rerun without --create-pr).",
+                ]
+            )
+        )
+
+    cp = _run([gh, "auth", "status"], cwd=cwd, capture=True, check=False, timeout_seconds=timeout_seconds)
+    if cp.returncode == 0:
+        return
+
+    out = (cp.stdout or "").strip()
+    if len(out) > 2000:
+        out = out[-2000:]
+    raise SystemExit(
+        "\n".join(
+            [
+                f"Preflight failed ({reason}): GitHub CLI is not authenticated but --create-pr was requested.",
+                "Fix by running:",
+                "  gh auth login",
+                "",
+                "Output:",
+                out or "(no output)",
+            ]
+        )
+    )
+
+
+def _git_commit(*, cwd: Path, message: str, strict: bool) -> None:
+    """Run `git commit` with failure behavior appropriate to the swarm mode.
+
+    In strict modes (unattended / create-pr), failures must abort to prevent
+    "ghost runs" (local-only work that is never pushed).
+    """
+    cp = _run(["git", "commit", "-m", message], cwd=cwd, capture=True, check=False)
+    if cp.returncode == 0:
+        return
+    out = (cp.stdout or "").strip()
+    if len(out) > 2000:
+        out = out[-2000:]
+    if strict:
+        raise SystemExit(
+            "\n".join(
+                [
+                    f"git commit failed in strict mode: {message!r}",
+                    out or "(no output)",
+                ]
+            )
+        )
+    print(f"[warn] git commit failed: {message!r}\n{out}", file=sys.stderr)
+
+
+def _git_push(*, cwd: Path, remote: str, ref: str, set_upstream: bool, strict: bool, timeout_seconds: int = 60) -> None:
+    """Run `git push` with failure behavior appropriate to the swarm mode.
+
+    In strict modes we force non-interactive auth (`GIT_TERMINAL_PROMPT=0`) and
+    abort on failure to prevent silently unshared work.
+    """
+    env = dict(os.environ)
+    if strict:
+        env["GIT_TERMINAL_PROMPT"] = "0"
+    cmd: list[str] = ["git", "push"]
+    if set_upstream:
+        cmd.append("-u")
+    cmd.extend([remote, ref])
+    cp = _run(cmd, cwd=cwd, capture=True, check=False, env=env, timeout_seconds=timeout_seconds)
+    if cp.returncode == 0:
+        return
+    out = (cp.stdout or "").strip()
+    if len(out) > 2000:
+        out = out[-2000:]
+    if strict:
+        raise SystemExit(
+            "\n".join(
+                [
+                    f"git push failed in strict mode: remote={remote!r} ref={ref!r}",
+                    out or "(no output)",
+                ]
+            )
+        )
+    print(f"[warn] git push failed: remote={remote!r} ref={ref!r}\n{out}", file=sys.stderr)
+
+
+def _preflight_strict_sync_requirements(
+    *,
+    cwd: Path,
+    remote: str,
+    unattended: bool,
+    create_pr: bool,
+) -> None:
+    """Preflight checks to prevent silent 'ghost runs' (expert feedback item B).
+
+    Trigger conditions:
+    - `--unattended` OR `--create-pr`
+
+    Rationale:
+    - In those modes we *must* be able to commit + push reliably; otherwise the
+      repo-as-shared-memory model breaks (duplicate work across machines).
+    """
+    if not (unattended or create_pr):
+        return
+    cache_key = (remote, unattended, create_pr)
+    if cache_key in _PREFLIGHT_STRICT_SYNC_CACHE:
+        return
+    reason = "unattended" if unattended else "create-pr"
+    _require_git_identity(cwd=cwd, reason=reason)
+    _require_git_push_access(cwd=cwd, remote=remote, reason=reason)
+    if create_pr:
+        _require_gh_auth(cwd=cwd, reason=reason)
+    _PREFLIGHT_STRICT_SYNC_CACHE.add(cache_key)
+
+
 def _git_has_changes(cwd: Path) -> bool:
     cp = _run(["git", "status", "--porcelain"], cwd=cwd, capture=True, check=True)
     return bool((cp.stdout or "").strip())
@@ -1224,6 +1444,18 @@ def cmd_tick(args: argparse.Namespace) -> int:
     if args.unattended:
         _require_unattended_ack()
 
+    # Preflight (expert feedback item B): in unattended mode or when PR creation
+    # is requested, hard-fail early if git identity/push auth (and gh auth) are
+    # missing. This prevents "ghost runs" where work happens locally but never
+    # gets pushed/PR'd, leading to duplicate work across machines.
+    if not args.dry_run:
+        _preflight_strict_sync_requirements(
+            cwd=repo,
+            remote=args.remote,
+            unattended=bool(args.unattended),
+            create_pr=bool(args.create_pr),
+        )
+
     done_ids = done_task_ids()
     claimed_ids = claimed_task_ids(args.remote, args.base_branch)
     ready = ready_backlog_tasks(done_ids=done_ids, claimed_ids=claimed_ids)
@@ -1333,6 +1565,15 @@ def cmd_tmux_start(args: argparse.Namespace) -> int:
     repo = _repo_root()
     if args.unattended:
         _require_unattended_ack()
+
+    # Same preflight as `tick`: ensure we won't start an unattended/PR-driven
+    # supervisor loop that cannot commit/push or create PRs.
+    _preflight_strict_sync_requirements(
+        cwd=repo,
+        remote=args.remote,
+        unattended=bool(args.unattended),
+        create_pr=bool(args.create_pr),
+    )
     tmux_ensure_session(args.tmux_session, repo)
     if args.unattended:
         # Robust tmux env propagation so unattended mode works inside tmux windows.
@@ -1397,6 +1638,15 @@ def cmd_loop(args: argparse.Namespace) -> int:
     repo = _repo_root()
     if args.unattended:
         _require_unattended_ack()
+
+    # Preflight once at loop start; subsequent ticks are cached (see
+    # `_PREFLIGHT_STRICT_SYNC_CACHE`).
+    _preflight_strict_sync_requirements(
+        cwd=repo,
+        remote=args.remote,
+        unattended=bool(args.unattended),
+        create_pr=bool(args.create_pr),
+    )
     interval = max(5, int(args.interval_seconds))
     print(f"Swarm loop started (interval={interval}s). Repo: {repo}")
     while True:
@@ -1432,6 +1682,17 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    # Preflight (expert feedback item B): hard-fail early when `--unattended` or
+    # `--create-pr` is requested but the environment cannot commit/push (or
+    # cannot create PRs). This prevents "ghost runs".
+    _preflight_strict_sync_requirements(
+        cwd=repo,
+        remote=args.remote,
+        unattended=bool(args.unattended),
+        create_pr=bool(args.create_pr),
+    )
+    strict_sync = bool(args.unattended or args.create_pr)
+
     task_file = _find_task_file_anywhere(args.task_id, repo)
     if task_file is None:
         raise SystemExit(f"Could not find task file for {args.task_id} under .orchestrator/")
@@ -1447,8 +1708,14 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             note_line=f"Claimed by swarm runner; starting worker (branch: {_git_current_branch(repo)}).",
         )
         _run(["git", "add", str(task_file)], cwd=repo)
-        _run(["git", "commit", "-m", f"{task.task_id}: claim (active)"], cwd=repo, check=False)
-        _run(["git", "push", "-u", args.remote, _git_current_branch(repo)], cwd=repo, check=False)
+        _git_commit(cwd=repo, message=f"{task.task_id}: claim (active)", strict=strict_sync)
+        _git_push(
+            cwd=repo,
+            remote=args.remote,
+            ref=_git_current_branch(repo),
+            set_upstream=True,
+            strict=strict_sync,
+        )
 
     # Worker: Codex exec
     logs_dir = repo / "data" / "tmp" / "swarm_logs"
@@ -1494,8 +1761,14 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         _update_task_status_and_notes(task_path=task_file, new_state="active", note_line=timeout_note)
         if _git_has_changes(repo):
             _run(["git", "add", "-A"], cwd=repo)
-            _run(["git", "commit", "-m", f"{task.task_id}: worker timeout"], cwd=repo, check=False)
-            _run(["git", "push", "-u", args.remote, _git_current_branch(repo)], cwd=repo, check=False)
+            _git_commit(cwd=repo, message=f"{task.task_id}: worker timeout", strict=strict_sync)
+            _git_push(
+                cwd=repo,
+                remote=args.remote,
+                ref=_git_current_branch(repo),
+                set_upstream=True,
+                strict=strict_sync,
+            )
         print(json.dumps({"task_id": task.task_id, "state": "active", "error": "worker_timeout"}, indent=2))
         return 1
 
@@ -1664,8 +1937,14 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     # Commit + push
     if _git_has_changes(repo):
         _run(["git", "add", "-A"], cwd=repo)
-        _run(["git", "commit", "-m", f"{task.task_id}: {new_state}"], cwd=repo, check=False)
-        _run(["git", "push", "-u", args.remote, _git_current_branch(repo)], cwd=repo, check=False)
+        _git_commit(cwd=repo, message=f"{task.task_id}: {new_state}", strict=strict_sync)
+        _git_push(
+            cwd=repo,
+            remote=args.remote,
+            ref=_git_current_branch(repo),
+            set_upstream=True,
+            strict=strict_sync,
+        )
 
     # PR (optional)
     if args.create_pr:
