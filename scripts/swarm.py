@@ -659,6 +659,144 @@ def _git_status_entries(cwd: Path) -> list[dict[str, str]]:
     return entries
 
 
+def _git_ref_exists(cwd: Path, ref: str) -> bool:
+    """Return True if `ref` resolves to an object in this repo.
+
+    We keep this best-effort and dependency-free. This is used to choose a base
+    ref for diff-based ownership checks (committed changes).
+    """
+    cp = _run(["git", "rev-parse", "--verify", ref], cwd=cwd, capture=True, check=False)
+    return cp.returncode == 0
+
+
+def _resolve_base_ref_for_diff(*, cwd: Path, base_branch: str, remote: str) -> str | None:
+    """Resolve a stable base ref for three-dot diffs.
+
+    Prefer the remote-tracking ref when it exists (e.g. `origin/main`), otherwise
+    fall back to the local branch name (`main`).
+    """
+    candidates = [f"{remote}/{base_branch}", base_branch]
+    for ref in candidates:
+        if _git_ref_exists(cwd, ref):
+            return ref
+    return None
+
+
+def _git_diff_name_status_entries(cwd: Path, diff_args: list[str]) -> list[dict[str, str]]:
+    """Parse `git diff --name-status -M ...` output into structured entries.
+
+    Why:
+    - We need explicit detection of deletions and renames (AC3).
+    - We must evaluate path ownership on committed *and* uncommitted changes (AC1/AC2).
+
+    Notes:
+    - We avoid `-z` for simplicity, but we split on tabs so filenames with spaces
+      still parse correctly.
+    - `status` can include a similarity score (e.g. `R100`); `code` is the first
+      letter (`R`, `D`, `A`, `M`, ...).
+    """
+    cp = _run(["git", "diff", "--name-status", "-M", *diff_args], cwd=cwd, capture=True, check=True)
+    entries: list[dict[str, str]] = []
+    for raw_line in (cp.stdout or "").splitlines():
+        line = raw_line.strip("\n")
+        if not line:
+            continue
+
+        parts = line.split("\t")
+        status = parts[0].strip()
+        if not status:
+            continue
+        code = status[:1]
+
+        path = ""
+        old_path = ""
+        if code in {"R", "C"}:
+            # Rename/Copy: status, old, new
+            if len(parts) < 3:
+                continue
+            old_path = parts[1].strip()
+            path = parts[2].strip()
+        else:
+            # Most statuses: status, path
+            if len(parts) < 2:
+                continue
+            path = parts[1].strip()
+
+        if not path and not old_path:
+            continue
+
+        entries.append({"status": status, "code": code, "path": path, "old_path": old_path})
+    return entries
+
+
+def _git_untracked_files(cwd: Path) -> list[str]:
+    """List untracked, non-ignored files (AC2)."""
+    cp = _run(["git", "ls-files", "--others", "--exclude-standard"], cwd=cwd, capture=True, check=True)
+    return [line.strip() for line in (cp.stdout or "").splitlines() if line.strip()]
+
+
+def _collect_changed_paths_with_sources(
+    *,
+    repo: Path,
+    base_ref: str | None,
+) -> tuple[dict[str, set[str]], list[dict[str, str]]]:
+    """Collect changed paths across committed+staged+unstaged+untracked changes.
+
+    Returns:
+    - `path_sources`: map of path -> {sources...}
+      where sources ∈ {"committed", "staged", "unstaged", "untracked"}
+    - `ops`: a list of low-level change records including rename/delete metadata.
+
+    This is the heart of the governance hardening:
+    - Using only `git status` is porous if a Worker creates commits (AC1).
+    - We must also include untracked files to prevent "write forbidden file but don't stage/commit" bypasses (AC2).
+    - We capture rename/delete operations explicitly for task file integrity checks (AC3).
+    """
+
+    def _add_paths(
+        *,
+        source: str,
+        entries: list[dict[str, str]],
+        path_sources: dict[str, set[str]],
+        ops: list[dict[str, str]],
+    ) -> None:
+        for e in entries:
+            rec = dict(e)
+            rec["source"] = source
+            ops.append(rec)
+
+            # For ownership, both the new and old path matter:
+            # - Renaming from disallowed -> allowed still touched disallowed.
+            # - Renaming from allowed -> disallowed must be caught by the new path.
+            for p in [e.get("path", ""), e.get("old_path", "")]:
+                if not p:
+                    continue
+                path_sources.setdefault(p, set()).add(source)
+
+    path_sources: dict[str, set[str]] = {}
+    ops: list[dict[str, str]] = []
+
+    # 1) Committed branch diff (AC1) — only if we can resolve a base ref.
+    if base_ref is not None:
+        committed = _git_diff_name_status_entries(repo, [f"{base_ref}...HEAD"])
+        _add_paths(source="committed", entries=committed, path_sources=path_sources, ops=ops)
+
+    # 2) Staged (index) changes
+    staged = _git_diff_name_status_entries(repo, ["--cached"])
+    _add_paths(source="staged", entries=staged, path_sources=path_sources, ops=ops)
+
+    # 3) Unstaged working tree changes
+    unstaged = _git_diff_name_status_entries(repo, [])
+    _add_paths(source="unstaged", entries=unstaged, path_sources=path_sources, ops=ops)
+
+    # 4) Untracked (but not ignored) files (AC2)
+    for p in _git_untracked_files(repo):
+        path_sources.setdefault(p, set()).add("untracked")
+        ops.append({"status": "??", "code": "?", "path": p, "old_path": "", "source": "untracked"})
+
+    return path_sources, ops
+
+
 def _path_is_allowed(
     *,
     path: str,
@@ -1372,32 +1510,97 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         if cp.returncode != 0:
             gate_ok = False
 
-    status_entries = _git_status_entries(repo)
-    changed = sorted({e["path"] for e in status_entries if e.get("path")})
     task_rel = task_file.relative_to(repo).as_posix()
     task_paths = {task_rel}
+
+    # Ownership enforcement (hardened):
+    #
+    # Historically we only checked `git status` at the end of the run. That is
+    # porous if the Worker (or its tooling) creates commits: committed changes
+    # are invisible to `git status` and can bypass allowed/disallowed paths.
+    #
+    # We now collect changed paths from:
+    # - committed branch diff vs base ref (`base...HEAD`)  [AC1]
+    # - staged changes                                   [AC1]
+    # - unstaged changes                                 [AC1]
+    # - untracked, non-ignored files                     [AC2]
+    #
+    # Then we evaluate *every touched path* against the task's allowed/disallowed
+    # prefixes and the `.orchestrator/` special rules. This is offline and fast
+    # (git-only) [AC4].
+    base_ref = _resolve_base_ref_for_diff(cwd=repo, base_branch=args.base_branch, remote=args.remote)
+    path_sources, ops = _collect_changed_paths_with_sources(repo=repo, base_ref=base_ref)
+
     ownership_ok = True
     ownership_failures: list[dict[str, str]] = []
-    for entry in status_entries:
-        xy = entry.get("xy", "")
-        p = entry.get("path", "")
-        old = entry.get("old_path", "")
-        if old == task_rel and p != task_rel:
+
+    # Fail closed if we cannot compute the committed diff base ref. Without a
+    # base ref we'd lose AC1 protection (committed bypass). This should be rare
+    # in normal operation (tasks are created from base_branch), but if it happens
+    # we block with an actionable error.
+    if base_ref is None:
+        ownership_ok = False
+        ownership_failures.append(
+            {
+                "path": args.base_branch,
+                "reason": "base_ref_unresolved",
+                "sources": "committed",
+            }
+        )
+
+    # Task file integrity checks (AC3): detect deletes/renames even if committed.
+    for op in ops:
+        code = op.get("code", "")
+        src = op.get("source", "")
+        p = op.get("path", "")
+        old = op.get("old_path", "")
+
+        # Rename/move: `R* old -> new`
+        if code == "R" and old == task_rel and p and p != task_rel:
             ownership_ok = False
-            ownership_failures.append({"path": f"{old} -> {p}", "reason": "task_file_moved"})
-        if ("D" in xy) and p == task_rel:
+            ownership_failures.append(
+                {
+                    "path": f"{old} -> {p}",
+                    "reason": "task_file_moved",
+                    "sources": src,
+                }
+            )
+        # Delete: `D path`
+        if code == "D" and p == task_rel:
             ownership_ok = False
-            ownership_failures.append({"path": p, "reason": "task_file_deleted"})
-    for p in changed:
+            ownership_failures.append(
+                {
+                    "path": p,
+                    "reason": "task_file_deleted",
+                    "sources": src,
+                }
+            )
+
+    # Evaluate all touched paths against allow/deny rules (AC1/AC2/AC5).
+    # We collapse duplicates across sources to keep reports readable.
+    seen_failures: set[tuple[str, str]] = set()
+    for p in sorted(path_sources.keys()):
         ok, reason = _path_is_allowed(
             path=p,
             allowed_paths=task.allowed_paths,
             disallowed_paths=task.disallowed_paths,
             task_file_paths=set(task_paths),
         )
-        if not ok:
-            ownership_ok = False
-            ownership_failures.append({"path": p, "reason": reason or "unknown"})
+        if ok:
+            continue
+        r = reason or "unknown"
+        key = (p, r)
+        if key in seen_failures:
+            continue
+        seen_failures.add(key)
+        ownership_ok = False
+        ownership_failures.append(
+            {
+                "path": p,
+                "reason": r,
+                "sources": ",".join(sorted(path_sources.get(p, set()))),
+            }
+        )
 
     # Optional: Codex review summary (best-effort, non-blocking)
     review_path = logs_dir / f"{task.task_id}_{_utc_timestamp_compact()}_judge_review.txt"
@@ -1441,7 +1644,17 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             why.append("gates_failed")
         if not ownership_ok:
             why.append("path_ownership_violation")
-        note = f"@human Judge blocked: {', '.join(why)}. Review log: {review_path.as_posix()}"
+        violations = ""
+        if not ownership_ok and ownership_failures:
+            # Include a clear, grep-able violations list in the task note (AC1).
+            # Format: path[sources]=reason
+            violations = " Violations: " + "; ".join(
+                [
+                    f"{v.get('path')}[{v.get('sources', 'unknown')}]={v.get('reason', 'unknown')}"
+                    for v in ownership_failures
+                ]
+            )
+        note = f"@human Judge blocked: {', '.join(why)}.{violations} Review log: {review_path.as_posix()}"
     if args.repair_context:
         note = f"{note} Repair context: {args.repair_context}"
 
