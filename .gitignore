@@ -99,3 +99,6 @@ data/cache/
 # Logs / temp
 *.log
 *.tmp
+
+# Internal documents
+docs/feedbacks/
