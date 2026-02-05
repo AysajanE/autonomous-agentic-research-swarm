@@ -1017,6 +1017,192 @@ def _collect_changed_paths_with_sources(
     return path_sources, ops
 
 
+_OUTPUT_WILDCARD_TOKENS = ("...", "YYYY-MM-DD", "<", ">", "*", "?")
+
+
+def _normalize_repo_relative_path(value: str) -> str:
+    """Normalize a repo-relative path-like string to POSIX separators."""
+    s = value.strip().replace("\\", "/")
+    if s.startswith("./"):
+        s = s[2:]
+    return s
+
+
+def _output_spec_is_safe(spec: str) -> tuple[bool, str | None]:
+    """Validate an output spec is a safe repo-relative path/pattern.
+
+    Output specs come from task frontmatter and are used to touch the filesystem.
+    We only support *repo-relative* specs and we fail closed on anything that
+    could escape the repo (e.g. absolute paths, `..` segments).
+    """
+    s = _normalize_repo_relative_path(spec)
+    if s == "":
+        return False, "empty_output_spec"
+    if s.startswith("~") or s.startswith("/"):
+        return False, "absolute_output_spec_forbidden"
+    if s.startswith("../") or "/../" in s or s == "..":
+        return False, "path_traversal_forbidden"
+    return True, None
+
+
+def _segment_pattern_to_regex(segment: str) -> re.Pattern[str]:
+    """Convert a single path segment pattern into a regex.
+
+    Supported tokens (kept minimal to match task templates):
+    - `YYYY-MM-DD` -> `\\d{4}-\\d{2}-\\d{2}`
+    - `<...>`      -> wildcard for a single segment (no `/`)
+    - `...`        -> wildcard within the segment
+    - `*` / `?`    -> glob-style wildcards within the segment
+    """
+    # Replace `<...>` placeholders before escaping.
+    s = re.sub(r"<[^>]+>", "{WILD}", segment)
+    s = s.replace("YYYY-MM-DD", "{DATE}")
+    s = s.replace("...", "{ELLIPSIS}")
+
+    rx = re.escape(s)
+    rx = rx.replace(re.escape("{WILD}"), r"[^/]+")
+    rx = rx.replace(re.escape("{DATE}"), r"\d{4}-\d{2}-\d{2}")
+    rx = rx.replace(re.escape("{ELLIPSIS}"), r".*")
+    # Allow basic glob wildcards as a convenience.
+    rx = rx.replace(r"\*", ".*").replace(r"\?", ".")
+    return re.compile("^" + rx + "$")
+
+
+def _has_wildcards(segment: str) -> bool:
+    return any(tok in segment for tok in _OUTPUT_WILDCARD_TOKENS)
+
+
+def _find_paths_matching_output_spec(*, repo: Path, spec: str) -> list[Path]:
+    """Find existing paths that match a repo-relative output spec.
+
+    This matcher is intentionally small and deterministic. It walks the spec
+    segment-by-segment, expanding only when a segment contains known wildcard
+    tokens. This keeps checks fast even when `data/raw/` is large.
+    """
+    s = _normalize_repo_relative_path(spec)
+    segments = [seg for seg in s.split("/") if seg]
+    current: list[Path] = [repo]
+
+    for seg in segments:
+        next_paths: list[Path] = []
+        if not _has_wildcards(seg):
+            for base in current:
+                cand = base / seg
+                if cand.exists():
+                    next_paths.append(cand)
+        else:
+            rx = _segment_pattern_to_regex(seg)
+            for base in current:
+                if not base.is_dir():
+                    continue
+                try:
+                    for child in base.iterdir():
+                        if rx.match(child.name):
+                            next_paths.append(child)
+                except FileNotFoundError:
+                    continue
+
+        current = next_paths
+        if not current:
+            break
+
+    return current
+
+
+def _guess_output_kind(spec: str) -> str:
+    """Return one of: file | dir | dir_nonempty | any."""
+    s = _normalize_repo_relative_path(spec)
+    if s.endswith("/...") or s.endswith("..."):
+        return "dir_nonempty"
+    if s.endswith("/"):
+        return "dir"
+    # Heuristic: common file extensions imply "file".
+    for ext in (
+        ".py",
+        ".md",
+        ".json",
+        ".csv",
+        ".tsv",
+        ".yml",
+        ".yaml",
+        ".svg",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".txt",
+        ".pdf",
+    ):
+        if s.lower().endswith(ext):
+            return "file"
+    return "any"
+
+
+def _strip_trailing_ellipsis(spec: str) -> str:
+    s = _normalize_repo_relative_path(spec)
+    if s.endswith("/..."):
+        return s[:-4]
+    if s.endswith("..."):
+        return s[:-3].rstrip("/")
+    return s
+
+
+def _check_task_outputs_exist(*, repo: Path, task: Task) -> tuple[bool, list[dict[str, str]]]:
+    """Validate that task-declared outputs exist before marking review/done.
+
+    This is a governance hardening check: it prevents tasks from being marked as
+    `ready_for_review` / `done` when they did not actually produce their declared
+    outputs (e.g. an agent "forgot" to write a report, or only updated the task
+    State line).
+    """
+    failures: list[dict[str, str]] = []
+    if not task.outputs:
+        return False, [{"output": "(none)", "reason": "no_outputs_declared"}]
+
+    for raw_spec in task.outputs:
+        spec = raw_spec.strip()
+        ok, why = _output_spec_is_safe(spec)
+        if not ok:
+            failures.append({"output": spec or raw_spec, "reason": why or "invalid_output_spec"})
+            continue
+
+        kind = _guess_output_kind(spec)
+        match_spec = _strip_trailing_ellipsis(spec) if kind == "dir_nonempty" else _normalize_repo_relative_path(spec)
+        matches = _find_paths_matching_output_spec(repo=repo, spec=match_spec)
+
+        if kind == "file":
+            if not any(p.is_file() for p in matches):
+                failures.append({"output": spec, "reason": "missing_file"})
+            continue
+
+        if kind == "dir":
+            if not any(p.is_dir() for p in matches):
+                failures.append({"output": spec, "reason": "missing_dir"})
+            continue
+
+        if kind == "dir_nonempty":
+            ok_any = False
+            for p in matches:
+                if not p.is_dir():
+                    continue
+                try:
+                    next(p.iterdir())
+                    ok_any = True
+                    break
+                except StopIteration:
+                    continue
+                except FileNotFoundError:
+                    continue
+            if not ok_any:
+                failures.append({"output": spec, "reason": "missing_or_empty_dir"})
+            continue
+
+        # kind == "any": require at least one match exists.
+        if not matches:
+            failures.append({"output": spec, "reason": "missing_path"})
+
+    return (len(failures) == 0), failures
+
+
 def _path_is_allowed(
     *,
     path: str,
@@ -1875,6 +2061,13 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             }
         )
 
+    # Output existence gate (expert feedback item C): only allow a task to reach
+    # `ready_for_review` / `done` if it actually produced its declared outputs.
+    outputs_ok = True
+    output_failures: list[dict[str, str]] = []
+    if gate_ok and ownership_ok:
+        outputs_ok, output_failures = _check_task_outputs_exist(repo=repo, task=task)
+
     # Optional: Codex review summary (best-effort, non-blocking)
     review_path = logs_dir / f"{task.task_id}_{_utc_timestamp_compact()}_judge_review.txt"
     try:
@@ -1907,7 +2100,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         pass
 
     # Decide new state
-    if gate_ok and ownership_ok:
+    if gate_ok and ownership_ok and outputs_ok:
         new_state = args.final_state
         note = f"Judge: gates ok; ownership ok. Review log: {review_path.as_posix()}"
     else:
@@ -1917,6 +2110,8 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             why.append("gates_failed")
         if not ownership_ok:
             why.append("path_ownership_violation")
+        if not outputs_ok:
+            why.append("missing_outputs")
         violations = ""
         if not ownership_ok and ownership_failures:
             # Include a clear, grep-able violations list in the task note (AC1).
@@ -1927,7 +2122,12 @@ def cmd_run_task(args: argparse.Namespace) -> int:
                     for v in ownership_failures
                 ]
             )
-        note = f"@human Judge blocked: {', '.join(why)}.{violations} Review log: {review_path.as_posix()}"
+        missing = ""
+        if not outputs_ok and output_failures:
+            missing = " Missing outputs: " + "; ".join(
+                [f"{f.get('output')}={f.get('reason')}" for f in output_failures]
+            )
+        note = f"@human Judge blocked: {', '.join(why)}.{violations}{missing} Review log: {review_path.as_posix()}"
     if args.repair_context:
         note = f"{note} Repair context: {args.repair_context}"
 
@@ -1975,6 +2175,8 @@ def cmd_run_task(args: argparse.Namespace) -> int:
                 "gate_ok": gate_ok,
                 "ownership_ok": ownership_ok,
                 "ownership_failures": ownership_failures,
+                "outputs_ok": outputs_ok,
+                "output_failures": output_failures,
                 "review_log": str(review_path),
             },
             indent=2,
