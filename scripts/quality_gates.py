@@ -24,7 +24,7 @@ class GateResult:
     ok: bool
     details: dict[str, object]
 
-VALID_TASK_STATES = {"backlog", "active", "blocked", "ready_for_review", "done"}
+VALID_TASK_STATES = {"backlog", "active", "blocked", "integration_ready", "ready_for_review", "done"}
 VALID_PROJECT_MODES = {"empirical", "modeling", "hybrid"}
 VALID_TASK_ROLES = {"Planner", "Worker", "Judge"}
 VALID_TASK_PRIORITIES = {"low", "medium", "high"}
@@ -32,6 +32,74 @@ VALID_TASK_PRIORITIES = {"low", "medium", "high"}
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _load_framework_config(path: Path) -> tuple[dict[str, object], str | None]:
+    if not path.exists():
+        return {}, None
+    try:
+        data_raw = json.loads(_read_text(path))
+    except json.JSONDecodeError as exc:
+        return {}, f"invalid_json:{exc}"
+    if not isinstance(data_raw, dict):
+        return {}, "top_level_not_object"
+    return data_raw, None
+
+
+def _parse_framework_mode(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    v = value.strip().strip("'\"").lower()
+    return v or None
+
+
+def _coerce_str_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        s = item.strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def _parse_feature_flags(value: object) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, bool] = {}
+    for k, v in value.items():
+        if not isinstance(k, str):
+            continue
+        if isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, str):
+            out[k] = v.strip().lower() in {"1", "true", "yes"}
+    return out
+
+
+def _default_features_for_mode(mode: str | None) -> dict[str, bool]:
+    if mode == "modeling":
+        return {"registry": False, "modeling": True}
+    if mode == "hybrid":
+        return {"registry": True, "modeling": True}
+    if mode == "empirical":
+        return {"registry": True, "modeling": False}
+    return {"registry": True}
+
+
+def _parse_required_paths(value: object, mode: str | None) -> list[str]:
+    if isinstance(value, list):
+        return _coerce_str_list(value)
+    if isinstance(value, dict):
+        out: list[str] = []
+        out.extend(_coerce_str_list(value.get("common")))
+        if mode:
+            out.extend(_coerce_str_list(value.get(mode)))
+        return out
+    return []
 
 
 def _parse_project_mode(path: Path) -> str | None:
@@ -128,6 +196,26 @@ def _section_has_content(text: str, heading: str) -> bool:
 
 
 def gate_repo_structure() -> GateResult:
+    framework_config_path = Path("contracts/framework.json")
+    framework_config, framework_config_err = _load_framework_config(framework_config_path)
+    if framework_config_err is not None:
+        return GateResult(
+            ok=False,
+            details={
+                "config_path": str(framework_config_path),
+                "config_error": framework_config_err,
+            },
+        )
+
+    config_mode = _parse_framework_mode(framework_config.get("mode"))
+    project_mode = _parse_project_mode(Path("contracts/project.yaml"))
+    mode = config_mode or project_mode
+
+    features = _default_features_for_mode(mode)
+    features.update(_parse_feature_flags(framework_config.get("features")))
+    registry_enabled = bool(features.get("registry", True))
+
+    required_paths = _parse_required_paths(framework_config.get("required_paths"), mode)
     required = [
         Path("AGENTS.md"),
         Path("CLAUDE.md"),
@@ -136,6 +224,7 @@ def gate_repo_structure() -> GateResult:
         Path("contracts/CHANGELOG.md"),
         Path("contracts/assumptions.md"),
         Path("contracts/decisions.md"),
+        Path("contracts/framework.json"),
         Path("contracts/project.yaml"),
         Path("contracts/schemas"),
         Path("docs"),
@@ -155,12 +244,18 @@ def gate_repo_structure() -> GateResult:
         Path("src"),
         Path("src/AGENTS.md"),
         Path("tests"),
-        Path("registry"),
-        Path("registry/AGENTS.md"),
-        Path("registry/CHANGELOG.md"),
-        Path("registry/rollup_registry_v1.csv"),
     ]
-    mode = _parse_project_mode(Path("contracts/project.yaml"))
+
+    if registry_enabled:
+        required.extend(
+            [
+                Path("registry"),
+                Path("registry/README.md"),
+                Path("registry/AGENTS.md"),
+                Path("registry/CHANGELOG.md"),
+            ]
+        )
+
     if mode in {"empirical", "hybrid"}:
         required.extend(
             [
@@ -179,8 +274,34 @@ def gate_repo_structure() -> GateResult:
                 Path("src/model"),
             ]
         )
+    if mode == "hybrid":
+        # Enforce an explicit empirical→modeling interface contract (C3).
+        if not (Path("contracts/hybrid_interface_v1.yaml").exists() or Path("contracts/hybrid_interface_v1.json").exists()):
+            required.append(Path("contracts/hybrid_interface_v1.yaml"))
+
+    required.extend(Path(p) for p in required_paths)
+    # Keep failures readable: avoid duplicate entries in required/missing.
+    unique_required: list[Path] = []
+    seen: set[str] = set()
+    for p in required:
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_required.append(p)
+    required = unique_required
     missing = [str(p) for p in required if not p.exists()]
-    return GateResult(ok=(len(missing) == 0), details={"mode": mode, "missing": missing})
+    return GateResult(
+        ok=(len(missing) == 0),
+        details={
+            "mode": mode,
+            "project_mode": project_mode,
+            "config_mode": config_mode,
+            "registry_enabled": registry_enabled,
+            "required_paths": required_paths,
+            "missing": missing,
+        },
+    )
 
 
 def gate_project_contract() -> GateResult:
@@ -343,6 +464,7 @@ def gate_task_hygiene() -> GateResult:
     task_dirs = [
         Path(".orchestrator/backlog"),
         Path(".orchestrator/active"),
+        Path(".orchestrator/integration_ready"),
         Path(".orchestrator/ready_for_review"),
         Path(".orchestrator/blocked"),
         Path(".orchestrator/done"),
@@ -448,6 +570,7 @@ def gate_task_dependencies() -> GateResult:
     task_dirs = [
         Path(".orchestrator/backlog"),
         Path(".orchestrator/active"),
+        Path(".orchestrator/integration_ready"),
         Path(".orchestrator/ready_for_review"),
         Path(".orchestrator/blocked"),
         Path(".orchestrator/done"),

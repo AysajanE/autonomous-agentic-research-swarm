@@ -1,0 +1,22 @@
+{
+  "mode": "empirical",
+  "features": {
+    "registry": true,
+    "etl": true,
+    "analysis": true,
+    "validation": true,
+    "modeling": false
+  },
+  "network_workstreams": ["W1", "W2"],
+  "prompt_templates": {
+    "planner": "docs/prompts/planner.md",
+    "worker": "docs/prompts/worker.md",
+    "judge": "docs/prompts/judge.md"
+  },
+  "required_paths": {
+    "common": [],
+    "empirical": ["registry/rollup_registry_v1.csv"],
+    "modeling": [],
+    "hybrid": ["registry/rollup_registry_v1.csv", "contracts/hybrid_interface_v1.yaml"]
+  }
+}

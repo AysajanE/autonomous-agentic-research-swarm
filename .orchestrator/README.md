@@ -10,8 +10,14 @@ This directory is the **single source of truth** for multi-agent coordination in
    - `## Notes / Decisions`
 3. The Planner periodically **sweeps** task files and moves them between:
    - `backlog/ → active/ → ready_for_review/ → done/` (happy path)
+   - `backlog/ → active/ → integration_ready/` (optional integration checkpoint)
    - `backlog/ → active/ → blocked/` (blocked path)
    based on the task’s `State:`.
+
+## State semantics
+
+- `ready_for_review` means: **declared outputs exist** and **gates pass**.
+- `integration_ready` (optional) means: **interfaces/contracts are exported** and downstream tasks may proceed (dependencies may treat this as “done enough”).
 
 ## Rules (mirrors `AGENTS.md`)
 
@@ -32,6 +38,7 @@ to be “real-time.” Status becomes visible when branches are pushed/PR’d (o
 
 - `backlog/` — tasks not yet started
 - `active/` — tasks currently being worked
+- `integration_ready/` — optional integration checkpoint (interfaces exported; downstream unblocked)
 - `ready_for_review/` — tasks awaiting Judge verification
 - `blocked/` — blocked tasks (must include blocker note)
 - `done/` — completed tasks
@@ -44,3 +51,5 @@ to be “real-time.” Status becomes visible when branches are pushed/PR’d (o
 - Generic task: `.orchestrator/templates/task_template.md`
 - W0 protocol/contracts tasks: `.orchestrator/templates/task_template_w0_protocol.md`
 - W1/W2 ETL tasks: `.orchestrator/templates/task_template_w1_w2_etl.md`
+- W8 modeling tasks: `.orchestrator/templates/task_template_w8_modeling.md`
+- Hybrid bridge tasks: `.orchestrator/templates/task_template_hybrid_bridge.md`

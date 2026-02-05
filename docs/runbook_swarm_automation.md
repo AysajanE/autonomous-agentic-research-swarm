@@ -309,8 +309,9 @@ python scripts/swarm.py tmux-start \
 Notes:
 
 * `--unattended` makes Codex run with `-a never`.
-* Workstream W1/W2 tasks will get **network access enabled** inside the Codex workspace-write sandbox.
+* Tasks with frontmatter `allow_network: true` will get **network access enabled** inside the Codex workspace-write sandbox, but only if their workstream is allowlisted in `contracts/framework.json` (`network_workstreams`; default: `["W1","W2"]`).
 * The supervisor loop hard-syncs its checkout to `origin/<base-branch>` each tick (to avoid “local main drift”).
+* Each `run-task` writes a run manifest JSON under `reports/status/swarm_runs/` for audit/provenance.
 
 ### Step 3 — (optional) enable automated repair passes
 

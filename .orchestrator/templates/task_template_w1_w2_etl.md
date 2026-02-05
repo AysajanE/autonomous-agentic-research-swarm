@@ -2,9 +2,15 @@
 task_id: T___
 title: "<title>"
 workstream: W__
+task_kind: etl
+allow_network: true
 role: Worker
 priority: medium
 dependencies: []
+requires_tools:
+  - "python"
+  - "git"
+requires_env: []
 allowed_paths:
   - "src/etl/<script>.py"
   - "data/raw/<source>/"
@@ -73,7 +79,8 @@ Describe the source, what we’re pulling, and how it connects to downstream met
 
 ## Status
 
-- State: backlog | active | blocked | ready_for_review | done
+- State: backlog | active | blocked | integration_ready | ready_for_review | done
+- Semantics: `ready_for_review` => outputs exist + gates pass; `integration_ready` => interfaces exported; downstream unblocked (optional).
 - Last updated: YYYY-MM-DD
 
 ## Notes / Decisions

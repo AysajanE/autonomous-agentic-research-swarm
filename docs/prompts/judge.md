@@ -21,3 +21,33 @@ You verify outputs against gates and task success criteria before merge.
 
 - Prefer deterministic checks and minimal additional requirements.
 - Do not request scope creep outside the task’s allowed paths.
+
+## Runtime context (auto-filled)
+
+- Repo root: `{repo_root}`
+- Task path: `{task_path}`
+- Task id: `{task_id}`
+- Workstream: `{workstream}`
+- Task kind: `{task_kind}`
+- Network enabled: `{allow_network}`
+- Repair context: `{repair_context}`
+
+### Allowed paths
+
+{allowed_paths}
+
+### Disallowed paths
+
+{disallowed_paths}
+
+### Declared outputs
+
+{outputs}
+
+### Gates
+
+{gates}
+
+### Stop conditions
+
+{stop_conditions}

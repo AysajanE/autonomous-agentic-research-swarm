@@ -1,0 +1,47 @@
+# Hybrid Interface Contract (v1)
+#
+# Purpose:
+# - Define the explicit boundary between empirical ETL outputs and modeling inputs in hybrid projects.
+# - Prevent "hybrid" from devolving into two parallel projects with an implicit/undocumented interface.
+#
+# Notes:
+# - This is a contract template. Replace placeholders and keep it updated as interfaces evolve.
+# - Prefer linking to manifests / reproducible commands over prose-only descriptions.
+
+version: 1
+
+# Which processed dataset(s) are produced by empirical work and consumed by modeling.
+processed_datasets:
+  - dataset_id: "..."
+    description: "..."
+    # Prefer manifests over raw paths when available.
+    manifests:
+      - "data/processed_manifest/..."
+    outputs:
+      - "data/processed/..."
+
+# Which instance set(s) are generated from the processed dataset(s) and then used by modeling.
+instance_sets:
+  - instance_set_id: "..."
+    description: "..."
+    # Where the instance set lives (prefer `contracts/instances/<name>/`).
+    path: "contracts/instances/..."
+    manifest: "contracts/instances/.../manifest.json"
+
+# How to reproduce instance generation deterministically.
+instance_generation:
+  generator:
+    # A script, Make target, or notebook path that generates instance sets.
+    path: "src/model/instances/..."
+    # Canonical reproduction command (must be runnable from repo root).
+    command: "python ..."
+  inputs:
+    - "data/processed_manifest/..."
+  outputs:
+    - "contracts/instances/..."
+
+# Optional: where instance validation occurs (recommended).
+validation:
+  command: "make test"
+  expected_artifacts:
+    - "reports/validation/..."

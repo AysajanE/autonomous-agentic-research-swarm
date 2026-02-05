@@ -26,3 +26,12 @@ Policy:
     - `contracts/data_dictionary.md`
     - `contracts/schemas/panel_schema_str_v1.yaml`
     - `contracts/schemas/panel_schema_decomp_v1.yaml`
+
+- 2026-02-05 — Add framework config + hybrid interface contracts (owner: @human)
+  - Decision:
+    - Framework-level policy/config lives in `contracts/framework.json` (mode, features, required paths, prompt templates, network workstreams).
+    - Hybrid projects must define an explicit empirical→modeling interface in `contracts/hybrid_interface_v1.yaml` (or JSON equivalent), including which processed datasets feed instance generation and how to reproduce instance sets.
+  - Rationale:
+    - Removes domain-specific assumptions from framework gates and prevents “hybrid = two parallel projects” by enforcing a defined boundary.
+  - Expected impact:
+    - `scripts/quality_gates.py` and `scripts/swarm.py` can be reused across empirical/modeling/hybrid projects with only config/contract changes.

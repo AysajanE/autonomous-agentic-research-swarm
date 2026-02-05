@@ -5,7 +5,7 @@ This directory is the repo’s coordination layer.
 ## Who may change what
 
 - **Planner only**:
-  - moves tasks across folders (`backlog/`, `active/`, `ready_for_review/`, `blocked/`, `done/`)
+  - moves tasks across folders (`backlog/`, `active/`, `integration_ready/`, `ready_for_review/`, `blocked/`, `done/`)
   - edits `workstreams.md`
   - edits anything in `templates/`
 - **Worker may**:
@@ -13,7 +13,7 @@ This directory is the repo’s coordination layer.
   - edit ONLY `## Status` and `## Notes / Decisions`
   - add a new handoff note in `handoff/` using the template
 - **Judge may**:
-  - change task `State:` to `ready_for_review` or `done` after gates pass
+  - change task `State:` to `ready_for_review`, `integration_ready`, or `done` after gates pass (as applicable)
   - request revisions in `Notes / Decisions`
 
 ## Task claiming (if instructed by Planner)
@@ -24,7 +24,9 @@ Workers do NOT self-assign tasks unless the Planner explicitly says so.
 
 - Always update `Last updated` in UTC date (YYYY-MM-DD).
 - `State` must be one of:
-  `backlog | active | blocked | ready_for_review | done`
+  `backlog | active | blocked | integration_ready | ready_for_review | done`
+- `ready_for_review` means: declared outputs exist and gates pass.
+- `integration_ready` (optional) means: interfaces exported; downstream tasks unblocked.
 - If blocked: include `@human` and the smallest decision needed.
 
 ## No rewrites

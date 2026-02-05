@@ -18,8 +18,8 @@ import subprocess
 import sys
 
 
-VALID_TASK_STATES = {"backlog", "active", "blocked", "ready_for_review", "done"}
-LIFECYCLE_DIRS = ["backlog", "active", "ready_for_review", "blocked", "done"]
+VALID_TASK_STATES = {"backlog", "active", "blocked", "integration_ready", "ready_for_review", "done"}
+LIFECYCLE_DIRS = ["backlog", "active", "integration_ready", "ready_for_review", "blocked", "done"]
 
 
 def _repo_root() -> Path:
@@ -105,4 +105,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-

@@ -25,3 +25,33 @@ You execute exactly ONE assigned task in an isolated branch/worktree.
 - Ensure outputs exist at the declared paths.
 - Record repro commands + assumptions/limitations in the task notes.
 - If downstream work depends on your output: write a handoff note.
+
+## Runtime context (auto-filled)
+
+- Repo root: `{repo_root}`
+- Task path: `{task_path}`
+- Task id: `{task_id}`
+- Workstream: `{workstream}`
+- Task kind: `{task_kind}`
+- Network enabled: `{allow_network}`
+- Repair context: `{repair_context}`
+
+### Allowed paths
+
+{allowed_paths}
+
+### Disallowed paths
+
+{disallowed_paths}
+
+### Declared outputs
+
+{outputs}
+
+### Gates
+
+{gates}
+
+### Stop conditions
+
+{stop_conditions}

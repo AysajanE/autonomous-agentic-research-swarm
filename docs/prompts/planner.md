@@ -25,3 +25,7 @@ You are operating in a multi-agent research repo. Coordination happens through f
 ## Stop conditions
 
 - Any ambiguity in protocol/contracts that affects measurement: mark `blocked` with `@human`.
+
+## Runtime context (auto-filled)
+
+- Repo root: `{repo_root}`

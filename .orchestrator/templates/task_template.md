@@ -2,9 +2,15 @@
 task_id: T___
 title: "<title>"
 workstream: W__
+task_kind: ""  # optional: etl|analysis|validation|model|writing|registry|protocol|ops
+allow_network: false  # optional; default false; true requires workstream in contracts/framework.json:network_workstreams
 role: Worker
 priority: medium
 dependencies: []
+requires_tools:
+  - "python"
+  - "git"
+requires_env: []
 allowed_paths:
   - "<path/to/file_or_small_prefix>"
 disallowed_paths:
@@ -70,7 +76,8 @@ Describe *why* this task exists and how it connects to the research plan/protoco
 
 ## Status
 
-- State: backlog | active | blocked | ready_for_review | done
+- State: backlog | active | blocked | integration_ready | ready_for_review | done
+- Semantics: `ready_for_review` => outputs exist + gates pass; `integration_ready` => interfaces exported; downstream unblocked (optional).
 - Last updated: YYYY-MM-DD
 
 ## Notes / Decisions

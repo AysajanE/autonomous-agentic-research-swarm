@@ -32,7 +32,7 @@ If a conflict remains: STOP and mark the task `blocked` with `@human`.
 5) **No “helpful refactors”** outside task scope.
 
 ## 3) Control-plane rules (.orchestrator)
-- **Only the Planner moves tasks** between `.orchestrator/{backlog,active,ready_for_review,blocked,done}/`.
+- **Only the Planner moves tasks** between `.orchestrator/{backlog,active,integration_ready,ready_for_review,blocked,done}/`.
 - **Workers only edit** their task file’s:
   - `## Status`
   - `## Notes / Decisions`

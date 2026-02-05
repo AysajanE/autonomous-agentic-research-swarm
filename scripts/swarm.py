@@ -46,10 +46,12 @@ class Task:
     task_id: str
     title: str
     workstream: str
+    task_kind: str | None
     role: str
     priority: str
     dependencies: list[str]
     parallel_ok: bool
+    allow_network: bool
     allowed_paths: list[str]
     disallowed_paths: list[str]
     outputs: list[str]
@@ -57,6 +59,24 @@ class Task:
     stop_conditions: list[str]
     state: str | None
     last_updated: str | None
+
+
+_DEFAULT_NETWORK_WORKSTREAMS = ["W1", "W2"]
+_DEFAULT_PROMPT_TEMPLATES: dict[str, str] = {
+    "planner": "docs/prompts/planner.md",
+    "worker": "docs/prompts/worker.md",
+    "judge": "docs/prompts/judge.md",
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class FrameworkConfig:
+    mode: str | None
+    features: dict[str, bool]
+    network_workstreams: list[str]
+    prompt_templates: dict[str, Path]
+    required_paths: list[Path]
+    config_path: Path | None
 
 
 def _utc_today() -> str:
@@ -67,8 +87,198 @@ def _utc_timestamp_compact() -> str:
     return _dt.datetime.now(tz=_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+_REPO_ROOT_CACHE: Path | None = None
+
+
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    global _REPO_ROOT_CACHE
+    if _REPO_ROOT_CACHE is not None:
+        return _REPO_ROOT_CACHE
+
+    env_root = os.environ.get("SWARM_REPO_ROOT", "").strip()
+    if env_root:
+        root = Path(env_root).expanduser().resolve()
+        if not root.is_dir():
+            raise SystemExit(f"SWARM_REPO_ROOT is set but is not a directory: {root}")
+        _REPO_ROOT_CACHE = root
+        return root
+
+    try:
+        cp = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(Path.cwd()),
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        top = (cp.stdout or "").strip()
+        if top:
+            root = Path(top).resolve()
+            if root.is_dir():
+                _REPO_ROOT_CACHE = root
+                return root
+    except Exception:
+        pass
+
+    root = Path(__file__).resolve().parents[1]
+    _REPO_ROOT_CACHE = root
+    return root
+
+
+def _coerce_str_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [x for x in value if isinstance(x, str)]
+
+
+def _parse_framework_mode(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    v = value.strip().strip("'\"").lower()
+    return v or None
+
+
+def _parse_project_mode(path: Path) -> str | None:
+    """Parse a minimal YAML key: `mode: <value>` from contracts/project.yaml.
+
+    We intentionally avoid external YAML dependencies in the supervisor.
+    """
+    if not path.exists():
+        return None
+    for raw_line in _read_text(path).splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if not line.startswith("mode:"):
+            continue
+        value = line.split(":", 1)[1].strip().strip("'\"").lower()
+        return value
+    return None
+
+
+def _default_features_for_mode(mode: str | None) -> dict[str, bool]:
+    if mode == "modeling":
+        return {"registry": False, "modeling": True}
+    if mode == "hybrid":
+        return {"registry": True, "modeling": True}
+    if mode == "empirical":
+        return {"registry": True, "modeling": False}
+    return {"registry": True}
+
+
+def _parse_feature_flags(value: object) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, bool] = {}
+    for k, v in value.items():
+        if not isinstance(k, str):
+            continue
+        if isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, str):
+            out[k] = v.strip().lower() in {"1", "true", "yes"}
+    return out
+
+
+def _parse_required_paths(value: object, mode: str | None) -> list[str]:
+    if isinstance(value, list):
+        return [x.strip() for x in _coerce_str_list(value) if x.strip()]
+    if isinstance(value, dict):
+        out: list[str] = []
+        out.extend([x.strip() for x in _coerce_str_list(value.get("common")) if x.strip()])
+        if mode:
+            out.extend([x.strip() for x in _coerce_str_list(value.get(mode)) if x.strip()])
+        return out
+    return []
+
+
+def _resolve_repo_relative_path(*, repo: Path, raw_path: str) -> Path:
+    p = Path(raw_path).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return (repo / p).resolve()
+
+
+def load_framework_config(repo: Path) -> FrameworkConfig:
+    config_path = repo / "contracts" / "framework.json"
+    data: dict[str, object] = {}
+    if config_path.exists():
+        try:
+            data_raw = json.loads(_read_text(config_path))
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Invalid JSON in {config_path}: {exc}") from exc
+        if isinstance(data_raw, dict):
+            data = data_raw
+
+    config_mode = _parse_framework_mode(data.get("mode"))
+    project_mode = _parse_project_mode(repo / "contracts" / "project.yaml")
+    mode = config_mode or project_mode
+
+    features = _default_features_for_mode(mode)
+    features.update(_parse_feature_flags(data.get("features")))
+
+    network_workstreams = _DEFAULT_NETWORK_WORKSTREAMS
+    if "network_workstreams" in data:
+        parsed = _coerce_str_list(data.get("network_workstreams"))
+        if parsed:
+            network_workstreams = parsed
+
+    prompt_templates = dict(_DEFAULT_PROMPT_TEMPLATES)
+    raw_prompts = data.get("prompt_templates")
+    if isinstance(raw_prompts, dict):
+        for k, v in raw_prompts.items():
+            if isinstance(k, str) and isinstance(v, str) and v.strip():
+                prompt_templates[k] = v.strip()
+
+    resolved_prompts: dict[str, Path] = {
+        k: _resolve_repo_relative_path(repo=repo, raw_path=v) for k, v in prompt_templates.items()
+    }
+
+    required_paths = [
+        _resolve_repo_relative_path(repo=repo, raw_path=p)
+        for p in _parse_required_paths(data.get("required_paths"), mode)
+    ]
+
+    return FrameworkConfig(
+        mode=mode,
+        features=dict(features),
+        network_workstreams=list(network_workstreams),
+        prompt_templates=resolved_prompts,
+        required_paths=required_paths,
+        config_path=config_path if config_path.exists() else None,
+    )
+
+
+def _stringify_prompt_context(context: dict[str, object]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for k, v in context.items():
+        if v is None:
+            out[k] = ""
+            continue
+        if isinstance(v, (list, tuple, set)):
+            out[k] = "\n".join(str(x) for x in v)
+            continue
+        out[k] = str(v)
+    return out
+
+
+def load_prompt(template_path: Path, context: dict[str, object]) -> str:
+    if not template_path.exists():
+        raise SystemExit(f"Prompt template not found: {template_path}")
+    text = _read_text(template_path)
+    ctx = _stringify_prompt_context(context)
+    out = text
+    for key in sorted(ctx.keys(), key=len, reverse=True):
+        out = out.replace("{" + key + "}", ctx[key])
+    return out
+
+
+def _format_bullets(items: Iterable[str]) -> str:
+    xs = [x.strip() for x in items if isinstance(x, str) and x.strip()]
+    if not xs:
+        return "- (none)"
+    return "\n".join(f"- {x}" for x in xs)
 
 
 def _run(
@@ -208,6 +418,10 @@ def load_task(path: Path) -> Task:
     task_id = _get_str("task_id")
     title = _get_str("title")
     workstream = _get_str("workstream")
+    task_kind = None
+    raw_kind = fm.get("task_kind")
+    if isinstance(raw_kind, str):
+        task_kind = raw_kind.strip() or None
     role = _get_str("role")
     priority = _get_str("priority").lower()
 
@@ -216,6 +430,12 @@ def load_task(path: Path) -> Task:
     raw_parallel_ok = fm.get("parallel_ok")
     if isinstance(raw_parallel_ok, str):
         parallel_ok = raw_parallel_ok.strip().lower() in {"1", "true", "yes"}
+    allow_network = False
+    raw_allow_network = fm.get("allow_network")
+    if isinstance(raw_allow_network, bool):
+        allow_network = raw_allow_network
+    elif isinstance(raw_allow_network, str):
+        allow_network = raw_allow_network.strip().lower() in {"1", "true", "yes"}
     allowed_paths = _coerce_list(fm.get("allowed_paths"))
     disallowed_paths = _coerce_list(fm.get("disallowed_paths"))
     outputs = _coerce_list(fm.get("outputs"))
@@ -230,10 +450,12 @@ def load_task(path: Path) -> Task:
         task_id=task_id,
         title=title,
         workstream=workstream,
+        task_kind=task_kind,
         role=role,
         priority=priority,
         dependencies=dependencies,
         parallel_ok=parallel_ok,
+        allow_network=allow_network,
         allowed_paths=allowed_paths,
         disallowed_paths=disallowed_paths,
         outputs=outputs,
@@ -453,9 +675,19 @@ def choose_tasks_claude(
         "additionalProperties": True,
     }
 
+    repo = _repo_root()
+    config = load_framework_config(repo)
+    planner_template = config.prompt_templates.get("planner") or (repo / _DEFAULT_PROMPT_TEMPLATES["planner"])
+    base_prompt = load_prompt(
+        planner_template,
+        {
+            "repo_root": repo.as_posix(),
+        },
+    ).strip()
     prompt = "\n".join(
         [
-            "Role: Planner.",
+            base_prompt,
+            "",
             "You are selecting which tasks to start right now for an autonomous research swarm.",
             "",
             "Rules:",
@@ -468,7 +700,7 @@ def choose_tasks_claude(
             "Ready tasks (JSON):",
             json.dumps(payload, indent=2, sort_keys=True),
         ]
-    )
+    ).strip() + "\n"
 
     cmd: list[str] = [
         claude,
@@ -635,6 +867,15 @@ def tmux_spawn_task_window(
 def _git_current_branch(cwd: Path) -> str:
     cp = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd, capture=True, check=True)
     return (cp.stdout or "").strip()
+
+
+def _git_head_sha(cwd: Path) -> str | None:
+    try:
+        cp = _run(["git", "rev-parse", "HEAD"], cwd=cwd, capture=True, check=True)
+        sha = (cp.stdout or "").strip()
+        return sha or None
+    except Exception:
+        return None
 
 
 def _git_config_get(cwd: Path, key: str) -> str | None:
@@ -1211,6 +1452,10 @@ def _path_is_allowed(
     task_file_paths: set[str],
 ) -> tuple[bool, str | None]:
     norm = path.replace("\\", "/")
+
+    # Supervisor-owned audit logs (A5): always allowed.
+    if norm.startswith("reports/status/swarm_runs/"):
+        return True, None
 
     # Enforce control-plane governance:
     # - allow only the current task file, and handoff notes
@@ -1857,8 +2102,28 @@ def cmd_loop(args: argparse.Namespace) -> int:
             return 0
 
 
+def _swarm_run_manifest_path(*, repo: Path, task_id: str, timestamp_utc: str) -> Path:
+    out_dir = repo / "reports" / "status" / "swarm_runs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base = out_dir / f"{task_id}_{timestamp_utc}.json"
+    if not base.exists():
+        return base
+    for i in range(1, 1000):
+        cand = out_dir / f"{task_id}_{timestamp_utc}_{i}.json"
+        if not cand.exists():
+            return cand
+    return base
+
+
+def _write_json_file(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+
+
 def cmd_run_task(args: argparse.Namespace) -> int:
     repo = _repo_root()
+    config = load_framework_config(repo)
+    run_ts = _utc_timestamp_compact()
 
     # Guardrails for unattended mode.
     if args.unattended:
@@ -1884,70 +2149,95 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         raise SystemExit(f"Could not find task file for {args.task_id} under .orchestrator/")
 
     task = load_task(task_file)
-    allow_network = task.workstream in {"W1", "W2"}
+    manifest_path = _swarm_run_manifest_path(repo=repo, task_id=task.task_id, timestamp_utc=run_ts)
+    run_manifest: dict[str, Any] = {
+        "timestamp_utc": run_ts,
+        "task": {
+            "task_id": task.task_id,
+            "title": task.title,
+            "workstream": task.workstream,
+            "task_kind": task.task_kind,
+            "task_path": task_file.as_posix(),
+            "allow_network_requested": bool(task.allow_network),
+        },
+        "repo": {
+            "repo_root": repo.as_posix(),
+            "git_sha": _git_head_sha(repo),
+        },
+        "invocation": {
+            "argv": list(sys.argv),
+        },
+        "config": {
+            "config_path": config.config_path.as_posix() if config.config_path else None,
+            "network_workstreams": list(config.network_workstreams),
+            "prompt_templates": {k: v.as_posix() for k, v in sorted(config.prompt_templates.items())},
+        },
+        "worker": {},
+        "judge": {},
+        "result": {},
+    }
 
-    # Claim: set State=active (do NOT move lifecycle folders; Planner sweeps separately)
-    if task.state == "backlog":
-        _update_task_status_and_notes(
-            task_path=task_file,
-            new_state="active",
-            note_line=f"Claimed by swarm runner; starting worker (branch: {_git_current_branch(repo)}).",
-        )
-        _run(["git", "add", str(task_file)], cwd=repo)
-        _git_commit(cwd=repo, message=f"{task.task_id}: claim (active)", strict=strict_sync)
-        _git_push(
-            cwd=repo,
-            remote=args.remote,
-            ref=_git_current_branch(repo),
-            set_upstream=True,
-            strict=strict_sync,
-        )
+    new_state: str | None = None
+    gate_ok = True
+    gate_outputs: list[dict[str, Any]] = []
+    ownership_ok = True
+    ownership_failures: list[dict[str, str]] = []
+    outputs_ok = True
+    output_failures: list[dict[str, str]] = []
+    review_path: Path | None = None
+    worker_last_msg: Path | None = None
 
-    # Worker: Codex exec
-    logs_dir = repo / "data" / "tmp" / "swarm_logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    worker_last_msg = logs_dir / f"{task.task_id}_{_utc_timestamp_compact()}_worker_last_message.txt"
+    prompt_context = {
+        "repo_root": repo.as_posix(),
+        "task_path": task_file.as_posix(),
+        "task_id": task.task_id,
+        "title": task.title,
+        "workstream": task.workstream,
+        "task_kind": task.task_kind or "",
+        "allow_network": "true" if task.allow_network else "false",
+        "allowed_paths": _format_bullets(task.allowed_paths),
+        "disallowed_paths": _format_bullets(task.disallowed_paths),
+        "outputs": _format_bullets(task.outputs),
+        "gates": _format_bullets(task.gates),
+        "stop_conditions": _format_bullets(task.stop_conditions),
+        "repair_context": args.repair_context or "",
+    }
 
-    worker_prompt = "\n".join(
-        [
-            f"Role: Worker. Task: {task_file.as_posix()}",
-            "Follow AGENTS.md and nested AGENTS.md.",
-            "Execute exactly ONE task (this task).",
-            "Respect allowed/disallowed paths in the task frontmatter.",
-            "Workers: edit ONLY the task file sections `## Status` and `## Notes / Decisions`.",
-            "Run the task gates/commands before declaring success.",
-            *(["Repair context: " + str(args.repair_context)] if args.repair_context else []),
-            *(
-                [
-                    "This is an automated repair pass. Focus on making the PR mergeable and checks pass.",
-                    "Do not broaden scope; make the smallest change that fixes the failure.",
-                ]
-                if args.repair_context
-                else []
-            ),
-        ]
-    )
-    worker_cmd = _codex_exec_cmd(
-        prompt=worker_prompt,
-        model=args.codex_model,
-        sandbox=args.codex_sandbox,
-        unattended=args.unattended,
-        allow_network=allow_network,
-        workdir=repo,
-        output_last_message=worker_last_msg,
-    )
-    worker_timeout = int(args.max_worker_seconds) if args.max_worker_seconds else None
     try:
-        _run(worker_cmd, cwd=repo, check=False, timeout_seconds=worker_timeout)
-    except subprocess.TimeoutExpired:
-        timeout_note = (
-            f"Worker timed out after {worker_timeout}s; leaving task active. "
-            f"Last message: {worker_last_msg.as_posix()}"
-        )
-        _update_task_status_and_notes(task_path=task_file, new_state="active", note_line=timeout_note)
-        if _git_has_changes(repo):
-            _run(["git", "add", "-A"], cwd=repo)
-            _git_commit(cwd=repo, message=f"{task.task_id}: worker timeout", strict=strict_sync)
+        # A1: Enforce network policy via frontmatter + configurable allowlist.
+        allow_network = bool(task.allow_network)
+        if allow_network and task.workstream not in set(config.network_workstreams):
+            new_state = "blocked"
+            note = (
+                "@human Network policy violation: task requests `allow_network: true` but "
+                f"workstream={task.workstream!r} is not allowed "
+                f"(config.network_workstreams={sorted(set(config.network_workstreams))!r}). "
+                "Set `allow_network: false` in the task, or update `contracts/framework.json` to allow this workstream."
+            )
+            _update_task_status_and_notes(task_path=task_file, new_state=new_state, note_line=note)
+            if _git_has_changes(repo):
+                _run(["git", "add", "-A"], cwd=repo)
+                _git_commit(cwd=repo, message=f"{task.task_id}: {new_state}", strict=strict_sync)
+                _git_push(
+                    cwd=repo,
+                    remote=args.remote,
+                    ref=_git_current_branch(repo),
+                    set_upstream=True,
+                    strict=strict_sync,
+                )
+            run_manifest["result"] = {"state": new_state, "blocked_reason": "network_policy"}
+            print(json.dumps({"task_id": task.task_id, "state": new_state, "error": "network_policy", "run_manifest": str(manifest_path)}, indent=2, sort_keys=True))
+            return 1
+
+        # Claim: set State=active (do NOT move lifecycle folders; Planner sweeps separately)
+        if task.state == "backlog":
+            _update_task_status_and_notes(
+                task_path=task_file,
+                new_state="active",
+                note_line=f"Claimed by swarm runner; starting worker (branch: {_git_current_branch(repo)}).",
+            )
+            _run(["git", "add", str(task_file)], cwd=repo)
+            _git_commit(cwd=repo, message=f"{task.task_id}: claim (active)", strict=strict_sync)
             _git_push(
                 cwd=repo,
                 remote=args.remote,
@@ -1955,235 +2245,338 @@ def cmd_run_task(args: argparse.Namespace) -> int:
                 set_upstream=True,
                 strict=strict_sync,
             )
-        print(json.dumps({"task_id": task.task_id, "state": "active", "error": "worker_timeout"}, indent=2))
-        return 1
 
-    # Judge: run declared gates (deterministic) + enforce path ownership
-    gate_ok = True
-    gate_outputs: list[dict[str, Any]] = []
-    for gate in task.gates:
-        # gates are declared in task files; run as shell for simplicity
-        print(f"[judge] running gate: {gate}")
-        cp = subprocess.run(gate, cwd=str(repo), shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        gate_outputs.append({"command": gate, "returncode": cp.returncode, "output": (cp.stdout or "")[-2000:]})
-        if cp.returncode != 0:
-            gate_ok = False
+        # Worker: Codex exec
+        logs_dir = repo / "data" / "tmp" / "swarm_logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        worker_last_msg = logs_dir / f"{task.task_id}_{run_ts}_worker_last_message.txt"
 
-    task_rel = task_file.relative_to(repo).as_posix()
-    task_paths = {task_rel}
+        worker_template = config.prompt_templates.get("worker") or (repo / _DEFAULT_PROMPT_TEMPLATES["worker"])
+        worker_prompt = load_prompt(worker_template, prompt_context).rstrip() + "\n"
+        if args.repair_context:
+            worker_prompt = worker_prompt.rstrip() + "\n\nThis is an automated repair pass. Focus on making the PR mergeable and checks pass.\nDo not broaden scope; make the smallest change that fixes the failure.\n"
 
-    # Ownership enforcement (hardened):
-    #
-    # Historically we only checked `git status` at the end of the run. That is
-    # porous if the Worker (or its tooling) creates commits: committed changes
-    # are invisible to `git status` and can bypass allowed/disallowed paths.
-    #
-    # We now collect changed paths from:
-    # - committed branch diff vs base ref (`base...HEAD`)  [AC1]
-    # - staged changes                                   [AC1]
-    # - unstaged changes                                 [AC1]
-    # - untracked, non-ignored files                     [AC2]
-    #
-    # Then we evaluate *every touched path* against the task's allowed/disallowed
-    # prefixes and the `.orchestrator/` special rules. This is offline and fast
-    # (git-only) [AC4].
-    base_ref = _resolve_base_ref_for_diff(cwd=repo, base_branch=args.base_branch, remote=args.remote)
-    path_sources, ops = _collect_changed_paths_with_sources(repo=repo, base_ref=base_ref)
-
-    ownership_ok = True
-    ownership_failures: list[dict[str, str]] = []
-
-    # Fail closed if we cannot compute the committed diff base ref. Without a
-    # base ref we'd lose AC1 protection (committed bypass). This should be rare
-    # in normal operation (tasks are created from base_branch), but if it happens
-    # we block with an actionable error.
-    if base_ref is None:
-        ownership_ok = False
-        ownership_failures.append(
-            {
-                "path": args.base_branch,
-                "reason": "base_ref_unresolved",
-                "sources": "committed",
-            }
+        worker_cmd = _codex_exec_cmd(
+            prompt=worker_prompt,
+            model=args.codex_model,
+            sandbox=args.codex_sandbox,
+            unattended=args.unattended,
+            allow_network=allow_network,
+            workdir=repo,
+            output_last_message=worker_last_msg,
         )
+        run_manifest["worker"] = {
+            "prompt_template": worker_template.as_posix(),
+            "command": worker_cmd,
+            "sandbox": args.codex_sandbox,
+            "model": args.codex_model,
+            "allow_network": allow_network,
+            "output_last_message": worker_last_msg.as_posix(),
+        }
 
-    # Task file integrity checks (AC3): detect deletes/renames even if committed.
-    for op in ops:
-        code = op.get("code", "")
-        src = op.get("source", "")
-        p = op.get("path", "")
-        old = op.get("old_path", "")
+        worker_timeout = int(args.max_worker_seconds) if args.max_worker_seconds else None
+        try:
+            worker_cp = _run(worker_cmd, cwd=repo, check=False, timeout_seconds=worker_timeout)
+            run_manifest["worker"]["returncode"] = worker_cp.returncode
+        except subprocess.TimeoutExpired:
+            run_manifest["worker"]["error"] = "timeout"
+            run_manifest["worker"]["timeout_seconds"] = worker_timeout
+            timeout_note = (
+                f"Worker timed out after {worker_timeout}s; leaving task active. "
+                f"Last message: {worker_last_msg.as_posix()}"
+            )
+            _update_task_status_and_notes(task_path=task_file, new_state="active", note_line=timeout_note)
+            if _git_has_changes(repo):
+                _run(["git", "add", "-A"], cwd=repo)
+                _git_commit(cwd=repo, message=f"{task.task_id}: worker timeout", strict=strict_sync)
+                _git_push(
+                    cwd=repo,
+                    remote=args.remote,
+                    ref=_git_current_branch(repo),
+                    set_upstream=True,
+                    strict=strict_sync,
+                )
+            run_manifest["result"] = {"state": "active", "error": "worker_timeout"}
+            print(json.dumps({"task_id": task.task_id, "state": "active", "error": "worker_timeout", "run_manifest": str(manifest_path)}, indent=2, sort_keys=True))
+            return 1
 
-        # Rename/move: `R* old -> new`
-        if code == "R" and old == task_rel and p and p != task_rel:
+        # Judge: run declared gates (deterministic) + enforce path ownership
+        gate_ok = True
+        gate_outputs = []
+        for gate in task.gates:
+            # gates are declared in task files; run as shell for simplicity
+            print(f"[judge] running gate: {gate}")
+            cp = subprocess.run(
+                gate,
+                cwd=str(repo),
+                shell=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            gate_outputs.append({"command": gate, "returncode": cp.returncode, "output": (cp.stdout or "")[-2000:]})
+            if cp.returncode != 0:
+                gate_ok = False
+
+        task_rel = task_file.relative_to(repo).as_posix()
+        task_paths = {task_rel}
+
+        # Ownership enforcement (hardened):
+        #
+        # Historically we only checked `git status` at the end of the run. That is
+        # porous if the Worker (or its tooling) creates commits: committed changes
+        # are invisible to `git status` and can bypass allowed/disallowed paths.
+        #
+        # We now collect changed paths from:
+        # - committed branch diff vs base ref (`base...HEAD`)  [AC1]
+        # - staged changes                                   [AC1]
+        # - unstaged changes                                 [AC1]
+        # - untracked, non-ignored files                     [AC2]
+        #
+        # Then we evaluate *every touched path* against the task's allowed/disallowed
+        # prefixes and the `.orchestrator/` special rules. This is offline and fast
+        # (git-only) [AC4].
+        base_ref = _resolve_base_ref_for_diff(cwd=repo, base_branch=args.base_branch, remote=args.remote)
+        path_sources, ops = _collect_changed_paths_with_sources(repo=repo, base_ref=base_ref)
+
+        ownership_ok = True
+        ownership_failures = []
+
+        # Fail closed if we cannot compute the committed diff base ref. Without a
+        # base ref we'd lose AC1 protection (committed bypass). This should be rare
+        # in normal operation (tasks are created from base_branch), but if it happens
+        # we block with an actionable error.
+        if base_ref is None:
             ownership_ok = False
             ownership_failures.append(
                 {
-                    "path": f"{old} -> {p}",
-                    "reason": "task_file_moved",
-                    "sources": src,
+                    "path": args.base_branch,
+                    "reason": "base_ref_unresolved",
+                    "sources": "committed",
                 }
             )
-        # Delete: `D path`
-        if code == "D" and p == task_rel:
+
+        # Task file integrity checks (AC3): detect deletes/renames even if committed.
+        for op in ops:
+            code = op.get("code", "")
+            src = op.get("source", "")
+            p = op.get("path", "")
+            old = op.get("old_path", "")
+
+            # Rename/move: `R* old -> new`
+            if code == "R" and old == task_rel and p and p != task_rel:
+                ownership_ok = False
+                ownership_failures.append(
+                    {
+                        "path": f"{old} -> {p}",
+                        "reason": "task_file_moved",
+                        "sources": src,
+                    }
+                )
+            # Delete: `D path`
+            if code == "D" and p == task_rel:
+                ownership_ok = False
+                ownership_failures.append(
+                    {
+                        "path": p,
+                        "reason": "task_file_deleted",
+                        "sources": src,
+                    }
+                )
+
+        # Evaluate all touched paths against allow/deny rules (AC1/AC2/AC5).
+        # We collapse duplicates across sources to keep reports readable.
+        seen_failures: set[tuple[str, str]] = set()
+        for p in sorted(path_sources.keys()):
+            ok, reason = _path_is_allowed(
+                path=p,
+                allowed_paths=task.allowed_paths,
+                disallowed_paths=task.disallowed_paths,
+                task_file_paths=set(task_paths),
+            )
+            if ok:
+                continue
+            r = reason or "unknown"
+            key = (p, r)
+            if key in seen_failures:
+                continue
+            seen_failures.add(key)
             ownership_ok = False
             ownership_failures.append(
                 {
                     "path": p,
-                    "reason": "task_file_deleted",
-                    "sources": src,
+                    "reason": r,
+                    "sources": ",".join(sorted(path_sources.get(p, set()))),
                 }
             )
 
-    # Evaluate all touched paths against allow/deny rules (AC1/AC2/AC5).
-    # We collapse duplicates across sources to keep reports readable.
-    seen_failures: set[tuple[str, str]] = set()
-    for p in sorted(path_sources.keys()):
-        ok, reason = _path_is_allowed(
-            path=p,
-            allowed_paths=task.allowed_paths,
-            disallowed_paths=task.disallowed_paths,
-            task_file_paths=set(task_paths),
-        )
-        if ok:
-            continue
-        r = reason or "unknown"
-        key = (p, r)
-        if key in seen_failures:
-            continue
-        seen_failures.add(key)
-        ownership_ok = False
-        ownership_failures.append(
-            {
-                "path": p,
-                "reason": r,
-                "sources": ",".join(sorted(path_sources.get(p, set()))),
-            }
-        )
+        # Output existence gate (expert feedback item C): only allow a task to reach
+        # `ready_for_review` / `done` if it actually produced its declared outputs.
+        outputs_ok = True
+        output_failures = []
+        outputs_check_ran = False
+        if gate_ok and ownership_ok:
+            outputs_check_ran = True
+            outputs_ok, output_failures = _check_task_outputs_exist(repo=repo, task=task)
 
-    # Output existence gate (expert feedback item C): only allow a task to reach
-    # `ready_for_review` / `done` if it actually produced its declared outputs.
-    outputs_ok = True
-    output_failures: list[dict[str, str]] = []
-    if gate_ok and ownership_ok:
-        outputs_ok, output_failures = _check_task_outputs_exist(repo=repo, task=task)
-
-    # Optional: Codex review summary (best-effort, non-blocking)
-    review_path = logs_dir / f"{task.task_id}_{_utc_timestamp_compact()}_judge_review.txt"
-    try:
-        review_prompt = "\n".join(
-            [
-                "Role: Judge.",
-                "Review ONLY the uncommitted changes for this task.",
-                "Check alignment with the task success criteria and any obvious contract violations.",
-                "Return a short, actionable bullet list. Do not propose scope creep.",
-            ]
-        )
-        review_cmd = _codex_review_cmd(
-            prompt=review_prompt,
-            unattended=args.unattended,
-            base_branch=args.base_branch,
-            workdir=repo,
-        )
+        # Optional: Codex review summary (best-effort, non-blocking)
+        review_path = logs_dir / f"{task.task_id}_{run_ts}_judge_review.txt"
         try:
-            cp = _run(
-                review_cmd,
-                cwd=repo,
-                capture=True,
-                check=False,
-                timeout_seconds=int(args.max_review_seconds) if args.max_review_seconds else None,
+            judge_template = config.prompt_templates.get("judge") or (repo / _DEFAULT_PROMPT_TEMPLATES["judge"])
+            review_prompt = load_prompt(judge_template, prompt_context).rstrip()
+            review_prompt = (
+                review_prompt
+                + "\n\nReview ONLY the uncommitted changes for this task.\n"
+                "Check alignment with the task success criteria and any obvious contract violations.\n"
+                "Return a short, actionable bullet list. Do not propose scope creep.\n"
             )
-        except subprocess.TimeoutExpired:
-            cp = subprocess.CompletedProcess(args=review_cmd, returncode=124, stdout="")
-        review_path.write_text(cp.stdout or "", encoding="utf-8")
-    except Exception:
-        pass
-
-    # Decide new state
-    if gate_ok and ownership_ok and outputs_ok:
-        new_state = args.final_state
-        note = f"Judge: gates ok; ownership ok. Review log: {review_path.as_posix()}"
-    else:
-        new_state = "blocked"
-        why: list[str] = []
-        if not gate_ok:
-            why.append("gates_failed")
-        if not ownership_ok:
-            why.append("path_ownership_violation")
-        if not outputs_ok:
-            why.append("missing_outputs")
-        violations = ""
-        if not ownership_ok and ownership_failures:
-            # Include a clear, grep-able violations list in the task note (AC1).
-            # Format: path[sources]=reason
-            violations = " Violations: " + "; ".join(
-                [
-                    f"{v.get('path')}[{v.get('sources', 'unknown')}]={v.get('reason', 'unknown')}"
-                    for v in ownership_failures
-                ]
+            review_cmd = _codex_review_cmd(
+                prompt=review_prompt,
+                unattended=args.unattended,
+                base_branch=args.base_branch,
+                workdir=repo,
             )
-        missing = ""
-        if not outputs_ok and output_failures:
-            missing = " Missing outputs: " + "; ".join(
-                [f"{f.get('output')}={f.get('reason')}" for f in output_failures]
-            )
-        note = f"@human Judge blocked: {', '.join(why)}.{violations}{missing} Review log: {review_path.as_posix()}"
-    if args.repair_context:
-        note = f"{note} Repair context: {args.repair_context}"
+            run_manifest["judge"]["review"] = {
+                "prompt_template": judge_template.as_posix(),
+                "command": review_cmd,
+                "output_path": review_path.as_posix(),
+            }
+            try:
+                cp = _run(
+                    review_cmd,
+                    cwd=repo,
+                    capture=True,
+                    check=False,
+                    timeout_seconds=int(args.max_review_seconds) if args.max_review_seconds else None,
+                )
+            except subprocess.TimeoutExpired:
+                cp = subprocess.CompletedProcess(args=review_cmd, returncode=124, stdout="")
+                run_manifest["judge"]["review"]["error"] = "timeout"
+            review_path.write_text(cp.stdout or "", encoding="utf-8")
+            run_manifest["judge"]["review"]["returncode"] = cp.returncode
+        except Exception as exc:
+            run_manifest["judge"]["review_error"] = str(exc)
 
-    # Update task status (do NOT move file; Planner action is separate via sweep_tasks.py)
-    _update_task_status_and_notes(task_path=task_file, new_state=new_state, note_line=note)
-
-    # Commit + push
-    if _git_has_changes(repo):
-        _run(["git", "add", "-A"], cwd=repo)
-        _git_commit(cwd=repo, message=f"{task.task_id}: {new_state}", strict=strict_sync)
-        _git_push(
-            cwd=repo,
-            remote=args.remote,
-            ref=_git_current_branch(repo),
-            set_upstream=True,
-            strict=strict_sync,
-        )
-
-    # PR (optional)
-    if args.create_pr:
-        pr_title = f"{task.task_id}: {task.title}"
-        pr_body = "\n".join(
-            [
-                f"Task: `{task_file.as_posix()}`",
-                f"State: `{new_state}`",
-                "",
-                "Gates run:",
-                *(f"- `{g['command']}` (rc={g['returncode']})" for g in gate_outputs),
-                "",
-                "Notes:",
-                "- This PR was generated by the swarm supervisor (unattended).",
-                "- Review the task file Notes / Decisions for context.",
-            ]
-        )
-        _gh_create_pr_if_missing(cwd=repo, base_branch=args.base_branch, title=pr_title, body=pr_body)
-        if args.auto_merge and new_state in {"ready_for_review", "done"}:
-            _maybe_auto_merge(cwd=repo, squash=True)
-
-    print(
-        json.dumps(
+        run_manifest["judge"].update(
             {
-                "task_id": task.task_id,
-                "state": new_state,
-                "branch": _git_current_branch(repo),
+                "gates": gate_outputs,
                 "gate_ok": gate_ok,
                 "ownership_ok": ownership_ok,
                 "ownership_failures": ownership_failures,
+                "outputs_check_ran": outputs_check_ran,
                 "outputs_ok": outputs_ok,
                 "output_failures": output_failures,
-                "review_log": str(review_path),
-            },
-            indent=2,
-            sort_keys=True,
+                "path_sources": {k: sorted(v) for k, v in sorted(path_sources.items())},
+                "ops": ops,
+            }
         )
-    )
-    return 0
+
+        # Decide new state
+        if gate_ok and ownership_ok and outputs_ok:
+            new_state = args.final_state
+            note = f"Judge: gates ok; ownership ok. Review log: {review_path.as_posix() if review_path else '(none)'}"
+        else:
+            new_state = "blocked"
+            why: list[str] = []
+            if not gate_ok:
+                why.append("gates_failed")
+            if not ownership_ok:
+                why.append("path_ownership_violation")
+            if not outputs_ok:
+                why.append("missing_outputs")
+            violations = ""
+            if not ownership_ok and ownership_failures:
+                # Include a clear, grep-able violations list in the task note (AC1).
+                # Format: path[sources]=reason
+                violations = " Violations: " + "; ".join(
+                    [
+                        f"{v.get('path')}[{v.get('sources', 'unknown')}]={v.get('reason', 'unknown')}"
+                        for v in ownership_failures
+                    ]
+                )
+            missing = ""
+            if not outputs_ok and output_failures:
+                missing = " Missing outputs: " + "; ".join(
+                    [f"{f.get('output')}={f.get('reason')}" for f in output_failures]
+                )
+            note = f"@human Judge blocked: {', '.join(why)}.{violations}{missing} Review log: {review_path.as_posix() if review_path else '(none)'}"
+        if args.repair_context:
+            note = f"{note} Repair context: {args.repair_context}"
+
+        # Update task status (do NOT move file; Planner action is separate via sweep_tasks.py)
+        _update_task_status_and_notes(task_path=task_file, new_state=new_state, note_line=note)
+
+        # Commit + push
+        if _git_has_changes(repo):
+            _run(["git", "add", "-A"], cwd=repo)
+            _git_commit(cwd=repo, message=f"{task.task_id}: {new_state}", strict=strict_sync)
+            _git_push(
+                cwd=repo,
+                remote=args.remote,
+                ref=_git_current_branch(repo),
+                set_upstream=True,
+                strict=strict_sync,
+            )
+
+        # PR (optional)
+        if args.create_pr:
+            pr_title = f"{task.task_id}: {task.title}"
+            pr_body = "\n".join(
+                [
+                    f"Task: `{task_file.as_posix()}`",
+                    f"State: `{new_state}`",
+                    "",
+                    "Gates run:",
+                    *(f"- `{g['command']}` (rc={g['returncode']})" for g in gate_outputs),
+                    "",
+                    "Notes:",
+                    "- This PR was generated by the swarm supervisor (unattended).",
+                    "- Review the task file Notes / Decisions for context.",
+                ]
+            )
+            _gh_create_pr_if_missing(cwd=repo, base_branch=args.base_branch, title=pr_title, body=pr_body)
+            if args.auto_merge and new_state in {"ready_for_review", "done"}:
+                _maybe_auto_merge(cwd=repo, squash=True)
+
+        run_manifest["result"] = {
+            "state": new_state,
+            "branch": _git_current_branch(repo),
+            "review_log": review_path.as_posix() if review_path else None,
+        }
+
+        print(
+            json.dumps(
+                {
+                    "task_id": task.task_id,
+                    "state": new_state,
+                    "branch": _git_current_branch(repo),
+                    "gate_ok": gate_ok,
+                    "ownership_ok": ownership_ok,
+                    "ownership_failures": ownership_failures,
+                    "outputs_ok": outputs_ok,
+                    "output_failures": output_failures,
+                    "review_log": str(review_path) if review_path else None,
+                    "run_manifest": str(manifest_path),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    finally:
+        try:
+            run_manifest.setdefault("result", {})
+            run_manifest["result"].setdefault("state", new_state)
+            run_manifest.setdefault("repo", {})
+            run_manifest["repo"]["git_sha"] = _git_head_sha(repo)
+            run_manifest["repo"]["branch"] = _git_current_branch(repo)
+            if worker_last_msg is not None:
+                run_manifest["worker"].setdefault("output_last_message", worker_last_msg.as_posix())
+            if review_path is not None:
+                run_manifest["judge"].setdefault("review_log", review_path.as_posix())
+            _write_json_file(manifest_path, run_manifest)
+        except Exception as exc:
+            print(f"[warn] failed to write swarm run manifest: {exc}", file=sys.stderr)
 
 
 def build_parser() -> argparse.ArgumentParser:

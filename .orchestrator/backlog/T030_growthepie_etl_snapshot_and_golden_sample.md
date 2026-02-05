@@ -2,6 +2,8 @@
 task_id: T030
 title: "growthepie ETL: snapshot exports + create golden sample panel"
 workstream: W1
+task_kind: etl
+allow_network: true
 role: Worker
 priority: high
 dependencies:
