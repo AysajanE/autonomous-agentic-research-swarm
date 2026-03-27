@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>The Repo Is the Shared Memory</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23142231'/%3E%3Cpath d='M14 21h36M14 32h36M14 43h24' stroke='%23f4ecda' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        --paper: #f4ecda;
+        --paper-deep: #e8dcc1;
+        --ink: #142231;
+        --muted: #4d5b68;
+        --line: rgba(20, 34, 49, 0.14);
+        --rule: rgba(20, 34, 49, 0.24);
+        --teal: #0f6a70;
+        --teal-soft: #d5ece6;
+        --rust: #b2542d;
+        --rust-soft: #f4d9cb;
+        --gold: #b58a18;
+        --gold-soft: #f4e7bb;
+        --slate: #2d4a66;
+        --slate-soft: #d7e3ef;
+        --green: #2d6546;
+        --green-soft: #d7eadb;
+        --shadow: 0 24px 70px rgba(18, 28, 40, 0.13);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+      }
+
+      body {
+        background:
+          radial-gradient(circle at top left, rgba(255, 255, 255, 0.72), transparent 28%),
+          radial-gradient(circle at bottom right, rgba(181, 138, 24, 0.08), transparent 24%),
+          repeating-linear-gradient(
+            135deg,
+            rgba(20, 34, 49, 0.03) 0,
+            rgba(20, 34, 49, 0.03) 2px,
+            transparent 2px,
+            transparent 18px
+          ),
+          linear-gradient(180deg, #f8f2e4 0%, #efe3cb 100%);
+        color: var(--ink);
+        font-family: "Gill Sans", "Trebuchet MS", "Segoe UI", sans-serif;
+        padding: 28px;
+      }
+
+      .poster {
+        width: min(1600px, 100%);
+        margin: 0 auto;
+        padding: 32px;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.54), rgba(255, 255, 255, 0.3)),
+          var(--paper);
+        border: 1px solid rgba(20, 34, 49, 0.18);
+        border-radius: 28px;
+        box-shadow: var(--shadow);
+        position: relative;
+        overflow: hidden;
+      }
+
+      .poster::before,
+      .poster::after {
+        content: "";
+        position: absolute;
+        border-radius: 999px;
+        pointer-events: none;
+      }
+
+      .poster::before {
+        width: 380px;
+        height: 380px;
+        right: -120px;
+        top: -140px;
+        background: radial-gradient(circle, rgba(15, 106, 112, 0.14), transparent 72%);
+      }
+
+      .poster::after {
+        width: 420px;
+        height: 420px;
+        left: -160px;
+        bottom: -220px;
+        background: radial-gradient(circle, rgba(178, 84, 45, 0.12), transparent 70%);
+      }
+
+      .eyebrow {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid var(--rule);
+        margin-bottom: 24px;
+        position: relative;
+        z-index: 1;
+      }
+
+      .eyebrow .label {
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-size: 0.78rem;
+        font-weight: 700;
+        color: var(--teal);
+      }
+
+      .eyebrow .stamp {
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: rgba(15, 106, 112, 0.08);
+        border: 1px solid rgba(15, 106, 112, 0.18);
+        color: var(--teal);
+        font-size: 0.85rem;
+        font-weight: 700;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.9fr);
+        gap: 28px;
+        position: relative;
+        z-index: 1;
+      }
+
+      .hero h1,
+      .section-title,
+      .panel h2 {
+        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+        margin: 0;
+        letter-spacing: -0.03em;
+      }
+
+      .hero h1 {
+        font-size: clamp(3rem, 5vw, 5.4rem);
+        line-height: 0.92;
+        text-transform: uppercase;
+      }
+
+      .hero p {
+        margin: 16px 0 0;
+        font-size: 1.12rem;
+        line-height: 1.5;
+        max-width: 56rem;
+        color: var(--muted);
+      }
+
+      .hero-strip {
+        margin-top: 18px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+
+      .hero-pill {
+        padding: 12px 14px;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.48);
+        min-width: 180px;
+        flex: 1 1 180px;
+      }
+
+      .hero-pill strong {
+        display: block;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        margin-bottom: 7px;
+      }
+
+      .hero-pill span {
+        color: var(--muted);
+        line-height: 1.35;
+        font-size: 0.92rem;
+      }
+
+      .hero-pill.lock strong {
+        color: var(--teal);
+      }
+
+      .hero-pill.scope strong {
+        color: var(--rust);
+      }
+
+      .hero-pill.audit strong {
+        color: var(--slate);
+      }
+
+      .hero-aside {
+        align-self: stretch;
+        display: grid;
+        gap: 14px;
+      }
+
+      .quote-card,
+      .fact-card,
+      .panel {
+        background: rgba(255, 255, 255, 0.44);
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        padding: 18px 20px;
+        backdrop-filter: blur(8px);
+      }
+
+      .quote-card {
+        background:
+          linear-gradient(135deg, rgba(15, 106, 112, 0.13), rgba(255, 255, 255, 0.55)),
+          rgba(255, 255, 255, 0.36);
+      }
+
+      .quote-card strong {
+        display: block;
+        font-size: 1.3rem;
+        line-height: 1.25;
+      }
+
+      .quote-card span,
+      .fact-card span {
+        display: block;
+        margin-top: 8px;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .fact-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .fact-card strong {
+        font-size: 1.8rem;
+        line-height: 1;
+      }
+
+      .section {
+        margin-top: 26px;
+        position: relative;
+        z-index: 1;
+      }
+
+      .section-header {
+        display: flex;
+        align-items: baseline;
+        gap: 14px;
+        margin-bottom: 14px;
+      }
+
+      .section-kicker {
+        font-size: 0.82rem;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        color: var(--rust);
+        font-weight: 700;
+      }
+
+      .section-title {
+        font-size: clamp(1.7rem, 2.5vw, 2.5rem);
+      }
+
+      .section-note {
+        color: var(--muted);
+        margin: 0 0 18px;
+        line-height: 1.5;
+      }
+
+      .chain {
+        display: flex;
+        align-items: stretch;
+        justify-content: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .node {
+        min-width: 208px;
+        flex: 1 1 208px;
+        padding: 18px;
+        border-radius: 20px;
+        border: 1px solid transparent;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+      }
+
+      .node h3,
+      .role-card h3,
+      .mini-card h3 {
+        margin: 0;
+        font-size: 1.1rem;
+        letter-spacing: -0.02em;
+      }
+
+      .node p,
+      .role-card p,
+      .mini-card p,
+      .guardrail-list li,
+      .command-list li {
+        margin: 10px 0 0;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .path,
+      code {
+        font-family: "SFMono-Regular", "Menlo", "Consolas", "Liberation Mono", monospace;
+      }
+
+      .path {
+        margin-top: 12px;
+        display: inline-block;
+        padding: 7px 10px;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        background: rgba(20, 34, 49, 0.08);
+        color: var(--ink);
+      }
+
+      .protocol {
+        background: var(--teal-soft);
+        border-color: rgba(15, 106, 112, 0.18);
+      }
+
+      .contract {
+        background: var(--slate-soft);
+        border-color: rgba(45, 74, 102, 0.18);
+      }
+
+      .workstream {
+        background: var(--gold-soft);
+        border-color: rgba(181, 138, 24, 0.22);
+      }
+
+      .task {
+        background: var(--rust-soft);
+        border-color: rgba(178, 84, 45, 0.18);
+      }
+
+      .artifact {
+        background: var(--green-soft);
+        border-color: rgba(45, 101, 70, 0.18);
+      }
+
+      .arrow {
+        align-self: center;
+        font-size: 2rem;
+        line-height: 1;
+        color: rgba(20, 34, 49, 0.45);
+        font-weight: 700;
+        padding: 0 4px;
+      }
+
+      .three-column {
+        display: grid;
+        grid-template-columns: minmax(280px, 0.95fr) minmax(0, 1.75fr) minmax(280px, 0.95fr);
+        gap: 18px;
+      }
+
+      .panel h2 {
+        font-size: 1.55rem;
+        margin-bottom: 14px;
+      }
+
+      .role-stack,
+      .mini-stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .role-card,
+      .mini-card {
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.58);
+      }
+
+      .role-card.planner {
+        border-left: 10px solid var(--teal);
+      }
+
+      .role-card.worker {
+        border-left: 10px solid var(--rust);
+      }
+
+      .role-card.judge {
+        border-left: 10px solid var(--slate);
+      }
+
+      .role-card ul,
+      .guardrail-list,
+      .command-list {
+        margin: 12px 0 0;
+        padding-left: 18px;
+      }
+
+      .main-flow {
+        display: grid;
+        gap: 16px;
+      }
+
+      .flow-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: stretch;
+        gap: 12px;
+      }
+
+      .flow-node {
+        flex: 1 1 210px;
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.58);
+      }
+
+      .flow-node strong {
+        display: inline-block;
+        padding: 5px 9px;
+        border-radius: 999px;
+        margin-bottom: 10px;
+        font-size: 0.74rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .flow-node.scope strong {
+        background: rgba(15, 106, 112, 0.12);
+        color: var(--teal);
+      }
+
+      .flow-node.execute strong {
+        background: rgba(178, 84, 45, 0.12);
+        color: var(--rust);
+      }
+
+      .flow-node.review strong {
+        background: rgba(45, 74, 102, 0.12);
+        color: var(--slate);
+      }
+
+      .flow-node.ship strong {
+        background: rgba(45, 101, 70, 0.12);
+        color: var(--green);
+      }
+
+      .flow-node p {
+        margin: 0;
+        line-height: 1.45;
+        color: var(--muted);
+      }
+
+      .callout {
+        padding: 14px 16px;
+        border-radius: 18px;
+        border: 1px dashed rgba(20, 34, 49, 0.26);
+        background: rgba(255, 255, 255, 0.32);
+        color: var(--ink);
+      }
+
+      .callout strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      .slice-grid {
+        display: grid;
+        grid-template-columns: 1.45fr 1fr;
+        gap: 18px;
+      }
+
+      .vertical-slice {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: stretch;
+        gap: 12px;
+      }
+
+      .slice-node {
+        flex: 1 1 220px;
+        padding: 18px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.55);
+      }
+
+      .slice-node .task-id {
+        display: inline-block;
+        padding: 5px 10px;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        font-weight: 700;
+        color: white;
+        margin-bottom: 10px;
+      }
+
+      .slice-node.t030 .task-id {
+        background: var(--teal);
+      }
+
+      .slice-node.t040 .task-id {
+        background: var(--rust);
+      }
+
+      .slice-node.t050 .task-id {
+        background: var(--slate);
+      }
+
+      .slice-node.t060 .task-id {
+        background: var(--green);
+      }
+
+      .slice-node p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .footer-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+        gap: 18px;
+      }
+
+      .takeaway {
+        background:
+          linear-gradient(135deg, rgba(181, 138, 24, 0.12), rgba(255, 255, 255, 0.5)),
+          rgba(255, 255, 255, 0.4);
+      }
+
+      .takeaway strong {
+        display: block;
+        font-size: 1.28rem;
+        line-height: 1.28;
+        margin-bottom: 8px;
+      }
+
+      .command-list code {
+        font-size: 0.86rem;
+      }
+
+      .print-note {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      @media (max-width: 1180px) {
+        .hero,
+        .three-column,
+        .slice-grid,
+        .footer-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 760px) {
+        body {
+          padding: 16px;
+        }
+
+        .poster {
+          padding: 20px;
+          border-radius: 22px;
+        }
+
+        .eyebrow {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .arrow {
+          width: 100%;
+          text-align: center;
+          padding: 2px 0;
+          transform: rotate(90deg);
+        }
+      }
+
+      @media print {
+        @page {
+          size: landscape;
+          margin: 0.35in;
+        }
+
+        body {
+          padding: 0;
+          background: white;
+        }
+
+        .poster {
+          width: 100%;
+          box-shadow: none;
+          border-radius: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="poster">
+      <div class="eyebrow">
+        <div class="label">Autonomous Agentic Research Swarm</div>
+        <div class="stamp">Public Workflow Poster</div>
+      </div>
+
+      <section class="hero">
+        <div>
+          <h1>The Repo Is the Shared Memory</h1>
+          <p>
+            A file-based workflow for running multiple research agents in parallel without letting
+            definitions drift, tasks collide, or outputs become unauditable. This poster maps the
+            actual framework in this repository, from locked protocol to reproducible figure.
+          </p>
+          <div class="hero-strip" aria-label="Public summary of the workflow">
+            <div class="hero-pill lock">
+              <strong>Lock First</strong>
+              <span>Protocol, contracts, and workstreams are fixed before workers execute.</span>
+            </div>
+            <div class="hero-pill scope">
+              <strong>One Task, One Scope</strong>
+              <span>Each worker gets a narrow task file, explicit outputs, and an isolated branch.</span>
+            </div>
+            <div class="hero-pill audit">
+              <strong>Audit Trail</strong>
+              <span>Gates, manifests, notes, and git history turn the repo into durable memory.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="hero-aside">
+          <div class="quote-card">
+            <strong>No agent-to-agent chat. Files, tasks, and git history do the coordination.</strong>
+            <span>
+              The framework works by making ambiguity expensive: definitions are locked first,
+              ownership is explicit, and every task is judged against deterministic gates.
+            </span>
+          </div>
+
+          <div class="fact-grid">
+            <div class="fact-card">
+              <strong>3</strong>
+              <span>roles: Planner, Worker, Judge</span>
+            </div>
+            <div class="fact-card">
+              <strong>7</strong>
+              <span>workstreams with strict path ownership</span>
+            </div>
+            <div class="fact-card">
+              <strong>1</strong>
+              <span>shared memory: the repository itself</span>
+            </div>
+            <div class="fact-card">
+              <strong>0</strong>
+              <span>tolerance for silent scope creep</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-header">
+          <div class="section-kicker">01</div>
+          <h2 class="section-title">Lock the Definitions Before Work Begins</h2>
+        </div>
+        <p class="section-note">
+          The framework starts by reducing scientific ambiguity. Definitions, schemas, ownership
+          boundaries, and task contracts are all written down before workers execute.
+        </p>
+        <div class="chain">
+          <article class="node protocol">
+            <h3>Protocol Lock</h3>
+            <p>Primary metric, units, inclusion criteria, regimes, and tolerances.</p>
+            <div class="path">docs/protocol.md</div>
+          </article>
+          <div class="arrow" aria-hidden="true">&rarr;</div>
+          <article class="node contract">
+            <h3>Contracts</h3>
+            <p>Schemas, decisions, assumptions, and project mode define the canonical interface.</p>
+            <div class="path">contracts/*</div>
+          </article>
+          <div class="arrow" aria-hidden="true">&rarr;</div>
+          <article class="node workstream">
+            <h3>Workstreams</h3>
+            <p>Each path has an owner so multiple agents can work without clobbering each other.</p>
+            <div class="path">.orchestrator/workstreams.md</div>
+          </article>
+          <div class="arrow" aria-hidden="true">&rarr;</div>
+          <article class="node task">
+            <h3>Task Files</h3>
+            <p>One task, one owner, one I/O contract, one set of allowed paths.</p>
+            <div class="path">.orchestrator/backlog/*.md</div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section three-column">
+        <article class="panel">
+          <h2>Three Roles</h2>
+          <div class="role-stack">
+            <div class="role-card planner">
+              <h3>Planner</h3>
+              <p>Creates small tasks, defines ownership, and moves lifecycle folders.</p>
+              <ul>
+                <li>Scopes work into explicit contracts</li>
+                <li>Owns the control plane under <code>.orchestrator/</code></li>
+                <li>Unblocks downstream tasks by sweeping state</li>
+              </ul>
+            </div>
+
+            <div class="role-card worker">
+              <h3>Worker</h3>
+              <p>Executes exactly one task inside an isolated branch or worktree.</p>
+              <ul>
+                <li>Writes only inside <code>allowed_paths</code></li>
+                <li>Produces artifacts, notes, and reproduction commands</li>
+                <li>Never coordinates by chat with other agents</li>
+              </ul>
+            </div>
+
+            <div class="role-card judge">
+              <h3>Judge</h3>
+              <p>Runs deterministic checks and decides whether work can move forward.</p>
+              <ul>
+                <li>Runs gates and tests</li>
+                <li>Checks path ownership and declared outputs</li>
+                <li>Blocks or approves with explicit reasons</li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <h2>One Task, End to End</h2>
+          <div class="main-flow">
+            <div class="flow-row">
+              <div class="flow-node scope">
+                <strong>Plan</strong>
+                <p>
+                  A task is written in backlog with dependencies, allowed paths, outputs, and
+                  stop conditions.
+                </p>
+              </div>
+              <div class="arrow" aria-hidden="true">&rarr;</div>
+              <div class="flow-node execute">
+                <strong>Isolate</strong>
+                <p>
+                  The worker gets a dedicated git branch and worktree so parallel runs do not
+                  trample each other.
+                </p>
+              </div>
+              <div class="arrow" aria-hidden="true">&rarr;</div>
+              <div class="flow-node execute">
+                <strong>Build</strong>
+                <p>
+                  Codex executes the task, writes only inside scope, and leaves durable notes in
+                  the repo.
+                </p>
+              </div>
+            </div>
+
+            <div class="flow-row">
+              <div class="flow-node review">
+                <strong>Judge</strong>
+                <p>
+                  <code>make gate</code>, optional <code>make test</code>, path ownership checks,
+                  and output existence all run before state changes.
+                </p>
+              </div>
+              <div class="arrow" aria-hidden="true">&rarr;</div>
+              <div class="flow-node ship">
+                <strong>Publish</strong>
+                <p>
+                  The run is committed, pushed, optionally opened as a PR, and recorded as a swarm
+                  run manifest.
+                </p>
+              </div>
+              <div class="arrow" aria-hidden="true">&rarr;</div>
+              <div class="flow-node ship">
+                <strong>Sweep</strong>
+                <p>
+                  Only the Planner moves the task file across lifecycle folders until it reaches
+                  review or done.
+                </p>
+              </div>
+            </div>
+
+            <div class="callout">
+              <strong>Automation Entry Points</strong>
+              <div class="path">python scripts/swarm.py plan</div>
+              <div class="path">python scripts/swarm.py tick</div>
+              <div class="path">python scripts/swarm.py run-task --task-id ...</div>
+            </div>
+          </div>
+        </article>
+
+        <aside class="panel">
+          <h2>Why It Does Not Collapse</h2>
+          <ul class="guardrail-list">
+            <li>Source-of-truth precedence is explicit: protocol, contracts, workstreams, task.</li>
+            <li>Raw snapshots are append-only; they are never overwritten in place.</li>
+            <li>Network access is limited to ETL workstreams configured in framework policy.</li>
+            <li>Workers cannot silently touch unrelated files without being blocked.</li>
+            <li>Tasks cannot claim success unless declared outputs actually exist.</li>
+            <li>Git history becomes a durable audit trail for both science and operations.</li>
+          </ul>
+        </aside>
+      </section>
+
+      <section class="section">
+        <div class="section-header">
+          <div class="section-kicker">02</div>
+          <h2 class="section-title">Artifact Pipeline: What a Research Slice Actually Produces</h2>
+        </div>
+        <p class="section-note">
+          The public-facing result is not just code execution. The framework turns one task chain
+          into evidence, validation, and a visible output.
+        </p>
+        <div class="chain">
+          <article class="node artifact">
+            <h3>Raw Snapshot</h3>
+            <p>Immutable pull from the source system.</p>
+            <div class="path">data/raw/&lt;source&gt;/YYYY-MM-DD/...</div>
+          </article>
+          <div class="arrow" aria-hidden="true">&rarr;</div>
+          <article class="node artifact">
+            <h3>Provenance Manifest</h3>
+            <p>Hash list, UTC fetch date, and exact reproduction command.</p>
+            <div class="path">data/raw_manifest/&lt;source&gt;_YYYY-MM-DD.json</div>
+          </article>
+          <div class="arrow" aria-hidden="true">&rarr;</div>
+          <article class="node artifact">
+            <h3>Golden Sample</h3>
+            <p>Tiny tracked dataset used by gates and tests.</p>
+            <div class="path">data/samples/&lt;source&gt;/...</div>
+          </article>
+          <div class="arrow" aria-hidden="true">&rarr;</div>
+          <article class="node artifact">
+            <h3>Validation Report</h3>
+            <p>Machine-readable JSON plus a short human-readable audit summary.</p>
+            <div class="path">reports/validation/*</div>
+          </article>
+          <div class="arrow" aria-hidden="true">&rarr;</div>
+          <article class="node artifact">
+            <h3>Figure / Table</h3>
+            <p>Stable, reproducible output for papers, decks, or public presentation.</p>
+            <div class="path">reports/figures/*</div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section panel">
+        <div class="section-header">
+          <div class="section-kicker">03</div>
+          <h2 class="section-title">Concrete Vertical Slice in This Repository</h2>
+        </div>
+        <div class="slice-grid">
+          <div class="vertical-slice">
+            <div class="slice-node t030">
+              <div class="task-id">T030</div>
+              <h3>ETL Snapshot + Golden Sample</h3>
+              <p>
+                Fetch growthepie exports, write raw snapshots and manifests, then commit the small
+                tracked panel sample.
+              </p>
+            </div>
+            <div class="arrow" aria-hidden="true">&rarr;</div>
+            <div class="slice-node t040">
+              <div class="task-id">T040</div>
+              <h3>Metric Module + Tests</h3>
+              <p>
+                Compute Settlement Take Rate from the sample only, with explicit handling for
+                missingness and zero denominators.
+              </p>
+            </div>
+            <div class="arrow" aria-hidden="true">&rarr;</div>
+            <div class="slice-node t050">
+              <div class="task-id">T050</div>
+              <h3>Validation Checks</h3>
+              <p>
+                Coverage, accounting identity, non-negativity, and STR sanity get audited before
+                analysis.
+              </p>
+            </div>
+            <div class="arrow" aria-hidden="true">&rarr;</div>
+            <div class="slice-node t060">
+              <div class="task-id">T060</div>
+              <h3>Public Figure</h3>
+              <p>
+                The final deterministic output becomes a figure under
+                <code>reports/figures/</code>.
+              </p>
+            </div>
+          </div>
+
+          <div class="mini-stack">
+            <div class="mini-card">
+              <h3>Primary Research Question</h3>
+              <p>
+                Is Ethereum L1's settlement take rate on rollup economics rising, stable, or
+                decaying as L2 usage scales?
+              </p>
+            </div>
+            <div class="mini-card">
+              <h3>Primary Metric</h3>
+              <p>
+                <code>STR_t = (Sum_i RentPaid_i,t) / (Sum_i L2Fees_i,t)</code>
+              </p>
+            </div>
+            <div class="mini-card">
+              <h3>Public Message</h3>
+              <p>
+                This is not "AI agents chatting." It is a reproducible workflow where the repo
+                behaves like a disciplined research operating system.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section footer-grid">
+        <article class="panel takeaway">
+          <strong>
+            The framework's public value is not just speed. It is parallel research with visible
+            contracts, reproducible outputs, and a built-in audit trail.
+          </strong>
+          <p class="section-note">
+            If you hang one piece in a gallery, it should communicate that the hard problem is not
+            "how do we run more agents?" but "how do we keep many agents scientifically coherent?"
+          </p>
+        </article>
+
+        <article class="panel">
+          <h2>Run the Workflow</h2>
+          <ul class="command-list">
+            <li><code>make gate</code></li>
+            <li><code>make test</code></li>
+            <li><code>python scripts/swarm.py plan</code></li>
+            <li><code>python scripts/swarm.py tick --runner local --max-workers 1 --dry-run</code></li>
+            <li><code>python scripts/sweep_tasks.py --dry-run</code></li>
+          </ul>
+          <div class="print-note">
+            Open this file directly in a browser for display, or print to PDF for a wall poster.
+          </div>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>
