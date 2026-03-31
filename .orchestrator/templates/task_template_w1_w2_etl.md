@@ -7,6 +7,7 @@ allow_network: true
 role: Worker
 priority: medium
 dependencies: []
+integration_ready_dependencies: []
 requires_tools:
   - "python"
   - "git"
@@ -16,6 +17,7 @@ allowed_paths:
   - "data/raw/<source>/"
   - "data/raw_manifest/<source>_"
   - "data/processed/<source>/"
+  - "data/processed_manifest/<name>_"
 disallowed_paths:
   - "docs/protocol.md"
   - "contracts/"
@@ -28,61 +30,73 @@ gates:
   - "make gate"
 stop_conditions:
   - "Need credentials"
-  - "Source instability / breaking changes"
+  - "Source instability or breaking changes"
 ---
 
-# Task T___ — <title> (W1/W2 ETL)
+# Task T___ — <title> (W1 / W2 ETL)
 
 ## Context
 
-Describe the source, what we’re pulling, and how it connects to downstream metrics/analysis.
+Describe the source, what is being pulled, and how it connects to downstream metrics, validation, or release work.
 
 ## Assignment
 
-- Workstream: W1 Data: off-chain / W2 Data: on-chain
-- Owner (agent/human):
+- Workstream:
+- Assigned role:
 - Suggested branch/worktree name:
-- Allowed paths (edit/write):
+- Allowed paths:
 - Disallowed paths:
-- Stop conditions (escalate + block with `@human`):
+- Stop conditions:
 
 ## Inputs
 
-- `docs/protocol.md` (read-only; do not change definitions)
-- `contracts/schemas/` (read-only unless explicitly assigned)
-- Prior tasks / handoffs:
-- External references (links, endpoints, docs):
+- `docs/protocol.md`
+- relevant files under `contracts/`
+- upstream registry or manifest inputs
+- external endpoint or node details
 
 ## Outputs
 
-- Raw snapshots (append-only): `data/raw/<source>/<YYYY-MM-DD>/...`
-- Provenance manifest (tracked): `data/raw_manifest/<source>_<YYYY-MM-DD>.json`
-- Normalized outputs (rebuildable): `data/processed/<source>/...`
-- ETL code under `src/etl/`
+- raw snapshots: `data/raw/<source>/<YYYY-MM-DD>/...`
+- raw provenance: `data/raw_manifest/<source>_<YYYY-MM-DD>.json`
+- processed outputs under `data/processed/...`
+- processed provenance under `data/processed_manifest/...`
+- tracked samples when the task owns a sample surface
 
 ## Success Criteria
 
-- [ ] Raw snapshot is written to a dated folder (never overwritten)
-- [ ] Manifest exists, includes hashes, and describes how to reproduce the pull
-- [ ] Any transformations are code (no manual edits)
+- [ ] Raw snapshots are append-only and written to a new dated folder
+- [ ] The raw manifest includes hashes and the exact reproduction command
+- [ ] Any processed output is created from code rather than manual edits
+- [ ] Any committed processed lineage has a matching processed manifest
 - [ ] `make gate` passes
+
+## Review Bundle Requirements
+
+- [ ] A durable run manifest exists under `reports/status/swarm_runs/`
+- [ ] Any downstream lineage caveat is captured in `.orchestrator/handoff/`
+- [ ] Judge review is recorded under `reports/status/reviews/`
 
 ## Validation / Commands
 
 - `make gate`
 - Add task-specific commands here.
 
-## Worker edit rules
+## Edit rules
 
-- **Workers edit only** `## Status` and `## Notes / Decisions`.
-- **Workers do not move this file** between lifecycle folders; set `State:` and the Planner will sweep.
+- Workers edit only `## Status` and `## Notes / Decisions`.
+- ETL tasks should normally flow `backlog -> active -> ready_for_review -> done`.
+- Do not use `integration_ready` for unvalidated empirical data outputs unless the task is explicitly scoped as an interface/export bridge and downstream tasks are allowlisted.
 
 ## Status
 
-- State: backlog | active | blocked | integration_ready | ready_for_review | done
-- Semantics: `ready_for_review` => outputs exist + gates pass; `integration_ready` => interfaces exported; downstream unblocked (optional).
+- State: backlog | active | integration_ready | ready_for_review | blocked | done
+- Semantics:
+  - `integration_ready`: exceptional interface/export case only
+  - `ready_for_review`: outputs exist, manifests exist, gates pass, and a run manifest exists
+  - `done`: Judge-approved
 - Last updated: YYYY-MM-DD
 
 ## Notes / Decisions
 
-- YYYY-MM-DD: <progress note, decision, or blocker; include `@human` if needed>
+- YYYY-MM-DD: <progress note, decision, or blocker; include `@human` when needed>

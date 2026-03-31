@@ -2,11 +2,12 @@
 task_id: T___
 title: "<title>"
 workstream: W8
-task_kind: ops
+task_kind: bridge
 allow_network: false
 role: Worker
 priority: medium
 dependencies: []
+integration_ready_dependencies: []
 requires_tools:
   - "python"
   - "git"
@@ -18,9 +19,9 @@ allowed_paths:
   - "tests/"
 disallowed_paths:
   - "docs/protocol.md"
-  - "contracts/experiments/"
   - "registry/"
   - "data/raw/"
+  - "data/processed/"
   - ".orchestrator/templates/"
   - ".orchestrator/workstreams.md"
 outputs:
@@ -33,69 +34,70 @@ stop_conditions:
   - "Need to edit outside allowed paths"
 ---
 
-# Task T___ — <title> (Hybrid bridge: empirical → modeling)
+# Task T___ — <title> (Hybrid bridge: empirical to modeling)
 
 ## Context
 
-Define the contract boundary between empirical artifacts and modeling inputs. The goal is to make hybrid mode real:
-downstream model runs should consume a stable **instance set manifest**, generated from explicit empirical manifests.
+Define the contract boundary between empirical artifacts and modeling inputs. Downstream modeling work must consume a stable instance-manifest surface, not ad hoc empirical CSV paths.
 
 ## Assignment
 
-- Workstream:
-- Owner (agent/human):
+- Workstream: W8 Modeling / Bridge
+- Assigned role: Worker
 - Suggested branch/worktree name:
-- Allowed paths (edit/write):
+- Allowed paths:
 - Disallowed paths:
-- Stop conditions (escalate + block with `@human`):
+- Stop conditions:
 
-## Inputs
+## Bridge contract
 
-### Bridge contract (explicit, required)
-
-Empirical input manifests → instance generator script → instance set manifest
-
-- Empirical input manifest(s) (paths):
+- Hybrid interface: `contracts/hybrid_interface_v1.yaml`
+- Input processed manifests:
   - `data/processed_manifest/<name>_<YYYY-MM-DD>.json`
-- Instance generator script (path + command):
-  - Script: `src/model/<instance_generator_script>.py`
-  - Command: `python src/model/<instance_generator_script>.py --in ... --out ...`
-- Instance set manifest output (path):
+- Generator script and command:
+  - `src/model/<instance_generator_script>.py`
+  - `python src/model/<instance_generator_script>.py --in ... --out ...`
+- Output instance manifest:
   - `contracts/instances/<instance_set>/manifest.yaml`
-
-### Notes
-
-- The instance set manifest is the *interface surface* for modeling tasks: it must include enough metadata to trace back to the empirical manifests and reproduce instance generation deterministically.
 
 ## Outputs
 
-- Instance generator script: `src/model/<instance_generator_script>.py`
-- Instance set manifest: `contracts/instances/<instance_set>/manifest.yaml`
-- (Optional) bridge report: `reports/models/<bridge_name>/<run_id>/...`
+- deterministic instance-generator code
+- an instance-set manifest with explicit source manifests, generator command, git SHA, and output paths
+- optional bridge report under `reports/models/`
 
 ## Success Criteria
 
-- [ ] Bridge contract is explicit (no “magic inputs”)
-- [ ] Instance generator is deterministic (or explicitly parameterized)
-- [ ] Instance set manifest can be regenerated from the empirical input manifests + generator command
+- [ ] The bridge contract is explicit and consistent with `contracts/hybrid_interface_v1.yaml`
+- [ ] Modeling tasks can reproduce the instance set from the named processed manifests and generator command
+- [ ] No modeling task needs to read `data/processed/...` directly
 - [ ] `make gate` passes
+
+## Review Bundle Requirements
+
+- [ ] The bridge output is eligible for `integration_ready` only after the instance manifest exists and named downstream tasks allowlist it
+- [ ] A durable run manifest exists under `reports/status/swarm_runs/`
+- [ ] Judge review is recorded under `reports/status/reviews/`
 
 ## Validation / Commands
 
 - `make gate`
-- Add task-specific bridge command(s) here.
+- Add task-specific bridge commands here.
 
-## Worker edit rules
+## Edit rules
 
-- **Workers edit only** `## Status` and `## Notes / Decisions`.
-- **Workers do not move this file** between lifecycle folders; set `State:` and the Planner will sweep.
+- Workers edit only `## Status` and `## Notes / Decisions`.
+- Keep interface widening inside W0 contract review; do not invent new bridge fields in prose alone.
 
 ## Status
 
-- State: backlog | active | blocked | integration_ready | ready_for_review | done
-- Semantics: `ready_for_review` => outputs exist + gates pass; `integration_ready` => interfaces exported; downstream unblocked (optional).
+- State: backlog | active | integration_ready | ready_for_review | blocked | done
+- Semantics:
+  - `integration_ready`: allowed for this task type when the instance manifest is complete and downstream allowlists exist
+  - `ready_for_review`: outputs exist, gates pass, and a run manifest exists
+  - `done`: Judge-approved
 - Last updated: YYYY-MM-DD
 
 ## Notes / Decisions
 
-- YYYY-MM-DD: <progress note, decision, or blocker; include `@human` if needed>
+- YYYY-MM-DD: <progress note, decision, or blocker; include `@human` when needed>

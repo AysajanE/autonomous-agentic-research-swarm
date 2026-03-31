@@ -7,10 +7,11 @@ allow_network: false
 role: Worker
 priority: medium
 dependencies: []
+integration_ready_dependencies: []
 requires_tools:
   - "python"
   - "git"
-  - "solver:<name>" # e.g., solver:cbc
+  - "solver:<name>"
 requires_env: []
 instances:
   - "contracts/instances/<instance_set>/manifest.yaml"
@@ -34,7 +35,7 @@ gates:
   - "make gate"
 stop_conditions:
   - "Instance or experiment spec ambiguity"
-  - "Need solver license/credentials"
+  - "Need solver license or credentials"
   - "Need to edit outside allowed paths"
 ---
 
@@ -42,72 +43,62 @@ stop_conditions:
 
 ## Context
 
-Describe the modeling objective and how it maps to `contracts/model_spec.*`.
+Describe the modeling objective and how it maps to `contracts/model_spec.md`.
 
 ## Assignment
 
-- Workstream:
-- Owner (agent/human):
+- Workstream: W8 Modeling / Bridge
+- Assigned role: Worker
 - Suggested branch/worktree name:
-- Allowed paths (edit/write):
+- Allowed paths:
 - Disallowed paths:
-- Stop conditions (escalate + block with `@human`):
+- Stop conditions:
 
 ## Inputs
 
-### Empirical / hybrid inputs (if applicable)
-
-- Empirical input manifest(s): `data/processed_manifest/...` (paths)
-
-### Modeling inputs (required)
-
-- Instance set manifest(s) (frontmatter `instances`): `contracts/instances/.../manifest.yaml`
-- Experiment spec (frontmatter `experiment_spec`): `contracts/experiments/<experiment>.yaml`
-- Solver requirement (frontmatter `requires_tools`):
+- instance manifest(s): `contracts/instances/.../manifest.yaml`
+- experiment spec: `contracts/experiments/<experiment>.yaml`
+- solver requirement from `requires_tools`
+- empirical input manifests if the task is part of a hybrid workflow
 
 ## Outputs
 
-### Required output locations (suggested)
-
-- Run folder: `reports/models/<experiment>/<run_id>/`
-- Required run manifest: `reports/models/<experiment>/<run_id>/run_manifest.json`
-- Required results: `reports/models/<experiment>/<run_id>/results.json`
-
-### Run manifest requirements (required)
-
-The run manifest must be machine-readable and include at minimum:
-- task id + title
-- git sha
-- instance manifest path(s)
-- experiment spec path
-- solver name + version (and invocation command)
-- reproduction command(s)
-- list of produced output files (paths)
+- run folder: `reports/models/<experiment>/<run_id>/`
+- required modeling run manifest: `reports/models/<experiment>/<run_id>/run_manifest.json`
+- required results: `reports/models/<experiment>/<run_id>/results.json`
 
 ## Success Criteria
 
-- [ ] Instance + experiment specs are referenced explicitly (no implicit assumptions)
-- [ ] Solver requirement is satisfied (or task is blocked with an actionable note)
-- [ ] Outputs exist under `reports/models/<experiment>/<run_id>/...`
-- [ ] Run manifest exists and enables reproduction
+- [ ] Instance and experiment contracts are referenced explicitly
+- [ ] Solver name, version, and invocation are recorded
+- [ ] The modeling run manifest records git SHA, commands, input contracts, and produced outputs
 - [ ] `make gate` passes
+
+## Review Bundle Requirements
+
+- [ ] The modeling run manifest under `reports/models/...` exists
+- [ ] A repo-level durable run manifest exists under `reports/status/swarm_runs/`
+- [ ] Judge review is recorded under `reports/status/reviews/`
 
 ## Validation / Commands
 
 - `make gate`
-- Add task-specific commands here (e.g., `python -m src.model.run ...`).
+- Add task-specific modeling commands here.
 
-## Worker edit rules
+## Edit rules
 
-- **Workers edit only** `## Status` and `## Notes / Decisions`.
-- **Workers do not move this file** between lifecycle folders; set `State:` and the Planner will sweep.
+- Workers edit only `## Status` and `## Notes / Decisions`.
+- Do not widen the instance or experiment contract without a W0-reviewed contract change.
 
 ## Status
 
-- State: backlog | active | blocked | integration_ready | ready_for_review | done
-- Semantics: `ready_for_review` => outputs exist + gates pass; `integration_ready` => interfaces exported; downstream unblocked (optional).
+- State: backlog | active | integration_ready | ready_for_review | blocked | done
+- Semantics:
+  - `integration_ready`: use only if the task exports a stable interface for named downstream tasks
+  - `ready_for_review`: outputs exist, gates pass, and a run manifest exists
+  - `done`: Judge-approved
 - Last updated: YYYY-MM-DD
 
 ## Notes / Decisions
 
-- YYYY-MM-DD: <progress note, decision, or blocker; include `@human` if needed>
+- YYYY-MM-DD: <progress note, decision, or blocker; include `@human` when needed>
