@@ -1,0 +1,129 @@
+---
+title: "Measuring Settlement Take Rate for Ethereum Rollups"
+subtitle: "Protocol, provenance, and a release-complete working paper surface"
+author: "autonomous-agentic-research-swarm"
+date: last-modified
+---
+
+## Abstract
+
+This working paper packages the repository's current L2-to-L1 rent analysis as a release-complete manuscript surface. The primary quantity of interest is Settlement Take Rate (STR), defined as `STR_t = (Σ_i RentPaid_{i,t}) / (Σ_i L2Fees_{i,t})`. The repository locks definitions, provenance, and review semantics before result claims are promoted into durable report outputs. This paper therefore combines an empirical protocol with an agentic operating model and a tracked paper build surface. Because the current repository snapshot exposes contracts and output conventions more clearly than populated result artifacts, the manuscript is intentionally a methods-and-release paper rather than a results-forward paper.
+
+## Research Question And Metric Lock
+
+The concrete battle-test project in this repository asks how much fee revenue paid by Ethereum rollup users is subsequently paid back to Ethereum L1 as settlement rent. The protocol fixes the primary outcome as Settlement Take Rate (STR) [@protocol_lock; @data_dictionary_contract; @decision_log_contract].
+
+`STR_t = (Σ_i RentPaid_{i,t}) / (Σ_i L2Fees_{i,t})`
+
+Several edge-case rules are locked before downstream analysis begins:
+
+- The series is daily and ETH-native.
+- If `Σ_i L2Fees_{i,t} == 0`, then `STR_t = NaN` rather than `0`.
+- If either `L2Fees_{i,t}` or `RentPaid_{i,t}` is missing for a rollup-day, exclude that rollup-day from both numerator and denominator sums for ecosystem aggregates.
+- Emit a `daily_rollup_panel` row if and only if both `l2_fees_eth` and `rent_paid_eth` are present.
+- The canonical rollup key is `rollup_id`.
+- The empirical window begins on `2022-01-01`, and dates on or after `2024-03-13` are treated as post-Dencun.
+
+Source priority is also explicit [@protocol_lock]:
+
+1. On-chain computed Ethereum L1 costs for rent and decomposition.
+2. growthepie exports for `L2Fees` and secondary rent/profit series.
+3. L2BEAT cost series for triangulation and sanity checks.
+
+These constraints matter because they prevent metric shopping. A result may later change because new durable artifacts arrive, but it should not change because the metric definition or source priority was silently rewritten.
+
+## Data And Provenance Contracts
+
+Two contract surfaces define the core empirical tables [@data_dictionary_contract]:
+
+- `daily_rollup_panel` is the analysis-ready rollup-by-day panel used to compute STR.
+- `daily_l1_rent_decomposition` is the daily Ethereum L1 rent decomposition used for burn-versus-tips and blob-versus-calldata analysis.
+
+The repository keeps raw and processed data out of git while tracking their provenance in git [@raw_manifest_readme; @processed_manifest_readme]. Raw snapshot provenance lives under `data/raw_manifest/`, and reproducible processed-artifact provenance lives under `data/processed_manifest/`. The rollup identity interface is versioned in `registry/rollup_registry_v1.csv` [@registry_rollup_v1].
+
+Durable downstream report artifacts are expected under the stable report namespaces documented by the repository [@validation_readme; @validation_manifests_readme; @figures_readme; @tables_readme].
+
+| Layer | Durable surface | Why it matters |
+|---|---|---|
+| Protocol and contracts | `docs/protocol.md`, `contracts/data_dictionary.md`, `contracts/decisions.md` | Lock metric definitions, source priority, and decision history. |
+| Registry | `registry/rollup_registry_v1.csv` | Locks the canonical `rollup_id` interface. |
+| Raw provenance | `data/raw_manifest/` | Records raw snapshots kept out of git. |
+| Processed provenance | `data/processed_manifest/` | Records how analysis-ready artifacts can be reproduced. |
+| Analysis outputs | `reports/validation/`, `reports/figures/`, `reports/tables/` | Durable report surfaces referenced by manuscripts and releases. |
+| Runtime evidence | `reports/status/swarm_runs/`, `reports/status/reviews/` | Durable execution and Judge review records. |
+| Paper surface | `reports/paper/index.qmd`, `reports/paper/build/index.html` | Human-readable working paper plus durable render artifact. |
+| Release surface | `reports/status/releases/release_<YYYY-MM-DD>.json`, `reports/catalog.yaml` | Canonical release snapshots and catalog projection. |
+
+This artifact DAG is the key design choice behind the paper layer. The manuscript is not an isolated document; it is downstream of contracts, manifests, runtime evidence, and report artifacts, and upstream of the final release snapshot.
+
+## Agentic Runtime And Review Semantics
+
+The paper layer inherits the repository's locked file-based control plane rather than redefining it. The repository acts as shared memory, and roles remain explicitly separated:
+
+| Role | Locked responsibility |
+|---|---|
+| Planner | Define tasks, dependencies, and required artifacts. |
+| Worker | Produce outputs inside allowed paths while respecting worktree isolation. |
+| Judge | Review evidence and approve transitions to `done`. |
+| Operator | Manage shared surfaces such as releases, catalogs, and durable paper builds. |
+
+Contracts-first discipline means that metric semantics change in upstream contracts first, not in the paper alone. Deterministic gates and git/worktree isolation constrain how durable claims reach shared surfaces. Judge remains the only role that may move scientific work to `done`.
+
+Lifecycle semantics are also locked:
+
+- `backlog`
+- `active`
+- `integration_ready`
+- `ready_for_review`
+- `blocked`
+- `done`
+
+The task file `State:` field is authoritative, while lifecycle folders are only a projection of that state. `integration_ready` is a narrow allowlisted exception path; `ready_for_review` requires outputs, gates, required manifests, and a durable runtime run manifest; and `done` requires Judge approval plus a durable review log.
+
+The paper therefore depends on, but does not replace, the runtime and review chain. When a manuscript references durable outputs, those outputs should already be traceable to provenance manifests, runtime manifests, and review logs. That discipline is what turns the paper into an auditable release artifact rather than a disconnected narrative.
+
+## Release-Ready Paper Surface
+
+This Stage 2 paper layer is intentionally narrow and concrete:
+
+- `_quarto.yml` defines the Quarto project and renders into `reports/paper/build/`.
+- `index.qmd` is the manuscript source.
+- `references.bib` provides repo-local bibliography entries.
+- `reports/paper/build/index.html` is the durable self-contained HTML render.
+
+The release layer downstream of the paper is already locked by the approved Stage 1 continuation packet. It expects canonical release manifests at `reports/status/releases/release_<YYYY-MM-DD>.json` and a deterministic catalog at `reports/catalog.yaml`. Within that locked design, the paper build surface changes release status in only one way:
+
+- `paper.status = pending_stage2` when `reports/paper/build/` has no non-README render artifacts.
+- `paper.status = present` when the build namespace contains a durable render artifact.
+
+For v1, the cleanest durable build surface is a single self-contained `index.html`. That keeps `reports/paper/build/` easy to hash, easy to inspect, and easy for the release layer to snapshot without pulling in transient asset directories.
+
+## Scope Limits For This Release Candidate
+
+The current repository snapshot is strong on definitions and conventions but intentionally light on populated result artifacts. In the attached evidence for this continuation stage:
+
+- `registry/rollup_registry_v1.csv` exposes the registry interface but not populated rollup rows [@registry_rollup_v1].
+- `reports/validation/`, `reports/figures/`, and `reports/tables/` are represented by namespace conventions rather than populated empirical artifacts [@validation_readme; @validation_manifests_readme; @figures_readme; @tables_readme].
+
+Accordingly, this manuscript does not restate unattested numeric results, rank rollups, or embed figures/tables that are not present as durable report artifacts. The manuscript is intentionally a methods-and-release paper rather than a results-forward paper.
+
+That limitation is a feature, not a defect. It keeps the current release honest while still delivering a finished working-paper surface: the question is locked, the metric is locked, the provenance contract is locked, the runtime and review semantics are locked, and the paper can be rendered and hashed into a release manifest today.
+
+## From Repository Workflow To Finished Paper
+
+The repository now supports a clear end-to-end path from task definition to a finished working paper:
+
+1. `docs/protocol.md`, `contracts/data_dictionary.md`, and `contracts/decisions.md` lock the research question and empirical definitions.
+2. `registry/rollup_registry_v1.csv`, `data/raw_manifest/`, and `data/processed_manifest/` lock identity and provenance.
+3. Worker-generated artifacts accumulate under `reports/validation/`, `reports/figures/`, and `reports/tables/`.
+4. Runtime and Judge artifacts under `reports/status/swarm_runs/` and `reports/status/reviews/` certify how those outputs were produced and approved.
+5. Quarto renders this manuscript to `reports/paper/build/index.html`.
+6. Operator-owned release assembly snapshots the combined evidence into `reports/status/releases/release_<YYYY-MM-DD>.json` and updates `reports/catalog.yaml`.
+
+The result is a working paper that is not just readable, but also releaseable. The narrative, the build artifact, and the release manifest all point to the same durable filesystem surfaces.
+
+## Conclusion
+
+This repository's current L2-to-L1 rent analysis project now has a complete paper layer that matches its locked contract-first operating model. The paper does not pretend to have more empirical evidence than the current durable artifacts support, but it does provide a finished manuscript, a reproducible Quarto configuration, a durable HTML render, and paper-specific integrity checks.
+
+That is enough to make the release candidate real. Future revisions can become more results-forward by adding validated report artifacts and then updating the manuscript on top of the same locked protocol, provenance, runtime, and release surfaces rather than renegotiating them.

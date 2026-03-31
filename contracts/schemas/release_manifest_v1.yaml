@@ -1,0 +1,82 @@
+version: 1
+artifact: release_manifest
+schema_version: research_swarm.release_manifest.v1
+description: "Durable release manifest written by scripts/release_assembly.py for canonical release snapshots."
+
+required_top_level:
+  - schema_version
+  - release_id
+  - release_date_utc
+  - generated_at_utc
+  - repo
+  - lifecycle
+  - task_status
+  - quality_gates
+  - artifacts
+  - counts
+  - notes
+
+repo_required_fields:
+  - git_sha
+  - project_mode
+  - catalog_path
+  - release_manifest_path
+
+lifecycle_required_fields:
+  - allowed_states
+  - scientific_review_role
+  - runtime_manifest_dir
+  - judge_review_dir
+  - release_manifest_pattern
+
+task_status_required_fields:
+  - state_counts
+  - task_ids_by_state
+  - parse_failures
+
+quality_gates_required_fields:
+  - required_gate_names
+  - all_required_ok
+  - results
+
+artifact_sections:
+  - contracts_and_protocol
+  - registry
+  - raw_manifests
+  - processed_manifests
+  - runtime_runs
+  - runtime_reviews
+  - validation
+  - figures
+  - tables
+  - paper
+
+paper_required_fields:
+  - status
+  - expected_namespace
+  - artifacts
+
+valid_paper_status:
+  - pending_stage2
+  - present
+
+count_required_fields:
+  - contracts_and_protocol
+  - registry
+  - raw_manifests
+  - processed_manifests
+  - runtime_runs
+  - runtime_reviews
+  - validation
+  - figures
+  - tables
+  - paper_artifacts
+  - done_tasks
+  - integration_ready_tasks
+  - ready_for_review_tasks
+  - blocked_tasks
+
+artifact_entry_required_fields:
+  - path
+  - sha256
+  - bytes

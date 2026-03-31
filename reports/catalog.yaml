@@ -1,18 +1,26 @@
-# Results catalog (template)
-#
-# This file is the single index of key artifacts produced by the project.
-#
-# Each entry should include:
-# - artifact path(s)
-# - generating command
-# - manifest path
-# - git commit or PR reference
-#
-# Example:
-# - name: "validation_summary"
-#   artifacts:
-#     - "reports/validation/summary.json"
-#   command: "python -m src.validation.run_validation --sample"
-#   manifest: "reports/validation/manifests/2026-01-22T12-00-00Z.json"
-#   git_ref: "main@<sha>"
-results: []
+schema_version: "research_swarm.results_catalog.v1"
+managed_by: "python scripts/release_assembly.py --write"
+project:
+  mode: "empirical"
+  primary_metric: "Settlement Take Rate (STR)"
+  protocol_path: "docs/protocol.md"
+  data_dictionary_path: "contracts/data_dictionary.md"
+  decisions_path: "contracts/decisions.md"
+  registry_path: "registry/rollup_registry_v1.csv"
+release_namespace:
+  directory: "reports/status/releases"
+  filename_pattern: "release_<YYYY-MM-DD>.json"
+  manifest_schema: "contracts/schemas/release_manifest_v1.yaml"
+  assembly_command: "python scripts/release_assembly.py --release-date <YYYY-MM-DD> --write"
+status_namespaces:
+  swarm_runs: "reports/status/swarm_runs/"
+  reviews: "reports/status/reviews/"
+  releases: "reports/status/releases/"
+artifact_roots:
+  raw_manifests: "data/raw_manifest/"
+  processed_manifests: "data/processed_manifest/"
+  validation: "reports/validation/"
+  figures: "reports/figures/"
+  tables: "reports/tables/"
+  paper_build: "reports/paper/build/"
+releases: []

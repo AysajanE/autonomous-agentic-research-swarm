@@ -25,6 +25,10 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+!reports/paper/build/
+reports/paper/build/*
+!reports/paper/build/README.md
+!reports/paper/build/index.html
 develop-eggs/
 dist/
 downloads/

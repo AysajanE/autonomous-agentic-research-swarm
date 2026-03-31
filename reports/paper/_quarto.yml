@@ -1,0 +1,21 @@
+project:
+  type: default
+  output-dir: build
+  render:
+    - index.qmd
+
+bibliography: references.bib
+
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    embed-resources: true
+    html-math-method: mathjax
+    theme: default
+
+execute:
+  enabled: false
+
+lang: en
