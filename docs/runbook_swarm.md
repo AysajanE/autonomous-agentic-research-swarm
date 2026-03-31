@@ -1,104 +1,80 @@
-# Swarm Runbook (minimal, PR-synchronized control plane)
+# Swarm Runbook (manual v1)
 
-This is the “golden path” for running a Planner + multiple Workers + a Judge using this repo template.
+Use this runbook for normal repo task delivery. For architecture rewrites, major replans, and release assessments, use the reviewed staged-workflow-runner path instead of treating the work as an ordinary Worker task.
 
-For unattended automation (tmux supervisor loop), see `docs/runbook_swarm_automation.md`.
+## Preflight
 
-## Prereqs
+- Work inside a sandboxed environment that contains only this repo.
+- Sync the base branch before starting.
+- Run `make gate` and `make test`.
+- Review `docs/protocol.md`, `contracts/project.yaml`, and `contracts/framework.json`.
+- Verify required tools:
+  - always: `git`, `python`
+  - when paper or release tasks are in scope: `quarto`
 
-- Work in a sandboxed environment (VM/devcontainer/Codespaces) containing only this repo.
-- Ensure `make gate` passes on `main` before starting parallel work.
+## 1) Planner scopes the queue
 
-## 1) Planner: create/activate tasks
+- Create or update task files using the templates under `.orchestrator/templates/`.
+- Keep `allowed_paths` narrow and keep dependencies aligned with the locked artifact DAG.
+- Use `integration_ready` only for interface/export tasks that truly need early downstream consumption.
 
-1. Create tasks under `.orchestrator/backlog/` using a template:
-   - Generic: `.orchestrator/templates/task_template.md`
-   - W0 protocol/contracts: `.orchestrator/templates/task_template_w0_protocol.md`
-   - W1/W2 ETL: `.orchestrator/templates/task_template_w1_w2_etl.md`
-2. When assigning a task, the Planner may either:
-   - set `State: active` and run `make sweep` (recommended; keeps governance consistent), or
-   - directly `git mv` the task file to `.orchestrator/active/` (Planner-only action).
+## 2) Operator prepares execution
 
-Concurrency guidance:
-- Prefer least-privilege `allowed_paths` (specific files/prefixes), not broad directories.
-- Avoid running multiple tasks in the same workstream concurrently unless interfaces are locked.
+- Verify git identity and, if needed, GitHub auth.
+- Create one worktree per active task.
+- Decide whether the run will be manual or via `scripts/swarm.py`.
+- Keep verbose runtime logs in `data/tmp/swarm_logs/`.
 
-## 2) Worker: create an isolated worktree per task (recommended)
+Suggested worktree pattern:
 
-From the repo root:
+    TASK_ID=T040
+    git worktree add ../wt-${TASK_ID} -b ${TASK_ID}_short_name .
 
-```bash
-TASK_ID=T020
-BRANCH=${TASK_ID}_short_name
-git worktree add ../wt-${TASK_ID} -b ${BRANCH} .
-cd ../wt-${TASK_ID}
-```
+## 3) Worker executes exactly one task
 
-Important: run your agent CLI from the task worktree directory so nested `AGENTS.md` files are applied.
+- Run from the task worktree.
+- Edit only allowed repo paths plus task `## Status` and `## Notes / Decisions`.
+- Record reproduction commands, assumptions, and blockers.
+- Stop instead of improvising on protocol or contract ambiguity.
+- Write a handoff note when downstream tasks need durable guidance.
 
-## 3) Worker: run an agent session (headless example)
+## 4) Judge reviews
 
-Use short, reset-friendly sessions:
-- timebox: 90–180 minutes (or a fixed max-turn count)
-- restart after any merge or after any failed `make gate`
+- Rerun the declared gates.
+- Verify outputs, raw and processed manifests, and the task success criteria.
+- Confirm the review bundle:
+  - task markdown
+  - run manifest under `reports/status/swarm_runs/`
+  - review log under `reports/status/reviews/`
+  - handoff note if needed
+- Set `State: done` only when the task is scientifically acceptable.
 
-**Claude Code (example; adjust flags to your installed version):**
+## 5) Planner or Operator sweeps lifecycle folders
 
-```bash
-claude -p "Role: Worker. Task: .orchestrator/active/${TASK_ID}__*.md. Follow AGENTS.md." \
-  --output-format json \
-  --max-turns 30 \
-  --allowedTools "Bash(git*),Bash(make*),Bash(python*)"
-```
+- Run `python scripts/sweep_tasks.py`.
+- Remember that folder placement is a projection; `State:` is authoritative.
 
-**Codex CLI (example; adjust to your installed version):**
+## 6) Current empirical battle-test order
 
-```bash
-# Non-interactive worker run (matches the style used by scripts/swarm.py):
-codex -a on-request exec --sandbox workspace-write -C . \
-  "Role: Worker. Task: .orchestrator/active/${TASK_ID}__*.md. Follow AGENTS.md."
+1. `T025` registry
+2. `T030` growthepie vendor panel
+3. `T035` on-chain L1 rent and canonical panel
+4. `T040` metrics and tests
+5. `T050` validation bundle
+6. `T060` release figures and tables
+7. `T070` Quarto manuscript source
+8. `T080` Operator release assembly
 
-# Fully unattended (no approval prompts; external sandbox only):
-codex -a never exec --sandbox workspace-write -C . \
-  "Role: Worker. Task: .orchestrator/active/${TASK_ID}__*.md. Follow AGENTS.md."
-```
+## 7) Release closeout
 
-## 4) PR-synchronized status cadence (recommended)
+After `T070` is done:
 
-Because `.orchestrator/` is PR-synchronized (not live), keep the Planner informed:
+- Operator runs `python scripts/release_assembly.py --as-of YYYY-MM-DD --check`
+- Operator runs `quarto render reports/paper/index.qmd`
+- Judge verifies `reports/catalog.yaml`, paper build outputs, `render_manifest.json`, and `reports/status/releases/release_<YYYY-MM-DD>.json`
 
-- Push your branch at least every 30–60 minutes, and whenever you change `State:` or produce outputs.
-- Open a PR early; use the PR description as a lightweight status log if needed.
+## Safety defaults
 
-## 5) Judge: verify and advance lifecycle
-
-From a clean checkout (or the Worker PR branch):
-
-```bash
-make gate
-make test
-```
-
-Then:
-- If acceptable: set task `State: done` (or `ready_for_review` first), and the Planner sweeps the file into the matching folder.
-- If revisions needed: write actionable feedback in `## Notes / Decisions` and set `State: active`.
-
-## 6) Fresh start policy (drift control)
-
-Long-running agent sessions drift. Use “fresh starts”:
-
-- Restart Worker sessions after any merge to `main`.
-- Restart if a session exceeds your timebox or fails gates twice.
-- Prefer short tasks and frequent merges over long monolithic runs.
-
-## 7) Running unattended overnight (practical note)
-
-Codespaces and other hosted environments may stop on inactivity by default. If you need true overnight runs:
-
-- use a VM + `tmux`, or
-- configure your environment’s idle timeout appropriately, and verify it stays running before relying on it.
-
-## 8) Safety defaults
-
-- Prefer tool allowlists (`git`, `make`, `python`) over broad shell permissions.
-- Avoid unattended runs on machines with secrets or sensitive files.
+- Keep unattended execution inside sandboxed environments only.
+- Prefer short runs and fresh sessions after merges or repeated gate failures.
+- Do not bypass validation or review to unblock analysis or writing work.

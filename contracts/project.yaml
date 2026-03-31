@@ -1,9 +1,204 @@
+project_id: l2-l1-rent-analysis
 project_name: "l2-l1-rent-analysis"
+display_name: "L2-to-L1 rent analysis"
 mode: empirical
-primary_question: "Is Ethereum L1’s settlement take rate on rollup economics rising, stable, or decaying as L2 usage scales?"
+status: empirical_battle_test_in_progress
+
+primary_question: "Is Ethereum L1's settlement take rate on rollup economics rising, stable, or decaying as L2 usage scales?"
 primary_outputs:
+  - "registry/rollup_registry_v1.csv"
   - "reports/validation/"
   - "reports/figures/"
+  - "reports/tables/"
+  - "reports/paper/"
+  - "reports/paper/build/"
+  - "reports/catalog.yaml"
+  - "reports/status/releases/"
+
+default_execution_engines:
+  routine_repo_tasks:
+    name: local_swarm
+    control_plane_root: ".orchestrator"
+    runner_path: "scripts/swarm.py"
+    notes:
+      - "Default for normal repo task execution, deterministic gates, and routine multi-agent delivery."
+  high_stakes_operator_tasks:
+    name: staged-workflow-runner
+    owner_role: Operator
+    use_cases:
+      - "major architecture rewrites"
+      - "major replans"
+      - "release assessments"
+      - "similarly consequential synthesis work"
+
+paper_substrate:
+  type: quarto_markdown
+  source_root: "reports/paper/"
+  entrypoint: "reports/paper/index.qmd"
+  build_root: "reports/paper/build/"
+
+scientific_contract:
+  protocol_path: "docs/protocol.md"
+  rollup_universe_contract: "registry/rollup_registry_v1.csv"
+  authoritative_rent_source: "on-chain L1 extraction"
+  primary_denominator_source: "growthepie"
+  secondary_cross_checks:
+    - "growthepie vendor rent/profit series"
+    - "L2BEAT costs series when explicitly used for reconciliation"
+
+artifact_dag:
+  - stage_id: registry
+    depends_on: []
+    producing_tasks:
+      - "T025"
+    required_artifacts:
+      - "registry/rollup_registry_v1.csv"
+  - stage_id: raw_inputs
+    depends_on:
+      - registry
+    producing_tasks:
+      - "T030"
+      - "T035"
+    required_artifacts:
+      - "data/raw_manifest/growthepie_<YYYY-MM-DD>.json"
+      - "data/raw_manifest/l1_rent_<YYYY-MM-DD>.json"
+  - stage_id: processed_datasets
+    depends_on:
+      - raw_inputs
+    producing_tasks:
+      - "T030"
+      - "T035"
+    required_artifacts:
+      - "data/processed_manifest/vendor_daily_rollup_panel_<YYYY-MM-DD>.json"
+      - "data/processed_manifest/daily_l1_rent_decomposition_<YYYY-MM-DD>.json"
+      - "data/processed_manifest/daily_rollup_panel_<YYYY-MM-DD>.json"
+  - stage_id: validation
+    depends_on:
+      - processed_datasets
+    producing_tasks:
+      - "T050"
+    required_artifacts:
+      - "reports/validation/rollup_panel_validation.json"
+      - "reports/validation/rollup_panel_validation.md"
+      - "reports/validation/l1_rent_decomposition_validation.json"
+      - "reports/validation/l1_rent_decomposition_validation.md"
+      - "reports/validation/cross_source_reconciliation.json"
+      - "reports/validation/cross_source_reconciliation.md"
+  - stage_id: release_analysis
+    depends_on:
+      - validation
+    producing_tasks:
+      - "T060"
+    required_artifacts:
+      - "reports/figures/str_ecosystem_timeseries.svg"
+      - "reports/figures/str_post_dencun_regimes.svg"
+      - "reports/tables/str_regime_summary.csv"
+      - "reports/tables/str_regime_summary.md"
+  - stage_id: paper_source
+    depends_on:
+      - release_analysis
+    producing_tasks:
+      - "T070"
+    required_artifacts:
+      - "reports/paper/_quarto.yml"
+      - "reports/paper/index.qmd"
+      - "reports/paper/references.bib"
+  - stage_id: release_candidate
+    depends_on:
+      - paper_source
+    producing_tasks:
+      - "T080"
+    required_artifacts:
+      - "reports/catalog.yaml"
+      - "reports/paper/build/l2_l1_rent_working_paper.html"
+      - "reports/paper/build/l2_l1_rent_working_paper.pdf"
+      - "reports/paper/build/render_manifest.json"
+      - "reports/status/releases/release_<YYYY-MM-DD>.json"
+
+battle_test_queue:
+  - task_id: "T025"
+    workstream: W3
+    summary: "Populate the evidence-backed rollup registry."
+    required_for_release: true
+  - task_id: "T030"
+    workstream: W1
+    summary: "Acquire growthepie raw snapshots and build the vendor panel."
+    required_for_release: true
+  - task_id: "T035"
+    workstream: W2
+    summary: "Build the authoritative on-chain L1 rent path and canonical rollup panel."
+    required_for_release: true
+  - task_id: "T040"
+    workstream: W4
+    summary: "Lock STR metric construction in code and tests."
+    required_for_release: true
+  - task_id: "T050"
+    workstream: W5
+    summary: "Validate canonical artifacts before any release analysis."
+    required_for_release: true
+  - task_id: "T060"
+    workstream: W6
+    summary: "Generate release figures and tables from validated artifacts only."
+    required_for_release: true
+  - task_id: "T070"
+    workstream: W7
+    summary: "Write Quarto manuscript source and confirm a draft render path."
+    required_for_release: true
+  - task_id: "T080"
+    workstream: W9
+    summary: "Compile the catalog, render the paper, and assemble the release manifest."
+    required_for_release: true
+
+release_contract:
+  catalog_compiler_role: Operator
+  required_outputs:
+    raw_manifests:
+      - "data/raw_manifest/growthepie_<YYYY-MM-DD>.json"
+      - "data/raw_manifest/l1_rent_<YYYY-MM-DD>.json"
+    processed_manifests:
+      - "data/processed_manifest/vendor_daily_rollup_panel_<YYYY-MM-DD>.json"
+      - "data/processed_manifest/daily_l1_rent_decomposition_<YYYY-MM-DD>.json"
+      - "data/processed_manifest/daily_rollup_panel_<YYYY-MM-DD>.json"
+    validation:
+      - "reports/validation/rollup_panel_validation.json"
+      - "reports/validation/rollup_panel_validation.md"
+      - "reports/validation/l1_rent_decomposition_validation.json"
+      - "reports/validation/l1_rent_decomposition_validation.md"
+      - "reports/validation/cross_source_reconciliation.json"
+      - "reports/validation/cross_source_reconciliation.md"
+    figures:
+      - "reports/figures/str_ecosystem_timeseries.svg"
+      - "reports/figures/str_post_dencun_regimes.svg"
+    tables:
+      - "reports/tables/str_regime_summary.csv"
+      - "reports/tables/str_regime_summary.md"
+    paper_source:
+      - "reports/paper/_quarto.yml"
+      - "reports/paper/index.qmd"
+      - "reports/paper/references.bib"
+    paper_build:
+      - "reports/paper/build/l2_l1_rent_working_paper.html"
+      - "reports/paper/build/l2_l1_rent_working_paper.pdf"
+      - "reports/paper/build/render_manifest.json"
+    release_index:
+      - "reports/catalog.yaml"
+    release_manifest:
+      - "reports/status/releases/release_<YYYY-MM-DD>.json"
+  release_blockers:
+    - "registry/rollup_registry_v1.csv is still a stub or lacks evidence-backed active rows"
+    - "canonical daily_rollup_panel lineage does not cite both growthepie and on-chain raw manifests"
+    - "required validation artifacts are missing or failing"
+    - "required release figures/tables are missing"
+    - "reports/catalog.yaml is missing or not reproducible from successful run manifests"
+    - "Quarto render does not emit HTML, PDF, and render_manifest.json"
+
+maturity_claims:
+  may_claim_after_release:
+    - "empirical_end_to_end_v1"
+  may_not_claim_yet:
+    - "modeling_runtime_maturity"
+    - "hybrid_runtime_maturity"
+
 risk_policy:
   stop_conditions:
     - "definition ambiguity"

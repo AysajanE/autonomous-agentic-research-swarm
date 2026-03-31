@@ -1,47 +1,67 @@
-# Hybrid Interface Contract (v1)
-#
-# Purpose:
-# - Define the explicit boundary between empirical ETL outputs and modeling inputs in hybrid projects.
-# - Prevent "hybrid" from devolving into two parallel projects with an implicit/undocumented interface.
-#
-# Notes:
-# - This is a contract template. Replace placeholders and keep it updated as interfaces evolve.
-# - Prefer linking to manifests / reproducible commands over prose-only descriptions.
-
 version: 1
+interface_id: empirical_to_modeling_v1
+status: contract_ready_not_battle_tested
+current_project_mode: empirical
 
-# Which processed dataset(s) are produced by empirical work and consumed by modeling.
-processed_datasets:
-  - dataset_id: "..."
-    description: "..."
-    # Prefer manifests over raw paths when available.
-    manifests:
-      - "data/processed_manifest/..."
-    outputs:
-      - "data/processed/..."
+purpose:
+  - "Provide the only allowed empirical-to-modeling boundary for this repo."
+  - "Prevent modeling tasks from consuming ad hoc empirical CSV paths."
 
-# Which instance set(s) are generated from the processed dataset(s) and then used by modeling.
-instance_sets:
-  - instance_set_id: "..."
-    description: "..."
-    # Where the instance set lives (prefer `contracts/instances/<name>/`).
-    path: "contracts/instances/..."
-    manifest: "contracts/instances/.../manifest.json"
+policies:
+  modeling_may_consume_only:
+    - "contracts/instances/<instance_set>/manifest.yaml"
+  modeling_may_not_consume_directly:
+    - "data/raw/**"
+    - "data/processed/**"
+    - "data/processed_manifest/**"
+  integration_ready_allowed_for_bridge_tasks: true
+  required_downstream_allowlist_field: "integration_ready_dependencies"
 
-# How to reproduce instance generation deterministically.
-instance_generation:
-  generator:
-    # A script, Make target, or notebook path that generates instance sets.
-    path: "src/model/instances/..."
-    # Canonical reproduction command (must be runnable from repo root).
-    command: "python ..."
-  inputs:
-    - "data/processed_manifest/..."
-  outputs:
-    - "contracts/instances/..."
+empirical_exports:
+  - dataset_id: daily_rollup_panel
+    description: "Canonical daily rollup panel with growthepie denominators and authoritative on-chain rent."
+    processed_manifest_pattern: "data/processed_manifest/daily_rollup_panel_<YYYY-MM-DD>.json"
+    data_path: "data/processed/panels/daily_rollup_panel.csv"
+    required_fields:
+      - "date_utc"
+      - "rollup_id"
+      - "l2_fees_eth"
+      - "rent_paid_eth"
+  - dataset_id: daily_l1_rent_decomposition
+    description: "Authoritative daily Ethereum L1 rent decomposition."
+    processed_manifest_pattern: "data/processed_manifest/daily_l1_rent_decomposition_<YYYY-MM-DD>.json"
+    data_path: "data/processed/l1_rent/daily_l1_rent_decomposition.csv"
+    required_fields:
+      - "date_utc"
+      - "l1_base_fee_burn_eth"
+      - "l1_blob_fee_burn_eth"
+      - "l1_priority_fee_eth"
+      - "l1_total_rent_eth"
 
-# Optional: where instance validation occurs (recommended).
-validation:
-  command: "make test"
-  expected_artifacts:
-    - "reports/validation/..."
+bridge_requirements:
+  allowed_task_kind: bridge
+  generator_script_path_pattern: "src/model/<instance_generator_script>.py"
+  instance_manifest_root: "contracts/instances/"
+  instance_manifest_format: "yaml"
+  required_instance_manifest_fields:
+    - "instance_set_id"
+    - "source_processed_manifests"
+    - "generator_command"
+    - "git_sha"
+    - "generated_at_utc"
+    - "outputs"
+  required_source_metadata:
+    - "as_of_utc_date"
+    - "inputs"
+    - "transform"
+
+validation_requirements:
+  required_empirical_validation_artifacts:
+    - "reports/validation/rollup_panel_validation.json"
+    - "reports/validation/l1_rent_decomposition_validation.json"
+    - "reports/validation/cross_source_reconciliation.json"
+  gate_command: "make gate"
+
+notes:
+  - "Current project mode remains empirical until the empirical end-to-end release is accepted."
+  - "Future hybrid tasks must update this contract through W0 review before widening the interface."

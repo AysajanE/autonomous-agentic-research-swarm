@@ -1,76 +1,82 @@
-# AGENTS.md — Agent Operating Manual (read first)
+# AGENTS.md — Research Swarm Operating Manual
 
-You are operating inside a **multi-agent research repo**. This is not chat-driven work.
-The repo (files) is the shared memory.
+You are operating inside a repo-native research operating system. Coordination happens through files, contracts, and git history. The repo is the shared memory.
 
-## 0) Role selection (required)
-Every agent run must declare ONE role in its first message and behave accordingly:
+## 0) Declare exactly one role
 
-- **Planner**: creates/scopes tasks, assigns owners, moves task files across lifecycle folders.
-- **Worker**: executes exactly ONE assigned task in an isolated branch/worktree.
-- **Judge**: runs gates/tests, checks success criteria, requests fixes or approves merge.
+- **Operator** — owns environment preflight, runtime supervision, sweep hygiene, repair handling, run/review/release logging, catalog refresh, and release assembly. May set `active` or `blocked` on operational grounds and may set `ready_for_review` on Operator-owned tasks. May never redefine scientific contracts or mark scientific work `done`.
+- **Planner** — decomposes work, creates or rewrites task files, maintains `.orchestrator/workstreams.md`, and owns lifecycle projection across `.orchestrator/{backlog,active,integration_ready,ready_for_review,blocked,done}/`.
+- **Worker** — executes exactly one assigned task in one isolated branch/worktree, edits only within `allowed_paths` plus task `## Status`, task `## Notes / Decisions`, and optional handoff notes.
+- **Judge** — reruns declared gates, verifies outputs and provenance, writes review decisions, and is the only role allowed to mark a task `done`.
 
-Default role if unclear: **Worker**.
+Default if unclear: **Worker**.
 
-## 1) Source-of-truth precedence (do not improvise)
-When guidance conflicts, follow this order:
+## 1) Choose the right execution path
 
-1) `docs/protocol.md` (Protocol Lock) — highest authority
-2) `contracts/*` (schemas, assumptions, decisions)
-3) `.orchestrator/workstreams.md` (ownership boundaries)
-4) the task file you are assigned (I/O + success criteria)
-5) `.orchestrator/handoff/*` notes
+- The local swarm layer (`scripts/swarm.py` + `.orchestrator/`) is the default engine for routine repo task execution, deterministic gates, and normal multi-agent delivery.
+- The reviewed `staged-workflow-runner` path is for high-stakes, high-context, review-gated Operator work such as architecture rewrites, major replans, and release assessments.
+- Do not mix both execution paths inside one task run.
 
-If a conflict remains: STOP and mark the task `blocked` with `@human`.
+## 2) Source-of-truth precedence
 
-## 2) Non-negotiable repo rules
-1) **No agent-to-agent chat coordination.** Only coordination files and artifacts.
-2) **Do not edit outside allowed paths** listed in your task.
-   - `allowed_paths` governs project artifacts; editing your assigned task file (in allowed sections) and writing a handoff note in `.orchestrator/handoff/` are always permitted.
-3) **Never change protocol definitions** unless your task is in Workstream W0 and explicitly authorizes it.
-4) **Raw snapshots are append-only.** Never overwrite `data/raw/` artifacts in-place.
-5) **No “helpful refactors”** outside task scope.
+1. `docs/protocol.md` for empirical definitions, tolerances, and regime logic
+2. `contracts/project.yaml`, `contracts/framework.json`, and the applicable file(s) under `contracts/`
+3. `.orchestrator/workstreams.md`
+4. the assigned task file
+5. `.orchestrator/handoff/` notes
 
-## 3) Control-plane rules (.orchestrator)
-- **Only the Planner moves tasks** between `.orchestrator/{backlog,active,integration_ready,ready_for_review,blocked,done}/`.
-- **Workers only edit** their task file’s:
-  - `## Status`
-  - `## Notes / Decisions`
-- Workers must NOT edit templates or `workstreams.md` unless explicitly assigned.
+If guidance still conflicts, stop, set `State: blocked`, and record the smallest `@human` question needed to unblock the task.
 
-**Control plane mode (recommended): PR-synchronized**
-- Workers update task `State:` and notes in their branch/worktree.
-- Status becomes visible when branches are pushed/PR’d (not real-time).
-- Planner periodically sweeps and moves task files based on `State:`.
+## 3) Non-negotiable repo rules
 
-## 4) Branch/worktree policy (anti-clobber)
-- Workers do all work in an isolated branch/worktree named after the task:
-  - Example: `T010_growthepie_etl`
-- Worker PRs should touch:
-  - code + docs + artifacts required by the task
-  - optionally the worker’s own task file + a handoff note
-- Do NOT bundle multiple tasks into one PR.
+1. No agent-to-agent chat coordination. Use task files, contracts, manifests, review logs, and handoff notes.
+2. Do not edit outside `allowed_paths`.
+   - Editing your assigned task file in `## Status` and `## Notes / Decisions` and adding a handoff note in `.orchestrator/handoff/` are always allowed.
+3. Do not change `docs/protocol.md` or contract definitions unless the task is a W0 protocol/contracts task that explicitly authorizes it.
+4. Raw snapshots are append-only. Never overwrite existing `data/raw/.../<YYYY-MM-DD>/` pulls.
+5. Any committed processed artifact lineage must have a matching `data/processed_manifest/*.json`.
+6. `reports/catalog.yaml` is Operator-owned and may not be hand-edited by Workers.
+7. Deterministic gates stay offline and sample-safe. Do not add network calls to `make gate` or `make test`.
+8. The paper is a required release surface. A figure-only slice is not a release.
 
-## 5) Required outputs at task completion
-When you think you are done, you must produce:
-- Files created/changed (paths)
-- Reproduction commands
-- Gate/test commands you ran and their output summary
-- Assumptions + known limitations
-- A handoff note if downstream tasks depend on your outputs
+## 4) State and review semantics
 
-Put this summary into:
-- the task file `## Notes / Decisions` (brief)
-- and `.orchestrator/handoff/H___*.md` (actionable, durable)
+- `State:` inside `## Status` is authoritative.
+- Folder placement under `.orchestrator/` is a Planner/Operator-maintained projection.
+- Valid states: `backlog`, `active`, `integration_ready`, `ready_for_review`, `blocked`, `done`.
+- `integration_ready` is only for interface/export tasks whose downstream consumers explicitly list the task in `integration_ready_dependencies`.
+- `ready_for_review` means declared outputs exist, declared gates pass, required manifests exist, and a durable run manifest exists under `reports/status/swarm_runs/`.
+- `done` requires Judge approval plus a review bundle: task file + run manifest + Judge review log under `reports/status/reviews/` + handoff note if needed.
 
-## 6) Stop conditions (mark blocked with @human)
-Block immediately if:
-- you need to reinterpret metric definitions or inclusion rules
-- you need credentials/secrets you don’t have
-- two data sources disagree beyond tolerance and protocol doesn’t specify priority
-- you must edit files outside your allowed paths to proceed
-- a gate fails and the fix requires changing protocol/registry/definitions
+## 5) Branch and worktree discipline
 
-## 7) Safety boundary
-Unattended/autonomous shell execution is only allowed inside a sandboxed environment
-(devcontainer/VM/Codespaces) containing only this repo and no sensitive files.
+- One task, one branch, one worktree.
+- Use task-shaped names such as `T035_l1_rent_panel`.
+- Do not bundle multiple tasks into one branch or PR.
+- Rebase or restart long-running sessions after mainline changes or repeated gate failures.
+
+## 6) Completion checklist
+
+Before leaving `active`, record:
+
+- files changed or created
+- reproduction commands
+- gate/test commands run and a brief outcome summary
+- assumptions, limitations, and blockers
+- downstream handoff notes when another task depends on your outputs
+
+Put the short version in the task file and the durable downstream version in `.orchestrator/handoff/` when needed.
+
+## 7) Stop conditions
+
+Block immediately with `@human` if:
+
+- metric definitions or inclusion rules are ambiguous
+- credentials or missing tools are required
+- upstream sources disagree beyond the locked tolerance
+- proceeding would require edits outside `allowed_paths`
+- a fix would change protocol, contracts, or registry definitions without W0 authorization
+
+## 8) Safety boundary
+
+Unattended automation is only allowed inside a sandboxed environment that contains this repo and no sensitive files. Treat network access as opt-in and only use it on tasks whose workstream and frontmatter allow it.

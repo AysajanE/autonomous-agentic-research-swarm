@@ -1,0 +1,61 @@
+version: 1
+artifact: swarm_run_manifest
+schema_version: research_swarm.runtime_run_manifest.v1
+description: "Durable run manifest written by scripts/swarm.py for runtime-complete task executions."
+
+required_top_level:
+  - schema_version
+  - run_id
+  - generated_at_utc
+  - task
+  - repo
+  - executor
+  - commands
+  - gates
+  - ownership
+  - artifacts
+  - result
+
+task_required_fields:
+  - task_id
+  - task_path
+  - title
+  - role
+  - workstream
+  - state_before
+  - state_after
+
+repo_required_fields:
+  - branch
+  - git_sha
+  - base_branch
+  - remote
+
+executor_required_fields:
+  - role
+  - runner
+  - tool
+  - allow_network
+
+commands_required_fields:
+  - executor
+  - gates
+
+ownership_required_fields:
+  - ok
+  - changed_paths
+  - violations
+
+artifacts_required_fields:
+  - outputs_ok
+  - missing_outputs
+  - required_manifests_ok
+  - missing_manifests
+
+result_required_fields:
+  - status
+  - blocked_reasons
+
+valid_result_status:
+  - ok
+  - blocked

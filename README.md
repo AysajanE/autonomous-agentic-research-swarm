@@ -1,108 +1,74 @@
-# Autonomous Agentic Research Swarm (Repo Template)
+# Autonomous Agentic Research Swarm
 
-A lightweight, **file-based** workflow for running multiple AI coding/research agents in parallel (e.g., Codex CLI, Claude Code) while keeping coordination sane, reproducible, and reviewable.
+This repository is a repo-native research operating system for the current L2-to-L1 rent analysis project. v1 is designed to carry one real project from definition lock to a reproducible working-paper release.
 
-This repo is intentionally **not** an “agents talk to each other” framework. The repo (files + git history) is the shared memory.
+## Locked empirical artifact DAG
 
-## The Mental Model
+`registry -> raw snapshots/manifests -> processed datasets/manifests -> validation -> figures/tables -> Quarto paper -> release manifest`
 
-This template enforces three roles:
+The current project is not releaseable until that full path exists.
 
-- **Planner**: creates/scopes tasks and owns the control plane (`.orchestrator/`).
-- **Worker**: executes exactly one task in an isolated branch/worktree; writes only within task `allowed_paths`.
-- **Judge**: runs deterministic gates/tests and approves/blocks merges based on success criteria.
+## Default execution paths
 
-Why this works:
-- A shared mutable “kanban brain” (single file everyone edits) breaks under parallelism.
-- Git worktrees/branches isolate work; task files + contracts prevent definition drift; gates prevent low-quality merges.
+- **Local swarm** (`scripts/swarm.py` + `.orchestrator/`) is the default engine for routine repo task execution, deterministic gates, and normal multi-agent delivery.
+- **Reviewed staged-workflow-runner path** is for high-stakes Operator-owned synthesis work such as architecture rewrites, major replans, and release assessments.
+- The paper substrate is **Quarto-backed Markdown** under `reports/paper/`.
 
-## What You Get (Core Primitives)
+## Four-role operating model
 
-1. **Protocol / contract lock (definitions-first)**
-   - Empirical/hybrid: `docs/protocol.md` + versioned schemas under `contracts/schemas/`
-   - Modeling/hybrid: `contracts/model_spec.*` + benchmark instances under `contracts/instances/`
-2. **Workstreams (ownership boundaries)**: `.orchestrator/workstreams.md`
-3. **Task files (single-task execution units)**: `.orchestrator/{backlog,active,ready_for_review,blocked,done}/`
-4. **Deterministic gates (merge firewall)**: `make gate` and `make test`
-5. **Optional automation**: `python scripts/swarm.py ...` (supervisor loop that starts workers, runs gates, updates task state)
+- **Operator** — runtime preflight, worktree/tmux supervision, repair handling, sweeps, run/review/release logging, catalog refresh, and release assembly.
+- **Planner** — task decomposition, dependency wiring, workstream ownership, and lifecycle projection.
+- **Worker** — one assigned task, one isolated worktree, one explicit output contract.
+- **Judge** — reruns gates, verifies outputs and provenance, and is the only role allowed to mark work `done`.
 
-## Repo Layout
+## Current battle-test queue
 
-- `.orchestrator/` — control plane: task queue + state + templates
-- `contracts/` — canonical specs (project mode, schemas, assumptions, decisions, model spec)
-- `docs/` — runbooks + protocol lock (empirical) + reusable workflow notes
-- `scripts/` — deterministic quality gates + swarm supervisor + sweep tool
-- `src/` — project code split by responsibility:
-  - `src/etl/` (network allowed) — data acquisition + snapshotting + manifests
-  - `src/validation/` (no network) — reconciliation + sanity checks
-  - `src/analysis/` (no network) — analysis scripts + figures/tables
-  - `src/model/` (no assumptions invented) — modeling/simulation (for modeling/hybrid)
-- `data/` — data policy:
-  - `data/raw/` and `data/processed/` are not committed (append-only snapshots + rebuildable transforms)
-  - `data/raw_manifest/` and `data/processed_manifest/` are tracked provenance
-  - `data/samples/` are tiny, tracked golden samples used in gates/tests
-- `reports/` — generated outputs (figures/tables/validation) + `reports/catalog.yaml` index
-- `tests/` — fast deterministic tests (sample-only)
+1. `T025` — populate `registry/rollup_registry_v1.csv` with evidence-backed in-scope rows.
+2. `T030` — pull growthepie snapshots, write raw manifests, normalize the vendor panel, and commit a tiny deterministic sample.
+3. `T035` — build the authoritative on-chain L1 rent path, write processed manifests, and materialize the canonical `daily_rollup_panel`.
+4. `T040` — lock STR math in `src/analysis/metrics_str.py` with sample-only tests.
+5. `T050` — validate the canonical panel, L1 rent decomposition, and cross-source reconciliation.
+6. `T060` — generate release figures and tables from validated artifacts only.
+7. `T070` — write Quarto manuscript source and confirm a draft render path.
+8. `T080` — Operator release assembly: compile `reports/catalog.yaml`, render final paper artifacts, and write the release manifest.
 
-## Quickstart (Best Practice for a New Project)
+## What counts as a release candidate
 
-1. **Decide research mode**: set `mode: empirical | modeling | hybrid` in `contracts/project.yaml`.
-2. **Lock the spec (Phase 0)**:
-   - Empirical/hybrid: complete `docs/protocol.md` and add versioned schema(s) in `contracts/schemas/`.
-   - Modeling/hybrid: complete `contracts/model_spec.*` and add `contracts/instances/benchmark_small/`.
-3. **Define ownership boundaries**: edit `.orchestrator/workstreams.md` (Planner-only).
-4. **Create 3–5 small tasks** (30–180 minutes each) in `.orchestrator/backlog/` using:
-   - `.orchestrator/templates/task_template.md` (generic)
-   - `.orchestrator/templates/task_template_w1_w2_etl.md` (ETL)
-5. **Run gates locally** (and keep them green):
-   - `make gate`
-   - `make test`
+A release candidate must include all of the following:
 
-## Manual Swarm (Recommended First)
+- an evidence-backed `registry/rollup_registry_v1.csv`
+- raw manifests for growthepie and the on-chain L1 rent pull
+- processed manifests for the vendor panel, L1 rent decomposition, and canonical rollup panel
+- validation JSON/Markdown outputs
+- release figures and tables
+- Quarto paper source plus rendered HTML/PDF and `render_manifest.json`
+- `reports/catalog.yaml` compiled from successful run manifests
+- `reports/status/releases/release_<YYYY-MM-DD>.json`
 
-Follow `docs/runbook_swarm.md` for the full “golden path”. At a high level:
+A sample figure alone is not battle-test success.
 
-- Planner creates tasks under `.orchestrator/backlog/`.
-- Worker creates a dedicated worktree per task, runs an agent session, and updates only task `## Status` + `## Notes / Decisions`.
-- Judge runs `make gate`/`make test`, reviews outputs vs success criteria, and marks task `ready_for_review` or `done`.
-- Planner optionally runs `make sweep` to align task folders with each task’s `State:`.
+## Repository map
 
-## Automated Swarm (`scripts/swarm.py`)
+- `.orchestrator/` — file-based control plane, task queue, templates, and handoffs
+- `contracts/` — project instance contract, framework policy, empirical definitions, and hybrid/modeling interfaces
+- `docs/` — protocol lock, runbooks, and role prompts
+- `registry/` — versioned rollup universe contract
+- `data/raw_manifest/` and `data/processed_manifest/` — tracked provenance for raw and processed artifacts
+- `src/etl/`, `src/validation/`, `src/analysis/`, `src/model/` — code split by responsibility
+- `reports/` — validation outputs, figures, tables, Quarto paper source/build, catalog, and release manifests
+- `tests/` — fast offline tests on tracked samples
 
-See `docs/runbook_swarm_automation.md` for a press-go guide.
+## Quickstart
 
-Key commands:
-- `python scripts/swarm.py plan` — show done/claimed/ready tasks
-- `python scripts/swarm.py tick --runner local --max-workers 1 --dry-run` — verify selection logic
-- `python scripts/swarm.py tmux-start ...` — start a tmux supervisor loop
+1. Read `AGENTS.md`.
+2. Review `docs/protocol.md`, `contracts/project.yaml`, and `contracts/framework.json`.
+3. Inspect `.orchestrator/workstreams.md` and the live backlog under `.orchestrator/backlog/`.
+4. Run `make gate` and `make test` on the base branch.
+5. Use `docs/runbook_swarm.md` for manual execution or `docs/runbook_swarm_automation.md` for the default local swarm path.
+6. When upstream tasks are done, run the Operator release path with `python scripts/release_assembly.py --as-of YYYY-MM-DD --check`.
 
-Safety interlock:
-- Unattended mode requires `SWARM_UNATTENDED_I_UNDERSTAND=1` and should only be run in a sandboxed environment (VM/devcontainer/Codespaces) that contains only this repo and no secrets.
+## Mode coverage
 
-## Example “Vertical Slice” (Empirical STR)
-
-This repo currently includes an example empirical protocol (`docs/protocol.md`) and a set of backlog tasks (`T030`–`T060`) intended to produce the first end-to-end artifact:
-- ETL snapshot + golden sample → metric module + tests → validation report → figure output.
-
-Once those tasks are implemented and the golden sample exists at `data/samples/growthepie/vendor_daily_rollup_panel_sample.csv`, you should be able to run:
-
-```bash
-make gate
-make test
-python src/validation/validate_vendor_panel.py --sample
-python src/analysis/plot_str_timeseries_sample.py
-```
-
-Expected outputs:
-- `reports/validation/vendor_panel_validation.md`
-- `reports/validation/vendor_panel_validation.json`
-- `reports/figures/str_timeseries_sample.svg`
-
-## Optional GitHub Automation
-
-The only workflow that should be enabled by default is CI (`.github/workflows/ci.yml`).
-
-Optional agent-triggered workflows (e.g., Claude Code review) live under `docs/optional/github_workflows/`. If you enable them:
-- read triggers carefully (comment-based invocation can be abused on public repos),
-- configure required secrets,
-- prefer restrictive allowlists.
+- **Empirical** is the active mode for this repo and the only mode that may be claimed as end-to-end ready after the battle-test release succeeds.
+- **Modeling** remains contract-ready through `contracts/model_spec.md`, `contracts/instances/`, and `contracts/experiments/`, but it is not yet battle-tested here.
+- **Hybrid** remains contract-ready through `contracts/hybrid_interface_v1.yaml`; modeling tasks may consume only explicit instance manifests, not ad hoc empirical CSV paths.

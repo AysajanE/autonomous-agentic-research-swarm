@@ -1,0 +1,44 @@
+version: 1
+artifact: judge_review_log
+schema_version: research_swarm.judge_review_log.v1
+description: "Durable deterministic Judge review log required before a task may enter done."
+
+required_top_level:
+  - schema_version
+  - review_id
+  - generated_at_utc
+  - reviewer
+  - task
+  - checks
+  - decision
+
+reviewer_required_fields:
+  - role
+
+task_required_fields:
+  - task_id
+  - task_path
+  - role
+  - state_before
+  - state_after
+  - run_manifest_path
+
+checks_required_fields:
+  - gates_ok
+  - outputs_ok
+  - required_manifests_ok
+  - review_bundle_ok
+  - failures
+
+decision_required_fields:
+  - outcome
+  - note
+
+valid_decision_outcomes:
+  - approve
+  - revise
+  - block
+
+approval_rule:
+  reviewer_role_must_be: Judge
+  approval_requires_state_after: done
