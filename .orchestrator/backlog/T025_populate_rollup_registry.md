@@ -76,10 +76,9 @@ stop_conditions:
 - `make gate`
 
 ## Status
-
-- State: backlog
-- Last updated: 2026-03-29
-
+- State: active
+- Last updated: 2026-03-31
 ## Notes / Decisions
 
 - 2026-03-29: New v1 task added. Downstream ecosystem-level STR outputs are blocked until the registry is evidence-backed.
+- 2026-03-31: Claimed by local swarm runtime on branch T025_populate_rollup_registry.
