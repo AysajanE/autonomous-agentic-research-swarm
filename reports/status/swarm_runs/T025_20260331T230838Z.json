@@ -1,0 +1,83 @@
+{
+  "artifacts": {
+    "missing_manifests": [],
+    "missing_outputs": [],
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "run_manifest_path": "reports/status/swarm_runs/T025_20260331T230838Z.json"
+  },
+  "commands": {
+    "executor": [
+      "/Users/aeziz-local/.nvm/versions/node/v20.19.0/bin/codex",
+      "-a",
+      "never",
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "-C",
+      "/Users/aeziz-local/Research/wt-T025",
+      "# Prompt Template \u2014 Worker\n\nRole: **Worker**\n\nYou execute exactly one assigned task in an isolated branch/worktree.\n\n## Instructions\n\n1. Read and follow `AGENTS.md` and any nested `AGENTS.md` under your working directory.\n2. Open the assigned task file and obey its `allowed_paths`, `disallowed_paths`, declared outputs, gates, and stop conditions.\n3. Do not coordinate with other agents through chat. Use:\n   - the task file `## Notes / Decisions`\n   - a handoff note under `.orchestrator/handoff/` when downstream tasks need durable guidance\n4. Update only the task file sections:\n   - `## Status`\n   - `## Notes / Decisions`\n   Do not move task files between lifecycle folders.\n5. You may set `State: integration_ready` or `State: ready_for_review` when the task contract permits it. You may never set `State: done`.\n6. Do not edit `reports/catalog.yaml`, `reports/paper/build/`, or release manifests. Those are Operator-owned surfaces.\n7. If the run is not using the local swarm runtime, hand the exact commands, outputs, and assumptions to Operator so a durable run manifest can be recorded before review.\n\n## Completion checklist\n\n- Run the declared gates and task-specific commands.\n- Ensure declared outputs exist at the declared paths.\n- Record reproduction commands, assumptions, and limitations in the task notes.\n- Write a handoff note if downstream work depends on your output.\n\n## Runtime context (auto-filled)\n\n- Repo root: `/Users/aeziz-local/Research/wt-T025`\n- Task path: `.orchestrator/backlog/T025_populate_rollup_registry.md`\n- Task id: `T025`\n- Workstream: `W3`\n- Task kind: `registry`\n- Network enabled: `true`\n- Repair context: ``\n\n### Allowed paths\n\n- registry/rollup_registry_v1.csv\n- registry/CHANGELOG.md\n\n### Disallowed paths\n\n- docs/protocol.md\n- contracts/\n- src/\n- data/\n\n### Declared outputs\n\n- registry/rollup_registry_v1.csv\n- registry/CHANGELOG.md\n\n### Gates\n\n- make gate\n\n### Stop conditions\n\n- Need to reinterpret rollup inclusion criteria\n- Evidence is unavailable or contradictory\n"
+    ],
+    "executor_log_path": "data/tmp/swarm_logs/T025_20260331T230838Z_executor.log",
+    "gates": [
+      "make gate"
+    ]
+  },
+  "executor": {
+    "allow_network": true,
+    "error": null,
+    "model": null,
+    "repair_context": null,
+    "returncode": 0,
+    "role": "Worker",
+    "runner": "local_swarm",
+    "sandbox": "workspace-write",
+    "tool": "codex"
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "output_tail": "python scripts/quality_gates.py\n[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 0, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 0, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 5, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 5, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n",
+      "returncode": 0
+    }
+  ],
+  "generated_at_utc": "2026-03-31T23:19:27Z",
+  "ownership": {
+    "changed_paths": [
+      ".orchestrator/backlog/T025_populate_rollup_registry.md",
+      ".orchestrator/handoff/H025_rollup_registry_scope.md",
+      "registry/CHANGELOG.md",
+      "registry/rollup_registry_v1.csv"
+    ],
+    "ok": true,
+    "violations": []
+  },
+  "repo": {
+    "base_branch": "main",
+    "branch": "T025_populate_rollup_registry",
+    "git_sha": "6a350b19c9bb0aa2dd772bfbb61133e22e21e332",
+    "remote": "origin"
+  },
+  "result": {
+    "blocked_reasons": [],
+    "status": "ok"
+  },
+  "run_id": "T025_20260331T230838Z",
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "task": {
+    "dependencies": [
+      "T020"
+    ],
+    "integration_ready_dependencies": [],
+    "role": "Worker",
+    "state_after": "ready_for_review",
+    "state_before": "backlog",
+    "task_id": "T025",
+    "task_kind": "registry",
+    "task_path": ".orchestrator/backlog/T025_populate_rollup_registry.md",
+    "title": "Populate the evidence-backed rollup registry for the v1 release universe",
+    "workstream": "W3"
+  }
+}

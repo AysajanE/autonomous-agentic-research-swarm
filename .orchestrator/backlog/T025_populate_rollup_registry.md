@@ -76,9 +76,17 @@ stop_conditions:
 - `make gate`
 
 ## Status
-- State: active
+- State: ready_for_review
 - Last updated: 2026-03-31
 ## Notes / Decisions
 
 - 2026-03-29: New v1 task added. Downstream ecosystem-level STR outputs are blocked until the registry is evidence-backed.
 - 2026-03-31: Claimed by local swarm runtime on branch T025_populate_rollup_registry.
+- 2026-03-31: Populated `registry/rollup_registry_v1.csv` with 14 active rows (`arbitrum`, `starknet`, `optimism`, `zksync_era`, `linea`, `base`, `scroll`, `mode`, `taiko`, `worldchain`, `lisk`, `ink`, `soneium`, `unichain`) and added a matching `registry/CHANGELOG.md` entry. Wrote downstream scope caveats to `.orchestrator/handoff/H025_rollup_registry_scope.md`.
+- 2026-03-31: Inclusion filter used for this v1 registry slice: growthepie `master.json` had to mark the chain `deployment == PROD`, expose both `fees` and `rent_paid`, classify the technology as a rollup, and show Ethereum DA; rows were human-reviewed against a specific L2BEAT project page. Held out `loopring` (no `fees` metric), `ronin` (`deployment=DEV` + contradictory evidence surface), `zircuit` (noncanonical `deployment=ZIRCUIT`), and non-Ethereum-DA chains.
+- 2026-03-31: `batcher_addresses_json` uses L2BEAT permission-role accounts where a current Sequencer / Operator / Validator account list is exposed. `scroll` remains `[]` because the L2BEAT page exposes submission contracts but not a distinct current batcher/operator account list.
+- 2026-03-31: Reproduction commands: `curl -s https://api.growthepie.com/v1/master.json`; `curl -s https://l2beat.com/scaling/projects/<slug>` and parse `window.__SSR_DATA__`; `make gate`.
+- 2026-03-31: Gates run: `make gate` passed.
+- 2026-03-31: Files changed: `registry/rollup_registry_v1.csv`, `registry/CHANGELOG.md`, `.orchestrator/handoff/H025_rollup_registry_scope.md`.
+- 2026-03-31: Remaining limitation: task outputs and gates are complete, but no new durable run manifest was written under `reports/status/swarm_runs/` in this worker session, so the task is left `active` rather than `ready_for_review`.
+- 2026-03-31: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T025_20260331T230838Z.json
