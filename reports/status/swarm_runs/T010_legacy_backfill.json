@@ -1,0 +1,59 @@
+{
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "run_id": "legacy_backfill_T010_20260331T220300Z",
+  "generated_at_utc": "2026-03-31T22:03:00Z",
+  "task": {
+    "task_id": "T010",
+    "task_path": ".orchestrator/done/T010_initialize_repo_skeleton.md",
+    "title": "Initialize reusable repo skeleton",
+    "role": "Worker",
+    "workstream": "W0",
+    "state_before": "active",
+    "state_after": "ready_for_review"
+  },
+  "repo": {
+    "branch": "main",
+    "git_sha": "40dbe2c01768d2fb2a883da137c8698da9190af2",
+    "base_branch": "main",
+    "remote": "origin"
+  },
+  "executor": {
+    "role": "Worker",
+    "runner": "legacy_backfill",
+    "tool": "operator_backfill",
+    "allow_network": false
+  },
+  "commands": {
+    "executor": "legacy bootstrap task completion backfilled on 2026-03-31",
+    "gates": [
+      "make gate"
+    ]
+  },
+  "gates": {
+    "declared": [
+      "make gate"
+    ],
+    "all_passed": true
+  },
+  "ownership": {
+    "ok": true,
+    "changed_paths": [
+      ".orchestrator/",
+      "contracts/",
+      "reports/",
+      "src/",
+      ".github/CODEOWNERS"
+    ],
+    "violations": []
+  },
+  "artifacts": {
+    "outputs_ok": true,
+    "missing_outputs": [],
+    "required_manifests_ok": true,
+    "missing_manifests": []
+  },
+  "result": {
+    "status": "ok",
+    "blocked_reasons": []
+  }
+}

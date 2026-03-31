@@ -1,0 +1,27 @@
+{
+  "schema_version": "research_swarm.judge_review_log.v1",
+  "review_id": "legacy_review_T020_20260331T221000Z",
+  "generated_at_utc": "2026-03-31T22:10:00Z",
+  "reviewer": {
+    "role": "Judge"
+  },
+  "task": {
+    "task_id": "T020",
+    "task_path": ".orchestrator/done/T020_define_panel_schema_and_data_dictionary.md",
+    "role": "Worker",
+    "state_before": "ready_for_review",
+    "state_after": "done",
+    "run_manifest_path": "reports/status/swarm_runs/T020_legacy_backfill.json"
+  },
+  "checks": {
+    "gates_ok": true,
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "review_bundle_ok": true,
+    "failures": []
+  },
+  "decision": {
+    "outcome": "approve",
+    "note": "Legacy bootstrap task completion backfilled into the v1 durable review-bundle contract."
+  }
+}

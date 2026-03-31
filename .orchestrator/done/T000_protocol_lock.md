@@ -59,6 +59,12 @@ Primary reference docs:
 - [ ] Downstream tasks can reference the protocol without re-interpreting definitions
 - [ ] `make gate` passes
 
+## Review Bundle Requirements
+
+- [x] A durable run manifest exists under `reports/status/swarm_runs/`
+- [x] Judge review is recorded under `reports/status/reviews/`
+- [x] Legacy bootstrap completion evidence is backfilled to the v1 review-bundle contract
+
 ## Validation / Commands
 
 - `make gate`
@@ -66,9 +72,10 @@ Primary reference docs:
 ## Status
 
 - State: done
-- Last updated: 2026-01-21
+- Last updated: 2026-03-31
 
 ## Notes / Decisions
 
 - 2026-01-21: Task created (bootstrap).
 - 2026-01-21: Filled `docs/protocol.md` with STR definition, inclusion criteria, source priority, regime dates, and validation tolerances.
+- 2026-03-31: Backfilled review-bundle headings plus durable run/review artifacts so the task satisfies the v1 control-plane gate contract.

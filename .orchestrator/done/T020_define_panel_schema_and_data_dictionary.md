@@ -68,9 +68,19 @@ This task defines the canonical fields/units and documents them in the project d
 - [ ] `contracts/decisions.md` records the schema decision with rationale
 - [ ] `make gate` passes
 
+## Review Bundle Requirements
+
+- [x] A durable run manifest exists under `reports/status/swarm_runs/`
+- [x] Judge review is recorded under `reports/status/reviews/`
+- [x] Legacy bootstrap completion evidence is backfilled to the v1 review-bundle contract
+
+## Validation / Commands
+
+- `make gate`
+
 ## Status
 - State: done
-- Last updated: 2026-01-29
+- Last updated: 2026-03-31
 ## Notes / Decisions
 
 - 2026-01-22: Task created (Planner) to lock minimal schema before ETL/metrics work starts.
@@ -80,3 +90,4 @@ This task defines the canonical fields/units and documents them in the project d
 
 
 - 2026-01-29: Judge: gates ok; ownership ok. Review log: /home/vscode/swarm-worktrees/wt-T020/data/tmp/swarm_logs/T020_20260129T005757Z_judge_review.txt
+- 2026-03-31: Backfilled review-bundle headings plus durable run/review artifacts so the task satisfies the v1 control-plane gate contract.

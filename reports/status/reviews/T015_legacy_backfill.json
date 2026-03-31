@@ -1,0 +1,27 @@
+{
+  "schema_version": "research_swarm.judge_review_log.v1",
+  "review_id": "legacy_review_T015_20260331T220900Z",
+  "generated_at_utc": "2026-03-31T22:09:00Z",
+  "reviewer": {
+    "role": "Judge"
+  },
+  "task": {
+    "task_id": "T015",
+    "task_path": ".orchestrator/done/T015_expand_quality_gates.md",
+    "role": "Worker",
+    "state_before": "ready_for_review",
+    "state_after": "done",
+    "run_manifest_path": "reports/status/swarm_runs/T015_legacy_backfill.json"
+  },
+  "checks": {
+    "gates_ok": true,
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "review_bundle_ok": true,
+    "failures": []
+  },
+  "decision": {
+    "outcome": "approve",
+    "note": "Legacy bootstrap task completion backfilled into the v1 durable review-bundle contract."
+  }
+}

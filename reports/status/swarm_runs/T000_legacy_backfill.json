@@ -1,0 +1,55 @@
+{
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "run_id": "legacy_backfill_T000_20260331T220100Z",
+  "generated_at_utc": "2026-03-31T22:01:00Z",
+  "task": {
+    "task_id": "T000",
+    "task_path": ".orchestrator/done/T000_protocol_lock.md",
+    "title": "Protocol lock (definitions first)",
+    "role": "Worker",
+    "workstream": "W0",
+    "state_before": "active",
+    "state_after": "ready_for_review"
+  },
+  "repo": {
+    "branch": "main",
+    "git_sha": "40dbe2c01768d2fb2a883da137c8698da9190af2",
+    "base_branch": "main",
+    "remote": "origin"
+  },
+  "executor": {
+    "role": "Worker",
+    "runner": "legacy_backfill",
+    "tool": "operator_backfill",
+    "allow_network": false
+  },
+  "commands": {
+    "executor": "legacy bootstrap task completion backfilled on 2026-03-31",
+    "gates": [
+      "make gate"
+    ]
+  },
+  "gates": {
+    "declared": [
+      "make gate"
+    ],
+    "all_passed": true
+  },
+  "ownership": {
+    "ok": true,
+    "changed_paths": [
+      "docs/protocol.md"
+    ],
+    "violations": []
+  },
+  "artifacts": {
+    "outputs_ok": true,
+    "missing_outputs": [],
+    "required_manifests_ok": true,
+    "missing_manifests": []
+  },
+  "result": {
+    "status": "ok",
+    "blocked_reasons": []
+  }
+}

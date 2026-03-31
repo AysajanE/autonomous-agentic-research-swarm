@@ -54,6 +54,12 @@ Parallel work only scales when ownership boundaries are explicit. Define workstr
 - [ ] Ownership boundaries are strict enough to prevent clashes
 - [ ] `make gate` passes
 
+## Review Bundle Requirements
+
+- [x] A durable run manifest exists under `reports/status/swarm_runs/`
+- [x] Judge review is recorded under `reports/status/reviews/`
+- [x] Legacy bootstrap completion evidence is backfilled to the v1 review-bundle contract
+
 ## Validation / Commands
 
 - `make gate`
@@ -61,9 +67,10 @@ Parallel work only scales when ownership boundaries are explicit. Define workstr
 ## Status
 
 - State: done
-- Last updated: 2026-01-21
+- Last updated: 2026-03-31
 
 ## Notes / Decisions
 
 - 2026-01-21: Task created (bootstrap).
 - 2026-01-21: Populated `.orchestrator/workstreams.md` with initial workstreams and ownership boundaries.
+- 2026-03-31: Backfilled review-bundle headings plus durable run/review artifacts so the task satisfies the v1 control-plane gate contract.
