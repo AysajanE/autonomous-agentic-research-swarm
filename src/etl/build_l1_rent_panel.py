@@ -41,7 +41,7 @@ BLOBSCAN_HEADERS = {
     "User-Agent": "Mozilla/5.0",
 }
 
-BLOCKSCOUT_TX_PAGE_SIZE = 250
+BLOCKSCOUT_TX_PAGE_SIZE = 1000
 BLOBSCAN_TX_PAGE_SIZE = 500
 RPC_BATCH_SIZE = 100
 
@@ -233,12 +233,25 @@ def parse_blockscout_tx_record(row: dict[str, Any], *, rollup_id: str, address: 
     return parsed
 
 
-def load_existing_blockscout_page(path: Path, *, rollup_id: str, address: str) -> list[BlockscoutTx]:
+def load_existing_blockscout_page(path: Path, *, rollup_id: str, address: str) -> tuple[list[BlockscoutTx], int]:
     payload = read_json(path)
     rows = payload.get("transactions")
     if not isinstance(rows, list):
         raise SystemExit(f"stored Blockscout page is malformed: {path}")
-    return [parse_blockscout_tx_record(row, rollup_id=rollup_id, address=address) for row in rows if isinstance(row, dict)]
+    stored_page_size = payload.get("page_size")
+    if stored_page_size is None:
+        stored_page_size = len(rows)
+    else:
+        try:
+            stored_page_size = int(stored_page_size)
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(f"stored Blockscout page has malformed page_size: {path}") from exc
+    if stored_page_size <= 0:
+        raise SystemExit(f"stored Blockscout page has non-positive page_size: {path}")
+    return (
+        [parse_blockscout_tx_record(row, rollup_id=rollup_id, address=address) for row in rows if isinstance(row, dict)],
+        stored_page_size,
+    )
 
 
 def parse_blobscan_tx_record(row: dict[str, Any], *, rollup_id: str) -> BlobscanTx:
@@ -514,6 +527,7 @@ def fetch_blockscout_tx_window(
     max_pages = max(1, 10000 // page_size)
     page = 1
     all_rows: list[BlockscoutTx] = []
+    cached_page_size: int | None = None
     window_span_seconds = int((window_end_exclusive_dt - window_start_dt).total_seconds())
 
     while True:
@@ -526,7 +540,8 @@ def fetch_blockscout_tx_window(
             / f"{window_id}_page-{page:04d}.json"
         )
         if page_path.exists():
-            compact_rows = load_existing_blockscout_page(page_path, rollup_id=rollup_id, address=address)
+            compact_rows, stored_page_size = load_existing_blockscout_page(page_path, rollup_id=rollup_id, address=address)
+            cached_page_size = stored_page_size
             request_log.append(
                 {
                     "source": "blockscout_txlist",
@@ -542,10 +557,49 @@ def fetch_blockscout_tx_window(
                 }
             )
             all_rows.extend(compact_rows)
-            if len(compact_rows) < page_size:
+            if len(compact_rows) < stored_page_size:
                 break
             page += 1
             continue
+
+        if page > 1 and cached_page_size is not None and cached_page_size != page_size:
+            if not all_rows:
+                raise SystemExit(
+                    f"cannot resume cached Blockscout window with a different page size before any rows were loaded "
+                    f"for {rollup_id}/{address}"
+                )
+            continuation_start_dt = all_rows[-1].timestamp_utc
+            logging.info(
+                "Resuming Blockscout tx window for %s/%s from %s with page size %s after cached page size %s "
+                "within %s..%s",
+                rollup_id,
+                address,
+                continuation_start_dt.isoformat(),
+                page_size,
+                cached_page_size,
+                window_start_dt.isoformat(),
+                window_end_exclusive_dt.isoformat(),
+            )
+            continuation_rows = fetch_blockscout_tx_window(
+                snapshot_dir=snapshot_dir,
+                rollup_id=rollup_id,
+                address=address,
+                start_day=continuation_start_dt.date(),
+                end_day_exclusive=window_end_exclusive_dt.date(),
+                page_size=page_size,
+                retries=retries,
+                timeout_seconds=timeout_seconds,
+                request_log=request_log,
+                start_timestamp_utc=continuation_start_dt,
+                end_timestamp_exclusive_utc=window_end_exclusive_dt,
+            )
+            seen_hashes = {row.hash for row in all_rows}
+            for row in continuation_rows:
+                if row.hash in seen_hashes:
+                    continue
+                seen_hashes.add(row.hash)
+                all_rows.append(row)
+            return all_rows
 
         if page > max_pages:
             if not all_rows:
@@ -1139,6 +1193,44 @@ def load_vendor_panel(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def validate_registry_attribution_inputs(
+    *,
+    rollups: list[RegistryRollup],
+    vendor_rows: list[dict[str, str]],
+    observed_end: date,
+) -> None:
+    vendor_pre_dencun_counts: dict[str, int] = {}
+    for row in vendor_rows:
+        rollup_id = normalize_slug(row.get("rollup_id", ""))
+        if not rollup_id:
+            continue
+        if row.get("date_utc", "") >= DENCUN_DATE.isoformat():
+            continue
+        vendor_pre_dencun_counts[rollup_id] = vendor_pre_dencun_counts.get(rollup_id, 0) + 1
+
+    missing_pre_dencun: list[str] = []
+    for rollup in rollups:
+        active_start = max(PROTOCOL_START, rollup.start_date_utc)
+        active_end = observed_end if rollup.end_date_utc is None else min(observed_end, rollup.end_date_utc)
+        pre_dencun_end = min(active_end, DENCUN_DATE - timedelta(days=1))
+        if pre_dencun_end < active_start:
+            continue
+        if rollup.batcher_addresses:
+            continue
+
+        coverage_days = vendor_pre_dencun_counts.get(rollup.rollup_id, 0)
+        coverage_suffix = f", growthepie_pre_dencun_rows={coverage_days}" if coverage_days else ""
+        missing_pre_dencun.append(
+            f"{rollup.rollup_id}[active_pre_dencun={active_start.isoformat()}..{pre_dencun_end.isoformat()}{coverage_suffix}]"
+        )
+
+    if missing_pre_dencun:
+        raise SystemExit(
+            "required registry attribution inputs are missing for pre-Dencun rollups: "
+            + "; ".join(missing_pre_dencun)
+        )
+
+
 def write_csv(path: Path, rows: list[dict[str, str]], *, headers: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -1232,11 +1324,6 @@ def main(argv: list[str]) -> int:
     )
     panel_manifest_path = root / "data" / "processed_manifest" / f"daily_rollup_panel_{run_date.isoformat()}.json"
 
-    prepare_snapshot_dir(snapshot_dir, raw_manifest_path=raw_manifest_path)
-    ensure_new_manifest(raw_manifest_path, label="raw manifest")
-    ensure_new_manifest(decomp_manifest_path, label="processed decomposition manifest")
-    ensure_new_manifest(panel_manifest_path, label="processed panel manifest")
-
     registry_path = root / "registry" / "rollup_registry_v1.csv"
     growthepie_raw_manifest_path = root / "data" / "raw_manifest" / f"growthepie_{run_date.isoformat()}.json"
     if not growthepie_raw_manifest_path.exists():
@@ -1245,6 +1332,12 @@ def main(argv: list[str]) -> int:
 
     rollups = load_registry(registry_path)
     vendor_rows = load_vendor_panel(vendor_panel_path)
+    validate_registry_attribution_inputs(rollups=rollups, vendor_rows=vendor_rows, observed_end=observed_end)
+
+    prepare_snapshot_dir(snapshot_dir, raw_manifest_path=raw_manifest_path)
+    ensure_new_manifest(raw_manifest_path, label="raw manifest")
+    ensure_new_manifest(decomp_manifest_path, label="processed decomposition manifest")
+    ensure_new_manifest(panel_manifest_path, label="processed panel manifest")
 
     request_log: list[dict[str, Any]] = []
     pre_dencun_txs: dict[str, BlockscoutTx] = {}
