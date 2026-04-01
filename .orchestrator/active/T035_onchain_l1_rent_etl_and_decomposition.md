@@ -110,9 +110,10 @@ This task creates the authoritative rent path for release. It turns raw on-chain
 
 ## Status
 
-- State: backlog
-- Last updated: 2026-03-29
+- State: active
+- Last updated: 2026-04-01
 
 ## Notes / Decisions
 
 - 2026-03-29: New v1 task added to make the on-chain rent path authoritative before metrics, validation, or release analysis.
+- 2026-04-01: Operator activated isolated worktree `/Users/aeziz-local/Research/wt-T035` on branch `T035_l1_rent_panel` to execute the authoritative on-chain rent path end to end and supervise it through Judge review.
