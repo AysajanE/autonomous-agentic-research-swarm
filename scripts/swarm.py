@@ -34,6 +34,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import shlex
 import subprocess
 import sys
@@ -178,12 +179,45 @@ def _run(
         "check": check,
         "text": True,
         "env": env,
-        "timeout": timeout_seconds,
     }
     if capture:
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.STDOUT
-    return subprocess.run(cmd, **kwargs)
+    if timeout_seconds is None:
+        return subprocess.run(cmd, timeout=None, **kwargs)
+
+    popen_kwargs = dict(kwargs)
+    popen_kwargs.pop("check", None)
+    popen_kwargs["start_new_session"] = True
+    with subprocess.Popen(cmd, **popen_kwargs) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = proc.communicate()
+            exc.stdout = stdout
+            exc.stderr = stderr
+            raise
+
+    completed = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    if check and completed.returncode != 0:
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            cmd,
+            output=completed.stdout,
+            stderr=completed.stderr,
+        )
+    return completed
 
 
 def _which_or_none(name: str) -> str | None:
@@ -1072,12 +1106,33 @@ def _collect_changed_paths_with_sources(*, repo: Path, base_ref: str | None) -> 
     return path_sources, ops
 
 
-def _path_is_allowed(*, path: str, allowed_paths: list[str], disallowed_paths: list[str], task_file_path: str) -> tuple[bool, str | None]:
+def _task_projection_paths(task_file_path: str) -> set[str]:
+    filename = Path(task_file_path).name
+    return {
+        f".orchestrator/{state}/{filename}"
+        for state in ("backlog", "active", "integration_ready", "ready_for_review", "blocked", "done")
+    }
+
+
+def _path_is_allowed(
+    *,
+    path: str,
+    allowed_paths: list[str],
+    disallowed_paths: list[str],
+    task_file_path: str,
+    task_id: str,
+) -> tuple[bool, str | None]:
     norm = _normalize_repo_relative_path(path)
 
     if norm == task_file_path:
         return True, None
+    if norm in _task_projection_paths(task_file_path):
+        return True, None
     if norm.startswith(".orchestrator/handoff/"):
+        return True, None
+    if norm.startswith("reports/status/swarm_runs/") and Path(norm).name.startswith(f"{task_id}_"):
+        return True, None
+    if norm.startswith("reports/status/reviews/") and Path(norm).name.startswith(f"{task_id}_"):
         return True, None
     if norm.startswith(".orchestrator/"):
         return False, "orchestrator_write_forbidden"
@@ -1740,6 +1795,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
                 allowed_paths=task.allowed_paths,
                 disallowed_paths=task.disallowed_paths,
                 task_file_path=task_file_rel,
+                task_id=task.task_id,
             )
             if ok:
                 continue
