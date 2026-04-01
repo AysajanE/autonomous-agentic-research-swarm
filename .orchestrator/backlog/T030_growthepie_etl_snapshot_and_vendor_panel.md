@@ -96,7 +96,7 @@ growthepie is the primary denominator source for `l2_fees_eth` and the secondary
 - `python scripts/make_raw_manifest.py growthepie data/raw/growthepie/YYYY-MM-DD --as-of YYYY-MM-DD -- python src/etl/growthepie_fetch.py --run-date YYYY-MM-DD`
 
 ## Status
-- State: ready_for_review
+- State: done
 - Last updated: 2026-04-01
 ## Notes / Decisions
 
@@ -113,3 +113,4 @@ growthepie is the primary denominator source for `l2_fees_eth` and the secondary
 - 2026-04-01: Gate summary: `make gate` passed, including `raw_manifest_validity`, `processed_manifest_validity`, and `review_bundle_integrity`.
 - 2026-04-01: Task remains `active` because this non-swarm execution cannot write the required Operator-owned durable run manifest under `reports/status/swarm_runs/`; exact commands and artifact details were handed off for Operator recording before review.
 - 2026-04-01: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T030_20260401T115602Z.json
+- 2026-04-01: Judge approved; review log: reports/status/reviews/T030_20260401T121619Z.json
