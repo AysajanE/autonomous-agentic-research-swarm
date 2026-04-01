@@ -119,6 +119,182 @@ class ProcessedManifestGateTest(unittest.TestCase):
             self.assertTrue(manifest_result.ok, manifest_result.details)
             self.assertTrue(bundle_result.ok, bundle_result.details)
 
+    def test_manifest_backed_etl_review_bundle_allows_missing_local_raw_and_processed_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_runtime_repo(root)
+
+            code_path = "src/etl/growthepie_fetch.py"
+            raw_output_spec = "data/raw/growthepie/YYYY-MM-DD/..."
+            raw_manifest_spec = "data/raw_manifest/growthepie_YYYY-MM-DD.json"
+            raw_manifest_path = "data/raw_manifest/growthepie_2026-03-31.json"
+            processed_output_path = "data/processed/growthepie/vendor_daily_rollup_panel.csv"
+            processed_manifest_spec = "data/processed_manifest/vendor_daily_rollup_panel_YYYY-MM-DD.json"
+            processed_manifest_path = "data/processed_manifest/vendor_daily_rollup_panel_2026-03-31.json"
+            sample_path = "data/samples/growthepie/vendor_daily_rollup_panel_sample.csv"
+
+            write_text(root, code_path, "print('growthepie')\n")
+            write_text(root, sample_path, "date_utc,rollup_id,l2_fees_eth,rent_paid_eth\n")
+            write_json(
+                root,
+                raw_manifest_path,
+                {
+                    "as_of_utc_date": "2026-03-31",
+                    "command": "python src/etl/growthepie_fetch.py --run-date 2026-03-31",
+                    "files": [
+                        {
+                            "path": "data/raw/growthepie/2026-03-31/master.json",
+                            "sha256": "a" * 64,
+                            "bytes": 128,
+                        }
+                    ],
+                },
+            )
+            write_json(
+                root,
+                processed_manifest_path,
+                {
+                    "as_of_utc_date": "2026-03-31",
+                    "inputs": [raw_manifest_path],
+                    "transform": {
+                        "script_path": code_path,
+                        "git_sha": "0" * 40,
+                        "command": "python src/etl/growthepie_fetch.py --run-date 2026-03-31",
+                    },
+                    "outputs": [
+                        {
+                            "path": processed_output_path,
+                            "sha256": "b" * 64,
+                            "bytes": 1024,
+                        },
+                        {
+                            "path": sample_path,
+                            "sha256": "c" * 64,
+                            "bytes": 64,
+                        },
+                    ],
+                },
+            )
+
+            task_path = write_task(
+                root,
+                "ready_for_review",
+                "T302",
+                workstream="W1",
+                task_kind="etl",
+                role="Worker",
+                allowed_paths=[
+                    "src/etl/",
+                    "data/raw/",
+                    "data/raw_manifest/",
+                    "data/processed/",
+                    "data/processed_manifest/",
+                    "data/samples/",
+                ],
+                disallowed_paths=["contracts/"],
+                outputs=[
+                    code_path,
+                    raw_output_spec,
+                    raw_manifest_spec,
+                    processed_output_path,
+                    processed_manifest_spec,
+                    sample_path,
+                ],
+                state="ready_for_review",
+                slug="growthepie",
+            )
+            write_run_manifest(
+                root,
+                "T302",
+                task_path=task_path.relative_to(root).as_posix(),
+                task_role="Worker",
+                workstream="W1",
+                state_after="ready_for_review",
+            )
+
+            with chdir(root):
+                bundle_result = quality_gates.gate_review_bundle_integrity()
+
+            self.assertTrue(bundle_result.ok, bundle_result.details)
+
+    def test_manifest_backed_etl_review_bundle_still_requires_tracked_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_runtime_repo(root)
+
+            code_path = "src/etl/growthepie_fetch.py"
+            raw_manifest_spec = "data/raw_manifest/growthepie_YYYY-MM-DD.json"
+            raw_manifest_path = "data/raw_manifest/growthepie_2026-03-31.json"
+            processed_output_path = "data/processed/growthepie/vendor_daily_rollup_panel.csv"
+            processed_manifest_spec = "data/processed_manifest/vendor_daily_rollup_panel_YYYY-MM-DD.json"
+            processed_manifest_path = "data/processed_manifest/vendor_daily_rollup_panel_2026-03-31.json"
+            sample_path = "data/samples/growthepie/vendor_daily_rollup_panel_sample.csv"
+
+            write_text(root, code_path, "print('growthepie')\n")
+            write_json(root, raw_manifest_path, {"as_of_utc_date": "2026-03-31", "files": []})
+            write_json(
+                root,
+                processed_manifest_path,
+                {
+                    "as_of_utc_date": "2026-03-31",
+                    "inputs": [raw_manifest_path],
+                    "transform": {
+                        "script_path": code_path,
+                        "git_sha": "0" * 40,
+                        "command": "python src/etl/growthepie_fetch.py --run-date 2026-03-31",
+                    },
+                    "outputs": [
+                        {
+                            "path": processed_output_path,
+                            "sha256": "b" * 64,
+                            "bytes": 1024,
+                        }
+                    ],
+                },
+            )
+
+            task_path = write_task(
+                root,
+                "ready_for_review",
+                "T303",
+                workstream="W1",
+                task_kind="etl",
+                role="Worker",
+                allowed_paths=[
+                    "src/etl/",
+                    "data/raw_manifest/",
+                    "data/processed/",
+                    "data/processed_manifest/",
+                    "data/samples/",
+                ],
+                disallowed_paths=["contracts/"],
+                outputs=[
+                    code_path,
+                    "data/raw/growthepie/YYYY-MM-DD/...",
+                    raw_manifest_spec,
+                    processed_output_path,
+                    processed_manifest_spec,
+                    sample_path,
+                ],
+                state="ready_for_review",
+                slug="growthepie-sample",
+            )
+            write_run_manifest(
+                root,
+                "T303",
+                task_path=task_path.relative_to(root).as_posix(),
+                task_role="Worker",
+                workstream="W1",
+                state_after="ready_for_review",
+            )
+
+            with chdir(root):
+                bundle_result = quality_gates.gate_review_bundle_integrity()
+
+            self.assertFalse(bundle_result.ok)
+            failures = bundle_result.details.get("failures") or []
+            self.assertTrue(any(sample_path in failure for failure in failures))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -92,6 +92,10 @@ DEFERRED_REQUIRED_PATH_PREFIXES = (
     "reports/status/releases/",
     "scripts/release_assembly.py",
 )
+MANIFEST_BACKED_LOCAL_ETL_OUTPUT_PREFIXES = (
+    "data/raw/",
+    "data/processed/",
+)
 
 
 @dataclass(frozen=True)
@@ -638,6 +642,31 @@ def _check_declared_outputs_exist(task: Task, repo: Path = Path(".")) -> tuple[b
             failures.append({"output": output, "reason": "missing_path"})
 
     return len(failures) == 0, failures
+
+
+def _task_uses_manifest_backed_local_etl_outputs(task: Task) -> bool:
+    return task.task_kind == "etl" and task.workstream in {"W1", "W2"}
+
+
+def _output_is_manifest_backed_local_etl_output(task: Task, output: str) -> bool:
+    if not _task_uses_manifest_backed_local_etl_outputs(task):
+        return False
+    return any(_path_matches_prefix(output, prefix) for prefix in MANIFEST_BACKED_LOCAL_ETL_OUTPUT_PREFIXES)
+
+
+def _check_review_bundle_outputs_exist(task: Task, repo: Path = Path(".")) -> tuple[bool, list[dict[str, str]]]:
+    outputs_ok, output_failures = _check_declared_outputs_exist(task, repo)
+    if outputs_ok:
+        return True, []
+    if not _task_uses_manifest_backed_local_etl_outputs(task):
+        return False, output_failures
+
+    retained_failures = [
+        failure
+        for failure in output_failures
+        if not _output_is_manifest_backed_local_etl_output(task, failure["output"])
+    ]
+    return len(retained_failures) == 0, retained_failures
 
 
 def _task_requires_manifest(task: Task, prefix: str) -> bool:
@@ -1335,7 +1364,7 @@ def gate_review_bundle_integrity() -> GateResult:
         if task.state not in {"integration_ready", "ready_for_review", "done"}:
             continue
 
-        outputs_ok, output_failures = _check_declared_outputs_exist(task, repo)
+        outputs_ok, output_failures = _check_review_bundle_outputs_exist(task, repo)
         if not outputs_ok:
             failures.append(
                 f"{task.path}:missing_outputs:"

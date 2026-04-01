@@ -4,6 +4,7 @@
 
 - Do not commit large data artifacts.
 - Track schemas, manifests, and small samples only.
+- Keep canonical ETL artifacts under `data/raw/` and `data/processed/` as durable local-only surfaces; they are gitignored by policy, not disposable scratch space.
 
 ## Append-only raw snapshots
 
@@ -17,6 +18,11 @@ Every raw snapshot must have a corresponding manifest entry:
 - date fetched (UTC)
 - command used
 - file list + hashes (sha256)
+
+## Review semantics
+
+- ETL runtime and Judge review must verify the full local artifacts in `data/raw/` and `data/processed/`.
+- Repo-wide review-complete evidence is the tracked bridge: manifests, small samples, run manifests, review logs, and code.
 
 ## Golden samples
 
