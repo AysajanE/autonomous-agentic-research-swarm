@@ -76,8 +76,8 @@ stop_conditions:
 - `make gate`
 
 ## Status
-- State: ready_for_review
-- Last updated: 2026-03-31
+- State: done
+- Last updated: 2026-04-01
 ## Notes / Decisions
 
 - 2026-03-29: New v1 task added. Downstream ecosystem-level STR outputs are blocked until the registry is evidence-backed.
@@ -90,3 +90,4 @@ stop_conditions:
 - 2026-03-31: Files changed: `registry/rollup_registry_v1.csv`, `registry/CHANGELOG.md`, `.orchestrator/handoff/H025_rollup_registry_scope.md`.
 - 2026-03-31: Remaining limitation: task outputs and gates are complete, but no new durable run manifest was written under `reports/status/swarm_runs/` in this worker session, so the task is left `active` rather than `ready_for_review`.
 - 2026-03-31: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T025_20260331T230838Z.json
+- 2026-04-01: Judge approved; review log: reports/status/reviews/T025_20260401T113303Z.json
