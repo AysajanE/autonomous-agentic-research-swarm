@@ -1,0 +1,86 @@
+{
+  "artifacts": {
+    "missing_manifests": [],
+    "missing_outputs": [],
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "run_manifest_path": "reports/status/swarm_runs/T030_20260401T115602Z.json"
+  },
+  "commands": {
+    "executor": [
+      "/Users/aeziz-local/.nvm/versions/node/v20.19.0/bin/codex",
+      "-a",
+      "never",
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "-C",
+      "/Users/aeziz-local/Research/wt-T030",
+      "# Prompt Template \u2014 Worker\n\nRole: **Worker**\n\nYou execute exactly one assigned task in an isolated branch/worktree.\n\n## Instructions\n\n1. Read and follow `AGENTS.md` and any nested `AGENTS.md` under your working directory.\n2. Open the assigned task file and obey its `allowed_paths`, `disallowed_paths`, declared outputs, gates, and stop conditions.\n3. Do not coordinate with other agents through chat. Use:\n   - the task file `## Notes / Decisions`\n   - a handoff note under `.orchestrator/handoff/` when downstream tasks need durable guidance\n4. Update only the task file sections:\n   - `## Status`\n   - `## Notes / Decisions`\n   Do not move task files between lifecycle folders.\n5. You may set `State: integration_ready` or `State: ready_for_review` when the task contract permits it. You may never set `State: done`.\n6. Do not edit `reports/catalog.yaml`, `reports/paper/build/`, or release manifests. Those are Operator-owned surfaces.\n7. If the run is not using the local swarm runtime, hand the exact commands, outputs, and assumptions to Operator so a durable run manifest can be recorded before review.\n\n## Completion checklist\n\n- Run the declared gates and task-specific commands.\n- Ensure declared outputs exist at the declared paths.\n- Record reproduction commands, assumptions, and limitations in the task notes.\n- Write a handoff note if downstream work depends on your output.\n\n## Runtime context (auto-filled)\n\n- Repo root: `/Users/aeziz-local/Research/wt-T030`\n- Task path: `.orchestrator/backlog/T030_growthepie_etl_snapshot_and_vendor_panel.md`\n- Task id: `T030`\n- Workstream: `W1`\n- Task kind: `etl`\n- Network enabled: `true`\n- Repair context: ``\n\n### Allowed paths\n\n- src/etl/growthepie_fetch.py\n- data/raw/growthepie/\n- data/raw_manifest/growthepie_\n- data/processed/growthepie/\n- data/processed_manifest/vendor_daily_rollup_panel_\n- data/samples/growthepie/\n\n### Disallowed paths\n\n- docs/protocol.md\n- contracts/\n- registry/\n- src/analysis/\n- src/validation/\n\n### Declared outputs\n\n- src/etl/growthepie_fetch.py\n- data/raw/growthepie/YYYY-MM-DD/...\n- data/raw_manifest/growthepie_YYYY-MM-DD.json\n- data/processed/growthepie/vendor_daily_rollup_panel.csv\n- data/processed_manifest/vendor_daily_rollup_panel_YYYY-MM-DD.json\n- data/samples/growthepie/vendor_daily_rollup_panel_sample.csv\n\n### Gates\n\n- make gate\n\n### Stop conditions\n\n- Need credentials\n- Source instability or breaking API changes\n- Registry identifiers required for normalization are missing\n"
+    ],
+    "executor_log_path": "data/tmp/swarm_logs/T030_20260401T115602Z_executor.log",
+    "gates": [
+      "make gate"
+    ]
+  },
+  "executor": {
+    "allow_network": true,
+    "error": null,
+    "model": null,
+    "repair_context": null,
+    "returncode": 0,
+    "role": "Worker",
+    "runner": "local_swarm",
+    "sandbox": "workspace-write",
+    "tool": "codex"
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "output_tail": "python scripts/quality_gates.py\n[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 1, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 1, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 6, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 6, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n",
+      "returncode": 0
+    }
+  ],
+  "generated_at_utc": "2026-04-01T12:06:52Z",
+  "ownership": {
+    "changed_paths": [
+      ".orchestrator/backlog/T030_growthepie_etl_snapshot_and_vendor_panel.md",
+      ".orchestrator/handoff/H030_growthepie_vendor_panel.md",
+      "data/processed_manifest/vendor_daily_rollup_panel_2026-04-01.json",
+      "data/raw_manifest/growthepie_2026-04-01.json",
+      "data/samples/growthepie/vendor_daily_rollup_panel_sample.csv",
+      "src/etl/growthepie_fetch.py"
+    ],
+    "ok": true,
+    "violations": []
+  },
+  "repo": {
+    "base_branch": "main",
+    "branch": "T030_growthepie_etl_snapshot_and_vendor_panel",
+    "git_sha": "501cee570318500be79a978f184bbee0ee107f81",
+    "remote": "origin"
+  },
+  "result": {
+    "blocked_reasons": [],
+    "status": "ok"
+  },
+  "run_id": "T030_20260401T115602Z",
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "task": {
+    "dependencies": [
+      "T020",
+      "T025"
+    ],
+    "integration_ready_dependencies": [],
+    "role": "Worker",
+    "state_after": "ready_for_review",
+    "state_before": "backlog",
+    "task_id": "T030",
+    "task_kind": "etl",
+    "task_path": ".orchestrator/backlog/T030_growthepie_etl_snapshot_and_vendor_panel.md",
+    "title": "growthepie ETL: raw snapshots, vendor panel, and deterministic sample",
+    "workstream": "W1"
+  }
+}

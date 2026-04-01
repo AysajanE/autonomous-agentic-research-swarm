@@ -96,9 +96,20 @@ growthepie is the primary denominator source for `l2_fees_eth` and the secondary
 - `python scripts/make_raw_manifest.py growthepie data/raw/growthepie/YYYY-MM-DD --as-of YYYY-MM-DD -- python src/etl/growthepie_fetch.py --run-date YYYY-MM-DD`
 
 ## Status
-- State: active
+- State: ready_for_review
 - Last updated: 2026-04-01
 ## Notes / Decisions
 
 - 2026-03-29: v1 rewrite narrows T030 to the off-chain denominator and vendor-panel slice. Authoritative `rent_paid_eth` is deferred to T035.
 - 2026-04-01: Claimed by local swarm runtime on branch T030_growthepie_etl_snapshot_and_vendor_panel.
+- 2026-04-01: Implemented `src/etl/growthepie_fetch.py` to mirror the live per-chain `metrics/chains/<rollup>/<metric>.json` API, snapshot `master.json` plus 56 chain-metric payloads under `data/raw/growthepie/2026-04-01/`, and enforce registry-backed filtering to the 14 rollups in `registry/rollup_registry_v1.csv`.
+- 2026-04-01: Produced `data/processed/growthepie/vendor_daily_rollup_panel.csv` with 12,322 rows covering `2022-01-01` through `2026-03-31`; panel rows are emitted only when both `fees` and `rent_paid` exist, with optional `profit` and `txcount` filled when present.
+- 2026-04-01: Produced `data/samples/growthepie/vendor_daily_rollup_panel_sample.csv` as a fixed 9-row sample for `arbitrum`, `base`, and `optimism` on `2024-03-13` through `2024-03-15` to keep the tracked sample deterministic across reruns.
+- 2026-04-01: Wrote provenance files `data/raw_manifest/growthepie_2026-04-01.json` and `data/processed_manifest/vendor_daily_rollup_panel_2026-04-01.json`. The raw manifest hashes 58 files in the dated snapshot; the processed manifest records hashes for the panel CSV and sample CSV.
+- 2026-04-01: Reproduction commands run:
+  - `python src/etl/growthepie_fetch.py --run-date 2026-04-01`
+  - `python scripts/make_raw_manifest.py growthepie data/raw/growthepie/2026-04-01 --as-of 2026-04-01 -- python src/etl/growthepie_fetch.py --run-date 2026-04-01`
+  - `make gate`
+- 2026-04-01: Gate summary: `make gate` passed, including `raw_manifest_validity`, `processed_manifest_validity`, and `review_bundle_integrity`.
+- 2026-04-01: Task remains `active` because this non-swarm execution cannot write the required Operator-owned durable run manifest under `reports/status/swarm_runs/`; exact commands and artifact details were handed off for Operator recording before review.
+- 2026-04-01: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T030_20260401T115602Z.json

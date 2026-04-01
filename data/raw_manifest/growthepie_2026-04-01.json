@@ -1,0 +1,303 @@
+{
+  "as_of_utc_date": "2026-04-01",
+  "command": "--as-of 2026-04-01 -- python src/etl/growthepie_fetch.py --run-date 2026-04-01",
+  "environment": {
+    "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+    "python_implementation": "CPython",
+    "python_version": "3.13.5"
+  },
+  "fetched_at_utc": "2026-04-01T12:05:20.610068+00:00",
+  "files": [
+    {
+      "bytes": 21578,
+      "path": "data/raw/growthepie/2026-04-01/fetch_manifest.json",
+      "sha256": "10594086dd0cc4b8baf094ae3781968ace3369a6afbf256ae03310c32c8f2abd"
+    },
+    {
+      "bytes": 162981,
+      "path": "data/raw/growthepie/2026-04-01/master.json",
+      "sha256": "af70a11697c50c7d428be1b414d3bdda7b77402c9156eff1301c2b023832d434"
+    },
+    {
+      "bytes": 235856,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/arbitrum/fees.json",
+      "sha256": "fe9b63538da39c667a03127c6b86ac143a80103d51b0b5944865384e2f2b71e8"
+    },
+    {
+      "bytes": 217152,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/arbitrum/profit.json",
+      "sha256": "414caf708ee608f64b34b58259dd071b88979b33cbeea236647302305aa2ec8d"
+    },
+    {
+      "bytes": 217174,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/arbitrum/rent_paid.json",
+      "sha256": "8992d1db6f5bbac9308b0993ae30188adb9d05c09a9cc7a58a42704d99c7d533"
+    },
+    {
+      "bytes": 129140,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/arbitrum/txcount.json",
+      "sha256": "9422143f4a9e6cad854ee3225c71ff1deba564d0fac099e2f10572fada3b8e3d"
+    },
+    {
+      "bytes": 138974,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/base/fees.json",
+      "sha256": "3d7a797822dbc20a2cc76fad390c4f5e7d0147abc298f8de7ddac056edaba8bb"
+    },
+    {
+      "bytes": 119955,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/base/profit.json",
+      "sha256": "43be9fa6c8642855ee2c29dad4d75c9495d6efb3a6d2fa32cade22cf5f5a3350"
+    },
+    {
+      "bytes": 126468,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/base/rent_paid.json",
+      "sha256": "08d1abba3a717651d3a00c4ccdb1c722dc10a3d1c679465bb43c4580e1828d7c"
+    },
+    {
+      "bytes": 79240,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/base/txcount.json",
+      "sha256": "a54b0f7487cc2e34a277b1a1d9f48db4f88df30c45237e8d39e04a40551c9843"
+    },
+    {
+      "bytes": 80340,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/ink/fees.json",
+      "sha256": "2fbde655292b7191b18216e69b36115d7947cd3a4a18f504c9d3ec08ede48a3c"
+    },
+    {
+      "bytes": 61136,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/ink/profit.json",
+      "sha256": "b34b4acde6c8d8641c7d6955fb4aa59bf1699209d2749750823f1cfc0459c34b"
+    },
+    {
+      "bytes": 61551,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/ink/rent_paid.json",
+      "sha256": "f5ddfa1ac0497df60cdd8b51be59fb2c98de866f87981fbe928a3189b79cca27"
+    },
+    {
+      "bytes": 41802,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/ink/txcount.json",
+      "sha256": "3be65847cfeb5ae8ce227fcf5f8c4fc427f28ba2b5bb37e46dc2694f9cd29e5d"
+    },
+    {
+      "bytes": 142393,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/linea/fees.json",
+      "sha256": "0faa4cfc4dbe603a64f9590cfdc997d74a05541c01fc36ed64e8712b0e720395"
+    },
+    {
+      "bytes": 122346,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/linea/profit.json",
+      "sha256": "6a780249989a8a3eda5b1978b378a60deb5bcbf71cfcbec3ae42c5b32c1d5bb1"
+    },
+    {
+      "bytes": 124625,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/linea/rent_paid.json",
+      "sha256": "f1af5954e8405fc99d6f54f166ec8c66605c236d291a267cb7d89b7a01e2b9d4"
+    },
+    {
+      "bytes": 76041,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/linea/txcount.json",
+      "sha256": "437632c12006349d82afdce57f4686397c3afc14c604158fdc48aa90482ed430"
+    },
+    {
+      "bytes": 109240,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/lisk/fees.json",
+      "sha256": "80d8a6d4e1fd50b784978c1e0fa1958f52a86936289b3c0641ff02eb73a9cde9"
+    },
+    {
+      "bytes": 89978,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/lisk/profit.json",
+      "sha256": "e360530bc15e30e383fbad22bcaea3b2b2d3b86ca29af0897d90f50bf1fbeb7a"
+    },
+    {
+      "bytes": 89541,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/lisk/rent_paid.json",
+      "sha256": "b9a9826ed29c052cd17816e3cf72ada1afcc0b2fcf0df2ee04fdce8e9d0197af"
+    },
+    {
+      "bytes": 54327,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/lisk/txcount.json",
+      "sha256": "e4fad1cf135e81f185f5574ab2f9956dc0d0d7327277b6730cabe53de3dd09f7"
+    },
+    {
+      "bytes": 121266,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/mode/fees.json",
+      "sha256": "4e0ab67b9acd499fa08bcddef3bbad265be107362f8d66e4a549c744fbbee8f7"
+    },
+    {
+      "bytes": 101237,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/mode/profit.json",
+      "sha256": "0e97562e03438de3a1af8a25f4e9e67cc56fee00a3f35a6645f1a3c9873bd0b3"
+    },
+    {
+      "bytes": 110151,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/mode/rent_paid.json",
+      "sha256": "97f89b3bf200c97c8a549ca0cdd54fad5b71857c0350016ec48c362f48686bca"
+    },
+    {
+      "bytes": 62440,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/mode/txcount.json",
+      "sha256": "a7974b316b141841ebfda9e4a30d3bf49049cd3dfb0d4b55691c73789b9e2c53"
+    },
+    {
+      "bytes": 215934,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/optimism/fees.json",
+      "sha256": "a5b2b1f070c59d57f1717cb8266673c99a21e7a7ffc49104dc66ceb9773d1704"
+    },
+    {
+      "bytes": 196802,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/optimism/profit.json",
+      "sha256": "5e000dee1b1958e951bb437fb943dbba4caad795aed750241ae3507851818d74"
+    },
+    {
+      "bytes": 214064,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/optimism/rent_paid.json",
+      "sha256": "fe3645bfc786f15f0d2f9805a6628dc03f0902a1ad57dd6cdca035ab2e3582c4"
+    },
+    {
+      "bytes": 117677,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/optimism/txcount.json",
+      "sha256": "17c0d4f97d2e58d141e3f3e1d631e5ad22716a59afa88061ecdda7c4f7932190"
+    },
+    {
+      "bytes": 131824,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/scroll/fees.json",
+      "sha256": "54a2b08ea4e2e06df5eb53bb99ec3c04cbbed46f022fcd3ba3a72b1743dc3819"
+    },
+    {
+      "bytes": 112576,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/scroll/profit.json",
+      "sha256": "da897c28e70d52b62c47d302abe95345bea808ce7f0821f75d4c90eb00eeb52f"
+    },
+    {
+      "bytes": 112904,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/scroll/rent_paid.json",
+      "sha256": "4695ec84c612951c8261f5fdcd43be2417a3dbd06a9b77b9a864f4a639d7b104"
+    },
+    {
+      "bytes": 69613,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/scroll/txcount.json",
+      "sha256": "cc39ce9cf7448dfd1ca9dac03cc5ce19663223d45d776001e7fbecbe442f9ca2"
+    },
+    {
+      "bytes": 80859,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/soneium/fees.json",
+      "sha256": "3a708413d2b62187cad470ddc75603e03ef395343ffd637f3bbcd09a14e8d3cf"
+    },
+    {
+      "bytes": 61407,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/soneium/profit.json",
+      "sha256": "199060b223d5d39432a07f062ce52004aac3b647fd3225b2176852127b04112d"
+    },
+    {
+      "bytes": 61577,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/soneium/rent_paid.json",
+      "sha256": "b5701af47f2c50a9019da9a03b91ce13fd7532337b5ad84057db0e0293b4a10c"
+    },
+    {
+      "bytes": 42509,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/soneium/txcount.json",
+      "sha256": "bd6995f1b3414fc7be163757777d0b1acb7b78f44b8e9618222f5fdaef63e0e5"
+    },
+    {
+      "bytes": 194358,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/starknet/fees.json",
+      "sha256": "71b672a25a5eafad86ac788d142004672cec35de7b83477bbf1baef86ef1a211"
+    },
+    {
+      "bytes": 199259,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/starknet/profit.json",
+      "sha256": "3cfe6f4bb1e29cd44d10bb12a0fa8a993a44c8dcbd9f699267dcf20a8cb759b8"
+    },
+    {
+      "bytes": 198617,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/starknet/rent_paid.json",
+      "sha256": "2c8dd2a144b608a413d6cf8bca0ea529f1199e6d6951ea5639a0e4c8330e1513"
+    },
+    {
+      "bytes": 115067,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/starknet/txcount.json",
+      "sha256": "d5d606463384361fd4718af049925ee8cf62d6e00aef47e43dca4d036a6c24ff"
+    },
+    {
+      "bytes": 103814,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/taiko/fees.json",
+      "sha256": "9da8c4ff348bef873ec008508589b9fd7933441eec1e38b92a534f9bc297c3b9"
+    },
+    {
+      "bytes": 86244,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/taiko/profit.json",
+      "sha256": "12595dcfc810ebebe721aee8ad3206a528ead307988b2a5c9ec3e8d0feccd751"
+    },
+    {
+      "bytes": 143631,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/taiko/rent_paid.json",
+      "sha256": "c4649f3b755879d4a7318ab5d910c1717b354d5d6f074946c83b4c5b0d7c708b"
+    },
+    {
+      "bytes": 54830,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/taiko/txcount.json",
+      "sha256": "27c56d16973d699c9f6c039688dcf9b214cb30c8fcd83256ed5ec8551f3e69a0"
+    },
+    {
+      "bytes": 84363,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/unichain/fees.json",
+      "sha256": "6c636f4184ed9387b82589d06109f7850ae33299ffb1156a19dfa67bcb49af8d"
+    },
+    {
+      "bytes": 64812,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/unichain/profit.json",
+      "sha256": "0b17520a981f6b19d11bc3874703679c416dc9c8338b2dbcc7abc7f2b6ab538a"
+    },
+    {
+      "bytes": 65284,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/unichain/rent_paid.json",
+      "sha256": "7a7365e81fb676cb6b4bfeb157dca0d91d2dd0c5ae125bf56f84f5d5276f83e6"
+    },
+    {
+      "bytes": 43941,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/unichain/txcount.json",
+      "sha256": "de70416959415d71bf1c7e797ea03aaca87d0d817212a1ce1c3cc616bb115ee4"
+    },
+    {
+      "bytes": 88115,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/worldchain/fees.json",
+      "sha256": "deca44253f91550719226fce5a115ea4b0e617b28a436ca2954196479217f258"
+    },
+    {
+      "bytes": 69598,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/worldchain/profit.json",
+      "sha256": "11653273281011e770b3893236955764e5094832d0d02c10baeb568f3297da8e"
+    },
+    {
+      "bytes": 80811,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/worldchain/rent_paid.json",
+      "sha256": "c11228ea4256803100270bef11e7703d27d9d32fb47f0a691a7e0465a2728d31"
+    },
+    {
+      "bytes": 46826,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/worldchain/txcount.json",
+      "sha256": "3007ca57ec833a1405ce560b12bf60e6093c0cb3d8f85cafd454ebf662c793f7"
+    },
+    {
+      "bytes": 156386,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/zksync_era/fees.json",
+      "sha256": "4e331c4f811ff817233a2969eded8e3073dee04fdf4ee063d30b6ce0915630de"
+    },
+    {
+      "bytes": 134874,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/zksync_era/profit.json",
+      "sha256": "9b14858b322544651f14e5a3e65179acf572fc0475cb1e45207c5fc86e3bb540"
+    },
+    {
+      "bytes": 136716,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/zksync_era/rent_paid.json",
+      "sha256": "f7342a434c2c444915ee94c611b25b0ab865bf15d584c5f48640d35b53dbfa39"
+    },
+    {
+      "bytes": 85469,
+      "path": "data/raw/growthepie/2026-04-01/metrics/chains/zksync_era/txcount.json",
+      "sha256": "53121c4b1618d524b377b76c9762517a5d6137c2ab7a6b6391a55394928ff2b9"
+    }
+  ],
+  "source": "growthepie"
+}
