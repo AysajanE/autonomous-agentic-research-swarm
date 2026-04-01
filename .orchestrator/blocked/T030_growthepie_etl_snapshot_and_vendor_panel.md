@@ -96,7 +96,7 @@ growthepie is the primary denominator source for `l2_fees_eth` and the secondary
 - `python scripts/make_raw_manifest.py growthepie data/raw/growthepie/YYYY-MM-DD --as-of YYYY-MM-DD -- python src/etl/growthepie_fetch.py --run-date YYYY-MM-DD`
 
 ## Status
-- State: done
+- State: blocked
 - Last updated: 2026-04-01
 ## Notes / Decisions
 
@@ -114,3 +114,4 @@ growthepie is the primary denominator source for `l2_fees_eth` and the secondary
 - 2026-04-01: Task remains `active` because this non-swarm execution cannot write the required Operator-owned durable run manifest under `reports/status/swarm_runs/`; exact commands and artifact details were handed off for Operator recording before review.
 - 2026-04-01: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T030_20260401T115602Z.json
 - 2026-04-01: Judge approved; review log: reports/status/reviews/T030_20260401T121619Z.json
+- 2026-04-01: Operator preflight on `main` reran `make gate` and found the branch is missing required task outputs `data/raw/growthepie/2026-04-01/` and `data/processed/growthepie/vendor_daily_rollup_panel.csv`, even though the run manifest and Judge log recorded a passing review in the worker worktree. Operationally blocked pending Worker repair to restore or regenerate the missing W1 outputs on a task branch and rerun gate/review from that repaired branch. @human: if those outputs were intentionally omitted from version control, reopen or rescope T030 before release.
