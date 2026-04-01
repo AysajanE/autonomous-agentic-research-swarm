@@ -1,0 +1,172 @@
+{
+  "artifacts": {
+    "missing_manifests": [
+      "missing_raw_manifest_file",
+      "missing_processed_manifest_file"
+    ],
+    "missing_outputs": [
+      {
+        "output": "data/raw_manifest/l1_rent_YYYY-MM-DD.json",
+        "reason": "missing_file"
+      },
+      {
+        "output": "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
+        "reason": "missing_file"
+      },
+      {
+        "output": "data/processed/panels/daily_rollup_panel.csv",
+        "reason": "missing_file"
+      },
+      {
+        "output": "data/processed_manifest/daily_l1_rent_decomposition_YYYY-MM-DD.json",
+        "reason": "missing_file"
+      },
+      {
+        "output": "data/processed_manifest/daily_rollup_panel_YYYY-MM-DD.json",
+        "reason": "missing_file"
+      },
+      {
+        "output": "data/samples/l1_rent/daily_l1_rent_decomposition_sample.csv",
+        "reason": "missing_file"
+      },
+      {
+        "output": "data/samples/panels/daily_rollup_panel_sample.csv",
+        "reason": "missing_file"
+      }
+    ],
+    "outputs_ok": false,
+    "required_manifests_ok": false,
+    "run_manifest_path": "reports/status/swarm_runs/T035_20260401T135106Z.json"
+  },
+  "commands": {
+    "executor": [
+      "/Users/aeziz-local/.nvm/versions/node/v20.19.0/bin/codex",
+      "exec",
+      "--sandbox",
+      "danger-full-access",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "-C",
+      "/Users/aeziz-local/Research/wt-T035",
+      "# Prompt Template \u2014 Worker\n\nRole: **Worker**\n\nYou execute exactly one assigned task in an isolated branch/worktree.\n\n## Instructions\n\n1. Read and follow `AGENTS.md` and any nested `AGENTS.md` under your working directory.\n2. Open the assigned task file and obey its `allowed_paths`, `disallowed_paths`, declared outputs, gates, and stop conditions.\n3. Do not coordinate with other agents through chat. Use:\n   - the task file `## Notes / Decisions`\n   - a handoff note under `.orchestrator/handoff/` when downstream tasks need durable guidance\n4. Update only the task file sections:\n   - `## Status`\n   - `## Notes / Decisions`\n   Do not move task files between lifecycle folders.\n5. You may set `State: integration_ready` or `State: ready_for_review` when the task contract permits it. You may never set `State: done`.\n6. Do not edit `reports/catalog.yaml`, `reports/paper/build/`, or release manifests. Those are Operator-owned surfaces.\n7. If the run is not using the local swarm runtime, hand the exact commands, outputs, and assumptions to Operator so a durable run manifest can be recorded before review.\n\n## Completion checklist\n\n- Run the declared gates and task-specific commands.\n- Ensure declared outputs exist at the declared paths.\n- Record reproduction commands, assumptions, and limitations in the task notes.\n- Write a handoff note if downstream work depends on your output.\n\n## Runtime context (auto-filled)\n\n- Repo root: `/Users/aeziz-local/Research/wt-T035`\n- Task path: `.orchestrator/active/T035_onchain_l1_rent_etl_and_decomposition.md`\n- Task id: `T035`\n- Workstream: `W2`\n- Task kind: `etl`\n- Network enabled: `true`\n- Repair context: ``\n\n### Allowed paths\n\n- src/etl/build_l1_rent_panel.py\n- data/raw/l1_rent/\n- data/raw_manifest/l1_rent_\n- data/processed/l1_rent/\n- data/processed/panels/\n- data/processed_manifest/daily_l1_rent_decomposition_\n- data/processed_manifest/daily_rollup_panel_\n- data/samples/l1_rent/\n- data/samples/panels/\n\n### Disallowed paths\n\n- docs/protocol.md\n- contracts/\n- registry/\n- src/analysis/\n- src/validation/\n\n### Declared outputs\n\n- src/etl/build_l1_rent_panel.py\n- data/raw/l1_rent/YYYY-MM-DD/...\n- data/raw_manifest/l1_rent_YYYY-MM-DD.json\n- data/processed/l1_rent/daily_l1_rent_decomposition.csv\n- data/processed/panels/daily_rollup_panel.csv\n- data/processed_manifest/daily_l1_rent_decomposition_YYYY-MM-DD.json\n- data/processed_manifest/daily_rollup_panel_YYYY-MM-DD.json\n- data/samples/l1_rent/daily_l1_rent_decomposition_sample.csv\n- data/samples/panels/daily_rollup_panel_sample.csv\n\n### Gates\n\n- make gate\n\n### Stop conditions\n\n- Need credentials\n- On-chain attribution is ambiguous\n- Required growthepie manifest or registry inputs are missing\n"
+    ],
+    "executor_log_path": null,
+    "gates": [
+      "make gate"
+    ]
+  },
+  "executor": {
+    "allow_network": true,
+    "error": "executor_timeout",
+    "model": null,
+    "repair_context": null,
+    "returncode": null,
+    "role": "Worker",
+    "runner": "local_swarm",
+    "sandbox": "danger-full-access",
+    "tool": "codex"
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "output_tail": "python scripts/quality_gates.py\n[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 1, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 1, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 7, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 7, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n",
+      "returncode": 0
+    }
+  ],
+  "generated_at_utc": "2026-04-01T15:21:06Z",
+  "ownership": {
+    "changed_paths": [
+      ".orchestrator/active/T035_onchain_l1_rent_etl_and_decomposition.md",
+      ".orchestrator/backlog/T025_populate_rollup_registry.md",
+      ".orchestrator/backlog/T030_growthepie_etl_snapshot_and_vendor_panel.md",
+      ".orchestrator/backlog/T035_onchain_l1_rent_etl_and_decomposition.md",
+      ".orchestrator/done/T025_populate_rollup_registry.md",
+      ".orchestrator/done/T030_growthepie_etl_snapshot_and_vendor_panel.md",
+      "data/AGENTS.md",
+      "scripts/quality_gates.py",
+      "src/etl/AGENTS.md",
+      "src/etl/build_l1_rent_panel.py",
+      "tests/test_quality_gates_processed_manifests.py"
+    ],
+    "ok": false,
+    "violations": [
+      {
+        "path": ".orchestrator/backlog/T025_populate_rollup_registry.md",
+        "reason": "orchestrator_write_forbidden",
+        "sources": "committed"
+      },
+      {
+        "path": ".orchestrator/backlog/T030_growthepie_etl_snapshot_and_vendor_panel.md",
+        "reason": "orchestrator_write_forbidden",
+        "sources": "committed"
+      },
+      {
+        "path": ".orchestrator/backlog/T035_onchain_l1_rent_etl_and_decomposition.md",
+        "reason": "orchestrator_write_forbidden",
+        "sources": "committed"
+      },
+      {
+        "path": ".orchestrator/done/T025_populate_rollup_registry.md",
+        "reason": "orchestrator_write_forbidden",
+        "sources": "committed"
+      },
+      {
+        "path": ".orchestrator/done/T030_growthepie_etl_snapshot_and_vendor_panel.md",
+        "reason": "orchestrator_write_forbidden",
+        "sources": "committed"
+      },
+      {
+        "path": "data/AGENTS.md",
+        "reason": "outside_allowed_paths",
+        "sources": "committed"
+      },
+      {
+        "path": "scripts/quality_gates.py",
+        "reason": "outside_allowed_paths",
+        "sources": "committed"
+      },
+      {
+        "path": "src/etl/AGENTS.md",
+        "reason": "outside_allowed_paths",
+        "sources": "committed"
+      },
+      {
+        "path": "tests/test_quality_gates_processed_manifests.py",
+        "reason": "outside_allowed_paths",
+        "sources": "committed"
+      }
+    ]
+  },
+  "repo": {
+    "base_branch": "main",
+    "branch": "T035_l1_rent_panel",
+    "git_sha": "3ea648bdac0d47389d7779c60517a64c13149ad0",
+    "remote": "origin"
+  },
+  "result": {
+    "blocked_reasons": [
+      "executor_timeout",
+      "path_ownership_violation",
+      "missing_outputs",
+      "missing_required_manifests"
+    ],
+    "status": "blocked"
+  },
+  "run_id": "T035_20260401T135106Z",
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "task": {
+    "dependencies": [
+      "T025",
+      "T030"
+    ],
+    "integration_ready_dependencies": [],
+    "role": "Worker",
+    "state_after": "blocked",
+    "state_before": "active",
+    "task_id": "T035",
+    "task_kind": "etl",
+    "task_path": ".orchestrator/active/T035_onchain_l1_rent_etl_and_decomposition.md",
+    "title": "On-chain L1 rent extraction, decomposition, and canonical panel build",
+    "workstream": "W2"
+  }
+}
