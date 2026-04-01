@@ -96,10 +96,9 @@ growthepie is the primary denominator source for `l2_fees_eth` and the secondary
 - `python scripts/make_raw_manifest.py growthepie data/raw/growthepie/YYYY-MM-DD --as-of YYYY-MM-DD -- python src/etl/growthepie_fetch.py --run-date YYYY-MM-DD`
 
 ## Status
-
-- State: backlog
-- Last updated: 2026-03-29
-
+- State: active
+- Last updated: 2026-04-01
 ## Notes / Decisions
 
 - 2026-03-29: v1 rewrite narrows T030 to the off-chain denominator and vendor-panel slice. Authoritative `rent_paid_eth` is deferred to T035.
+- 2026-04-01: Claimed by local swarm runtime on branch T030_growthepie_etl_snapshot_and_vendor_panel.
