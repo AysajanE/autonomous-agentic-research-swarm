@@ -109,10 +109,9 @@ This task creates the authoritative rent path for release. It turns raw on-chain
 - `python scripts/make_raw_manifest.py l1_rent data/raw/l1_rent/YYYY-MM-DD --as-of YYYY-MM-DD -- python src/etl/build_l1_rent_panel.py --run-date YYYY-MM-DD`
 
 ## Status
-
-- State: backlog
-- Last updated: 2026-03-29
-
+- State: active
+- Last updated: 2026-04-02
 ## Notes / Decisions
 
 - 2026-03-29: New v1 task added to make the on-chain rent path authoritative before metrics, validation, or release analysis.
+- 2026-04-02: Claimed by local swarm runtime on branch main.
