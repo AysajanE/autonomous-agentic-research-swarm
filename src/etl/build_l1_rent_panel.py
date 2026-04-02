@@ -46,9 +46,14 @@ BLOBSCAN_HEADERS = {
 }
 
 BLOCKSCOUT_TX_PAGE_SIZE = 1000
+BLOCKSCOUT_MIN_PAGE_SIZE = 250
 BLOBSCAN_TX_PAGE_SIZE = 500
-BLOBSCAN_INSTABILITY_RETRY_DELAY_SECONDS = 30.0
-BLOBSCAN_INSTABILITY_RETRY_ROUNDS = 2
+BLOBSCAN_MIN_PAGE_SIZE = 100
+# Blobscan occasionally returns transient 502/503s on page 1 for otherwise valid windows.
+# Keep a brief cooldown, but split/fallback quickly when instability persists so long resume
+# runs do not spend minutes sleeping on one pathological month slice.
+BLOBSCAN_INSTABILITY_RETRY_DELAY_SECONDS = 10.0
+BLOBSCAN_INSTABILITY_RETRY_ROUNDS = 1
 RPC_BATCH_SIZE = 100
 
 PANEL_HEADERS = [
@@ -196,11 +201,19 @@ def git_sha(root: Path) -> str:
     return result.stdout.strip()
 
 
-def command_string(run_date: date) -> str:
-    return " ".join(
-        shlex.quote(token)
-        for token in ["python", "src/etl/build_l1_rent_panel.py", "--run-date", run_date.isoformat()]
-    )
+def command_string(args: argparse.Namespace) -> str:
+    command = ["python", "src/etl/build_l1_rent_panel.py", "--run-date", args.run_date.isoformat()]
+    if args.retries != 4:
+        command.extend(["--retries", str(args.retries)])
+    if args.timeout_seconds != 45.0:
+        command.extend(["--timeout-seconds", str(args.timeout_seconds)])
+    if args.blockscout_page_size != BLOCKSCOUT_TX_PAGE_SIZE:
+        command.extend(["--blockscout-page-size", str(args.blockscout_page_size)])
+    if args.blobscan_page_size != BLOBSCAN_TX_PAGE_SIZE:
+        command.extend(["--blobscan-page-size", str(args.blobscan_page_size)])
+    if args.rpc_batch_size != RPC_BATCH_SIZE:
+        command.extend(["--rpc-batch-size", str(args.rpc_batch_size)])
+    return " ".join(shlex.quote(token) for token in command)
 
 
 def prepare_snapshot_dir(path: Path, *, raw_manifest_path: Path) -> None:
@@ -1015,6 +1028,43 @@ def fetch_blockscout_tx_window(
             )
         except SystemExit:
             split_start_dt = all_rows[-1].timestamp_utc if all_rows else window_start_dt
+            fallback_page_size = max(BLOCKSCOUT_MIN_PAGE_SIZE, page_size // 2)
+            if fallback_page_size < page_size:
+                logging.info(
+                    "Retrying Blockscout tx window for %s/%s with smaller page size %s after page %s failure at page size %s within %s..%s",
+                    rollup_id,
+                    address,
+                    fallback_page_size,
+                    page,
+                    page_size,
+                    split_start_dt.isoformat(),
+                    window_end_exclusive_dt.isoformat(),
+                )
+                fallback_rows = fetch_blockscout_tx_window(
+                    snapshot_dir=snapshot_dir,
+                    rollup_id=rollup_id,
+                    address=address,
+                    start_day=split_start_dt.date(),
+                    end_day_exclusive=window_end_exclusive_dt.date(),
+                    page_size=fallback_page_size,
+                    retries=retries,
+                    timeout_seconds=timeout_seconds,
+                    request_log=request_log,
+                    start_timestamp_utc=split_start_dt,
+                    end_timestamp_exclusive_utc=window_end_exclusive_dt,
+                    address_role=address_role,
+                    method_selectors=method_selectors,
+                    path_prefix=path_prefix,
+                    scope_id=scope_id,
+                )
+                merged_rows = list(all_rows)
+                seen_hashes = {row.hash for row in merged_rows}
+                for row in fallback_rows:
+                    if row.hash in seen_hashes:
+                        continue
+                    seen_hashes.add(row.hash)
+                    merged_rows.append(row)
+                return merged_rows
             remaining_span_seconds = int((window_end_exclusive_dt - split_start_dt).total_seconds())
             if remaining_span_seconds > 1:
                 split_offset_seconds = max(1, remaining_span_seconds // 2)
@@ -1337,7 +1387,7 @@ def fetch_blobscan_window(
                     end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
                     instability_retries_remaining=instability_retries_remaining - 1,
                 )
-            fallback_page_size = max(500, page_size // 2)
+            fallback_page_size = max(BLOBSCAN_MIN_PAGE_SIZE, page_size // 2)
             if fallback_page_size < page_size:
                 logging.info(
                     "Retrying Blobscan window for %s/%s with smaller page size %s after page %s failure at page size %s within %s..%s",
@@ -1835,6 +1885,7 @@ def build_processed_manifest(
     run_date: date,
     inputs: list[str],
     script_path: str,
+    command: str,
     output_paths: list[Path],
 ) -> dict[str, Any]:
     return {
@@ -1843,7 +1894,7 @@ def build_processed_manifest(
         "transform": {
             "script_path": script_path,
             "git_sha": git_sha(root),
-            "command": command_string(run_date),
+            "command": command,
         },
         "outputs": [
             {
@@ -2204,7 +2255,7 @@ def main(argv: list[str]) -> int:
         {
             "source": "l1_rent",
             "as_of_utc_date": run_date.isoformat(),
-            "command": command_string(run_date),
+            "command": command_string(args),
             "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
             "protocol_start_utc_date": PROTOCOL_START.isoformat(),
             "observed_end_utc_date": observed_end.isoformat(),
@@ -2217,7 +2268,7 @@ def main(argv: list[str]) -> int:
     raw_manifest = build_raw_manifest(
         source="l1_rent",
         snapshot_dir=snapshot_dir,
-        command=command_string(run_date),
+        command=command_string(args),
         as_of=run_date,
     )
     write_json(raw_manifest_path, raw_manifest)
@@ -2227,6 +2278,7 @@ def main(argv: list[str]) -> int:
         run_date=run_date,
         inputs=[str(raw_manifest_path.relative_to(root))],
         script_path="src/etl/build_l1_rent_panel.py",
+        command=command_string(args),
         output_paths=[decomp_path, decomp_sample_path],
     )
     write_json(decomp_manifest_path, decomp_manifest)
@@ -2240,6 +2292,7 @@ def main(argv: list[str]) -> int:
             "data/processed/growthepie/vendor_daily_rollup_panel.csv",
         ],
         script_path="src/etl/build_l1_rent_panel.py",
+        command=command_string(args),
         output_paths=[panel_path, panel_sample_path],
     )
     write_json(panel_manifest_path, panel_manifest)
