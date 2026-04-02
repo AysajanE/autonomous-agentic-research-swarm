@@ -47,6 +47,8 @@ BLOBSCAN_HEADERS = {
 
 BLOCKSCOUT_TX_PAGE_SIZE = 1000
 BLOBSCAN_TX_PAGE_SIZE = 500
+BLOBSCAN_INSTABILITY_RETRY_DELAY_SECONDS = 30.0
+BLOBSCAN_INSTABILITY_RETRY_ROUNDS = 2
 RPC_BATCH_SIZE = 100
 
 PANEL_HEADERS = [
@@ -308,7 +310,7 @@ def parse_blobscan_tx_record(row: dict[str, Any], *, rollup_id: str) -> Blobscan
     return parsed
 
 
-def load_existing_blobscan_page(path: Path, *, rollup_id: str) -> tuple[list[BlobscanTx], int | None]:
+def load_existing_blobscan_page(path: Path, *, rollup_id: str) -> tuple[list[BlobscanTx], int | None, int]:
     payload = read_json(path)
     rows = payload.get("transactions")
     if not isinstance(rows, list):
@@ -319,7 +321,18 @@ def load_existing_blobscan_page(path: Path, *, rollup_id: str) -> tuple[list[Blo
             total_transactions = int(total_transactions)
         except (TypeError, ValueError) as exc:
             raise SystemExit(f"stored Blobscan page has malformed total_transactions: {path}") from exc
-    return [parse_blobscan_tx_record(row, rollup_id=rollup_id) for row in rows if isinstance(row, dict)], total_transactions
+    stored_page_size = payload.get("page_size")
+    try:
+        stored_page_size = int(stored_page_size)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"stored Blobscan page has malformed page_size: {path}") from exc
+    if stored_page_size <= 0:
+        raise SystemExit(f"stored Blobscan page has non-positive page_size: {path}")
+    return (
+        [parse_blobscan_tx_record(row, rollup_id=rollup_id) for row in rows if isinstance(row, dict)],
+        total_transactions,
+        stored_page_size,
+    )
 
 
 def parse_receipt_record(row: dict[str, Any]) -> ReceiptFields:
@@ -752,6 +765,10 @@ def datetime_utc_start(day: date) -> datetime:
     return datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
 
 
+def iso_utc_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def blockscout_window_id(start_dt: datetime, end_dt_exclusive: datetime) -> str:
     if start_dt.timetz() == datetime.min.time().replace(tzinfo=timezone.utc) and end_dt_exclusive.timetz() == datetime.min.time().replace(tzinfo=timezone.utc):
         return window_label(start_dt.date(), end_dt_exclusive.date())
@@ -1172,20 +1189,37 @@ def fetch_blobscan_window(
     request_log: list[dict[str, Any]],
     from_address: str | None = None,
     rollup_filter: str | None = None,
+    start_timestamp_utc: datetime | None = None,
+    end_timestamp_exclusive_utc: datetime | None = None,
+    instability_retries_remaining: int = BLOBSCAN_INSTABILITY_RETRY_ROUNDS,
 ) -> list[BlobscanTx]:
     if not from_address and not rollup_filter:
         raise ValueError("blobscan fetch requires from_address or rollup_filter")
 
+    window_start_dt = start_timestamp_utc or datetime_utc_start(start_day)
+    window_end_exclusive_dt = end_timestamp_exclusive_utc or datetime_utc_start(end_day_exclusive)
+    if window_end_exclusive_dt <= window_start_dt:
+        return []
+
+    window_end_inclusive_dt = window_end_exclusive_dt - timedelta(seconds=1)
     page = 1
     total_rows: list[BlobscanTx] = []
     total_transactions: int | None = None
-    window_id = window_label(start_day, end_day_exclusive)
+    cached_page_size: int | None = None
+    window_id = blockscout_window_id(window_start_dt, window_end_exclusive_dt)
+    source_dir = from_address or f"rollup_{rollup_filter}"
 
     while True:
-        source_dir = from_address or f"rollup_{rollup_filter}"
         page_path = snapshot_dir / "blobscan" / rollup_id / source_dir / f"{window_id}_page-{page:04d}.json"
         if page_path.exists():
-            normalized_rows, existing_total = load_existing_blobscan_page(page_path, rollup_id=rollup_id)
+            normalized_rows, existing_total, stored_page_size = load_existing_blobscan_page(page_path, rollup_id=rollup_id)
+            if cached_page_size is None:
+                cached_page_size = stored_page_size
+            elif cached_page_size != stored_page_size:
+                raise SystemExit(
+                    f"stored Blobscan pages within one resume scope have inconsistent page sizes for {rollup_id}/{source_dir}: "
+                    f"{cached_page_size} vs {stored_page_size}"
+                )
             if total_transactions is None:
                 total_transactions = existing_total
             request_log.append(
@@ -1194,26 +1228,66 @@ def fetch_blobscan_window(
                     "rollup_id": rollup_id,
                     "from_address": from_address,
                     "rollup_filter": rollup_filter,
-                    "window_start_utc": start_day.isoformat(),
-                    "window_end_exclusive_utc": end_day_exclusive.isoformat(),
+                    "window_start_utc": window_start_dt.isoformat(),
+                    "window_end_exclusive_utc": window_end_exclusive_dt.isoformat(),
                     "page": page,
-                    "page_size": page_size,
+                    "page_size": stored_page_size,
+                    "requested_page_size": page_size,
                     "relative_path": str(page_path.relative_to(repo_root())),
                     "fetched_at_utc": None,
                     "reused_existing": True,
                 }
             )
             total_rows.extend(normalized_rows)
-            if len(normalized_rows) < page_size:
+            if len(normalized_rows) < stored_page_size:
                 break
-            if total_transactions is not None and page * page_size >= total_transactions:
+            if total_transactions is not None and page * stored_page_size >= total_transactions:
                 break
             page += 1
             continue
 
+        if cached_page_size is not None and cached_page_size != page_size:
+            remaining_end_exclusive_dt = (
+                total_rows[-1].timestamp_utc + timedelta(seconds=1) if total_rows else window_end_exclusive_dt
+            )
+            if remaining_end_exclusive_dt <= window_start_dt:
+                return total_rows
+            logging.info(
+                "Resuming Blobscan window for %s/%s with page size %s after cached page size %s within %s..%s ending at %s",
+                rollup_id,
+                source_dir,
+                page_size,
+                cached_page_size,
+                window_start_dt.isoformat(),
+                window_end_exclusive_dt.isoformat(),
+                remaining_end_exclusive_dt.isoformat(),
+            )
+            continuation_rows = fetch_blobscan_window(
+                snapshot_dir=snapshot_dir,
+                rollup_id=rollup_id,
+                start_day=window_start_dt.date(),
+                end_day_exclusive=remaining_end_exclusive_dt.date(),
+                page_size=page_size,
+                retries=retries,
+                timeout_seconds=timeout_seconds,
+                request_log=request_log,
+                from_address=from_address,
+                rollup_filter=rollup_filter,
+                start_timestamp_utc=window_start_dt,
+                end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
+            )
+            merged_rows = list(total_rows)
+            seen_hashes = {row.hash for row in merged_rows}
+            for row in continuation_rows:
+                if row.hash in seen_hashes:
+                    continue
+                seen_hashes.add(row.hash)
+                merged_rows.append(row)
+            return merged_rows
+
         params: dict[str, str] = {
-            "startDate": iso_utc_start(start_day),
-            "endDate": iso_utc_end_inclusive(end_day_exclusive),
+            "startDate": iso_utc_datetime(window_start_dt),
+            "endDate": iso_utc_datetime(window_end_inclusive_dt),
             "ps": str(page_size),
             "p": str(page),
             "count": "true",
@@ -1224,12 +1298,132 @@ def fetch_blobscan_window(
             params["rollups"] = rollup_filter
             params["categories"] = "rollup"
         url = f"{BLOBSCAN_TX_URL}?{urlencode(params)}"
-        result = fetch_json(
-            url,
-            headers=BLOBSCAN_HEADERS,
-            retries=retries,
-            timeout_seconds=timeout_seconds,
-        )
+        try:
+            result = fetch_json(
+                url,
+                headers=BLOBSCAN_HEADERS,
+                retries=retries,
+                timeout_seconds=timeout_seconds,
+            )
+        except SystemExit:
+            remaining_end_exclusive_dt = (
+                total_rows[-1].timestamp_utc + timedelta(seconds=1) if total_rows else window_end_exclusive_dt
+            )
+            if not total_rows and page == 1 and instability_retries_remaining > 0:
+                logging.info(
+                    "Cooling down Blobscan window for %s/%s at page size %s after repeated page 1 instability "
+                    "within %s..%s; retrying the same window in %.1fs (%s retries remaining after this)",
+                    rollup_id,
+                    source_dir,
+                    page_size,
+                    window_start_dt.isoformat(),
+                    remaining_end_exclusive_dt.isoformat(),
+                    BLOBSCAN_INSTABILITY_RETRY_DELAY_SECONDS,
+                    instability_retries_remaining - 1,
+                )
+                time.sleep(BLOBSCAN_INSTABILITY_RETRY_DELAY_SECONDS)
+                return fetch_blobscan_window(
+                    snapshot_dir=snapshot_dir,
+                    rollup_id=rollup_id,
+                    start_day=window_start_dt.date(),
+                    end_day_exclusive=remaining_end_exclusive_dt.date(),
+                    page_size=page_size,
+                    retries=retries,
+                    timeout_seconds=timeout_seconds,
+                    request_log=request_log,
+                    from_address=from_address,
+                    rollup_filter=rollup_filter,
+                    start_timestamp_utc=window_start_dt,
+                    end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
+                    instability_retries_remaining=instability_retries_remaining - 1,
+                )
+            fallback_page_size = max(500, page_size // 2)
+            if fallback_page_size < page_size:
+                logging.info(
+                    "Retrying Blobscan window for %s/%s with smaller page size %s after page %s failure at page size %s within %s..%s",
+                    rollup_id,
+                    source_dir,
+                    fallback_page_size,
+                    page,
+                    page_size,
+                    window_start_dt.isoformat(),
+                    remaining_end_exclusive_dt.isoformat(),
+                )
+                fallback_rows = fetch_blobscan_window(
+                    snapshot_dir=snapshot_dir,
+                    rollup_id=rollup_id,
+                    start_day=window_start_dt.date(),
+                    end_day_exclusive=remaining_end_exclusive_dt.date(),
+                    page_size=fallback_page_size,
+                    retries=retries,
+                    timeout_seconds=timeout_seconds,
+                    request_log=request_log,
+                    from_address=from_address,
+                    rollup_filter=rollup_filter,
+                    start_timestamp_utc=window_start_dt,
+                    end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
+                )
+                merged_rows = list(total_rows)
+                seen_hashes = {row.hash for row in merged_rows}
+                for row in fallback_rows:
+                    if row.hash in seen_hashes:
+                        continue
+                    seen_hashes.add(row.hash)
+                    merged_rows.append(row)
+                return merged_rows
+            remaining_span_seconds = int((remaining_end_exclusive_dt - window_start_dt).total_seconds())
+            if remaining_span_seconds > 1:
+                split_offset_seconds = max(1, remaining_span_seconds // 2)
+                split_dt = window_start_dt + timedelta(seconds=split_offset_seconds)
+                logging.info(
+                    "Splitting slow Blobscan window for %s/%s from %s..%s after page %s failure into %s..%s and %s..%s",
+                    rollup_id,
+                    source_dir,
+                    window_start_dt.isoformat(),
+                    remaining_end_exclusive_dt.isoformat(),
+                    page,
+                    window_start_dt.isoformat(),
+                    split_dt.isoformat(),
+                    split_dt.isoformat(),
+                    remaining_end_exclusive_dt.isoformat(),
+                )
+                older_rows = fetch_blobscan_window(
+                    snapshot_dir=snapshot_dir,
+                    rollup_id=rollup_id,
+                    start_day=window_start_dt.date(),
+                    end_day_exclusive=split_dt.date(),
+                    page_size=page_size,
+                    retries=retries,
+                    timeout_seconds=timeout_seconds,
+                    request_log=request_log,
+                    from_address=from_address,
+                    rollup_filter=rollup_filter,
+                    start_timestamp_utc=window_start_dt,
+                    end_timestamp_exclusive_utc=split_dt,
+                )
+                newer_rows = fetch_blobscan_window(
+                    snapshot_dir=snapshot_dir,
+                    rollup_id=rollup_id,
+                    start_day=split_dt.date(),
+                    end_day_exclusive=remaining_end_exclusive_dt.date(),
+                    page_size=page_size,
+                    retries=retries,
+                    timeout_seconds=timeout_seconds,
+                    request_log=request_log,
+                    from_address=from_address,
+                    rollup_filter=rollup_filter,
+                    start_timestamp_utc=split_dt,
+                    end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
+                )
+                merged_rows = list(total_rows)
+                seen_hashes = {row.hash for row in merged_rows}
+                for row in newer_rows + older_rows:
+                    if row.hash in seen_hashes:
+                        continue
+                    seen_hashes.add(row.hash)
+                    merged_rows.append(row)
+                return merged_rows
+            raise
         payload = result.payload
         rows = payload.get("transactions")
         if not isinstance(rows, list):
@@ -1256,8 +1450,8 @@ def fetch_blobscan_window(
             {
                 "source": "blobscan_transactions",
                 "rollup_id": rollup_id,
-                "window_start_utc": start_day.isoformat(),
-                "window_end_exclusive_utc": end_day_exclusive.isoformat(),
+                "window_start_utc": window_start_dt.isoformat(),
+                "window_end_exclusive_utc": window_end_exclusive_dt.isoformat(),
                 "page": page,
                 "page_size": page_size,
                 "total_transactions": total_transactions,
@@ -1272,8 +1466,8 @@ def fetch_blobscan_window(
                 "rollup_id": rollup_id,
                 "from_address": from_address,
                 "rollup_filter": rollup_filter,
-                "window_start_utc": start_day.isoformat(),
-                "window_end_exclusive_utc": end_day_exclusive.isoformat(),
+                "window_start_utc": window_start_dt.isoformat(),
+                "window_end_exclusive_utc": window_end_exclusive_dt.isoformat(),
                 "page": page,
                 "page_size": page_size,
                 "relative_path": str(page_path.relative_to(repo_root())),
