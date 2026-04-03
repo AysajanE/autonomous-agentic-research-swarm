@@ -77,6 +77,7 @@ DECOMP_HEADERS = [
 SAMPLE_ROLLUPS = ("arbitrum", "base", "optimism")
 SAMPLE_DATES = ("2024-03-13", "2024-03-14", "2024-03-15")
 ROLLUPS_WITHOUT_BATCHER_ADDRESSES = {"scroll"}
+BLOBSCAN_ROLLUP_ALIASES = {"world": "worldchain"}
 
 
 @dataclass(frozen=True)
@@ -1187,9 +1188,9 @@ def fetch_blockscout_tx_window(
 def normalize_blobscan_tx(tx: dict[str, Any], *, default_rollup_id: str | None = None) -> BlobscanTx:
     raw_rollup = tx.get("rollup")
     rollup_id = (
-        str(raw_rollup).strip().lower().replace("-", "_")
+        canonicalize_blobscan_rollup_id(str(raw_rollup))
         if isinstance(raw_rollup, str) and raw_rollup.strip()
-        else (default_rollup_id or "")
+        else normalize_slug(default_rollup_id or "")
     )
     if not rollup_id:
         raise SystemExit(f"Blobscan transaction is missing rollup attribution: {tx!r}")
@@ -1225,6 +1226,19 @@ def blobscan_tx_record(tx: BlobscanTx) -> dict[str, Any]:
         "blob_gas_price_wei": str(tx.blob_gas_price_wei),
         "blob_as_calldata_gas_used": tx.blob_as_calldata_gas_used,
     }
+
+
+def canonicalize_blobscan_rollup_id(value: str) -> str:
+    normalized = normalize_slug(value)
+    return BLOBSCAN_ROLLUP_ALIASES.get(normalized, normalized)
+
+
+def blobscan_rollup_filter_value(rollup_id: str) -> str:
+    normalized = normalize_slug(rollup_id)
+    for alias, canonical in BLOBSCAN_ROLLUP_ALIASES.items():
+        if canonical == normalized:
+            return alias
+    return normalized
 
 
 def fetch_blobscan_window(
@@ -1345,7 +1359,7 @@ def fetch_blobscan_window(
         if from_address:
             params["from"] = from_address
         if rollup_filter:
-            params["rollups"] = rollup_filter
+            params["rollups"] = blobscan_rollup_filter_value(rollup_filter)
             params["categories"] = "rollup"
         url = f"{BLOBSCAN_TX_URL}?{urlencode(params)}"
         try:
