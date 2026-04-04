@@ -54,7 +54,10 @@ BLOBSCAN_MIN_PAGE_SIZE = 100
 # runs do not spend minutes sleeping on one pathological month slice.
 BLOBSCAN_INSTABILITY_RETRY_DELAY_SECONDS = 10.0
 BLOBSCAN_INSTABILITY_RETRY_ROUNDS = 1
-RPC_BATCH_SIZE = 100
+# The public Ethereum Blockscout eth-rpc endpoint currently rejects JSON-RPC batches larger
+# than 5 with HTTP 413 ("Payload Too Large. Max batch size is 5"). Keep the default aligned
+# to the live provider limit so the receipt/base-fee enrichment phase can resume safely.
+RPC_BATCH_SIZE = 5
 
 PANEL_HEADERS = [
     "date_utc",
@@ -1939,6 +1942,16 @@ def normalize_slug(value: str) -> str:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    if args.rpc_batch_size < 1:
+        raise SystemExit(f"--rpc-batch-size must be positive, got {args.rpc_batch_size}")
+    if args.rpc_batch_size > RPC_BATCH_SIZE:
+        logging.info(
+            "Clamping requested Blockscout RPC batch size from %s to %s to match the public endpoint limit",
+            args.rpc_batch_size,
+            RPC_BATCH_SIZE,
+        )
+        args.rpc_batch_size = RPC_BATCH_SIZE
 
     root = repo_root()
     run_date = args.run_date
