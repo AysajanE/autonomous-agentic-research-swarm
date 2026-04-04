@@ -54,6 +54,11 @@ BLOBSCAN_MIN_PAGE_SIZE = 100
 # runs do not spend minutes sleeping on one pathological month slice.
 BLOBSCAN_INSTABILITY_RETRY_DELAY_SECONDS = 10.0
 BLOBSCAN_INSTABILITY_RETRY_ROUNDS = 1
+# Public Blobscan occasionally returns transient 502/503s even for exact one-second windows
+# that later succeed as empty results. Give terminal windows a few slower retries before
+# classifying the source as broken.
+BLOBSCAN_TERMINAL_WINDOW_RETRY_DELAY_SECONDS = 30.0
+BLOBSCAN_TERMINAL_WINDOW_RETRY_ROUNDS = 2
 # The public Ethereum Blockscout eth-rpc endpoint currently rejects JSON-RPC batches larger
 # than 5 with HTTP 413 ("Payload Too Large. Max batch size is 5"). Keep the default aligned
 # to the live provider limit so the receipt/base-fee enrichment phase can resume safely.
@@ -1259,6 +1264,7 @@ def fetch_blobscan_window(
     start_timestamp_utc: datetime | None = None,
     end_timestamp_exclusive_utc: datetime | None = None,
     instability_retries_remaining: int = BLOBSCAN_INSTABILITY_RETRY_ROUNDS,
+    terminal_window_retries_remaining: int = BLOBSCAN_TERMINAL_WINDOW_RETRY_ROUNDS,
 ) -> list[BlobscanTx]:
     if not from_address and not rollup_filter:
         raise ValueError("blobscan fetch requires from_address or rollup_filter")
@@ -1376,6 +1382,7 @@ def fetch_blobscan_window(
             remaining_end_exclusive_dt = (
                 total_rows[-1].timestamp_utc + timedelta(seconds=1) if total_rows else window_end_exclusive_dt
             )
+            remaining_span_seconds = int((remaining_end_exclusive_dt - window_start_dt).total_seconds())
             if not total_rows and page == 1 and instability_retries_remaining > 0:
                 logging.info(
                     "Cooling down Blobscan window for %s/%s at page size %s after repeated page 1 instability "
@@ -1404,6 +1411,39 @@ def fetch_blobscan_window(
                     end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
                     instability_retries_remaining=instability_retries_remaining - 1,
                 )
+            if (
+                not total_rows
+                and page == 1
+                and remaining_span_seconds <= 1
+                and terminal_window_retries_remaining > 0
+            ):
+                logging.info(
+                    "Retrying exact Blobscan window for %s/%s within %s..%s after repeated terminal instability; "
+                    "retrying the same one-second scope in %.1fs (%s retries remaining after this)",
+                    rollup_id,
+                    source_dir,
+                    window_start_dt.isoformat(),
+                    remaining_end_exclusive_dt.isoformat(),
+                    BLOBSCAN_TERMINAL_WINDOW_RETRY_DELAY_SECONDS,
+                    terminal_window_retries_remaining - 1,
+                )
+                time.sleep(BLOBSCAN_TERMINAL_WINDOW_RETRY_DELAY_SECONDS)
+                return fetch_blobscan_window(
+                    snapshot_dir=snapshot_dir,
+                    rollup_id=rollup_id,
+                    start_day=window_start_dt.date(),
+                    end_day_exclusive=remaining_end_exclusive_dt.date(),
+                    page_size=page_size,
+                    retries=retries,
+                    timeout_seconds=timeout_seconds,
+                    request_log=request_log,
+                    from_address=from_address,
+                    rollup_filter=rollup_filter,
+                    start_timestamp_utc=window_start_dt,
+                    end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
+                    instability_retries_remaining=BLOBSCAN_INSTABILITY_RETRY_ROUNDS,
+                    terminal_window_retries_remaining=terminal_window_retries_remaining - 1,
+                )
             fallback_page_size = max(BLOBSCAN_MIN_PAGE_SIZE, page_size // 2)
             if fallback_page_size < page_size:
                 logging.info(
@@ -1429,6 +1469,7 @@ def fetch_blobscan_window(
                     rollup_filter=rollup_filter,
                     start_timestamp_utc=window_start_dt,
                     end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
+                    terminal_window_retries_remaining=terminal_window_retries_remaining,
                 )
                 merged_rows = list(total_rows)
                 seen_hashes = {row.hash for row in merged_rows}
@@ -1467,6 +1508,7 @@ def fetch_blobscan_window(
                     rollup_filter=rollup_filter,
                     start_timestamp_utc=window_start_dt,
                     end_timestamp_exclusive_utc=split_dt,
+                    terminal_window_retries_remaining=terminal_window_retries_remaining,
                 )
                 newer_rows = fetch_blobscan_window(
                     snapshot_dir=snapshot_dir,
@@ -1481,6 +1523,7 @@ def fetch_blobscan_window(
                     rollup_filter=rollup_filter,
                     start_timestamp_utc=split_dt,
                     end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
+                    terminal_window_retries_remaining=terminal_window_retries_remaining,
                 )
                 merged_rows = list(total_rows)
                 seen_hashes = {row.hash for row in merged_rows}
