@@ -121,4 +121,28 @@ Before any release analysis or writing, the repo needs deterministic checks on t
 - 2026-04-08: Assumptions / limitations:
   - The tracked sample CSVs are sufficient to verify the validation logic and sample-safe gates, but they are not a substitute for the canonical release-firewall run.
   - Because this execution did not record a new swarm runtime manifest, Operator will need the exact commands/outcomes above to log a durable run manifest once the canonical artifacts are available.
-- 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T050_20260408T152125Z.json
+- 2026-04-08: Repair rerun after Operator hydrated the canonical manifest-backed CSVs locally:
+  - `python src/validation/validate_str_pipeline.py --as-of 2026-04-01` → exit `1`; refreshed the three stable canonical report pairs from local manifests and artifacts instead of writing blocked input-resolution reports.
+  - `reports/validation/rollup_panel_validation.{json,md}` → status `fail`; authoritative panel schema, primary-key uniqueness, required non-null, and `metrics_str` compatibility passed, but key coverage failed with `11,164` authoritative keys versus `12,322` vendor keys and `1,158` vendor-only rollup-days.
+  - `reports/validation/l1_rent_decomposition_validation.{json,md}` → status `pass`; schema, primary-key uniqueness, required non-null, total-rent identity, and panel-date coverage all passed for `1,551` days.
+  - `reports/validation/cross_source_reconciliation.{json,md}` → status `fail`; vendor schema/key/non-null checks passed, but vendor profit identity failed on `543` rows and monthly reconciliation failed because the vendor and authoritative panels do not share the same key coverage.
+- 2026-04-08: Canonical failure details for the minimal unblock:
+  - Vendor-only key coverage is concentrated in `arbitrum` (`368` dates from `2022-01-01` to `2023-01-03`), `zksync_era` (`540` dates from `2023-03-24` to `2026-01-30`), `linea` (`248` dates from `2023-07-13` to `2026-03-26`), and `taiko` (`2` dates from `2025-11-29` to `2025-11-30`).
+  - Vendor profit identity violations are concentrated in `starknet` (`508` rows, max abs diff `82.418787225` ETH, `2024-02-26` to `2025-10-17`), with smaller clusters in `zksync_era` (`29` rows, max abs diff `1.0336628657304` ETH) and `linea` (`6` rows, max abs diff `62.46171051244441` ETH).
+  - On matched keys, the cross-source summary reports vendor rent `87,176.30702620494` ETH versus authoritative rent `78,744.6648188145` ETH, for an aggregate absolute delta of `10.707572667673433%`, above the protocol’s `5–10%` target tolerance band.
+- 2026-04-08: Reproduction and gates for the repair run:
+  - `python src/validation/validate_str_pipeline.py --as-of 2026-04-01`
+  - `make gate` → passed after the canonical rerun.
+- 2026-04-08: Outputs refreshed by the repair run:
+  - `reports/validation/rollup_panel_validation.json`
+  - `reports/validation/rollup_panel_validation.md`
+  - `reports/validation/l1_rent_decomposition_validation.json`
+  - `reports/validation/l1_rent_decomposition_validation.md`
+  - `reports/validation/cross_source_reconciliation.json`
+  - `reports/validation/cross_source_reconciliation.md`
+- 2026-04-08: Blocker and minimal next step:
+  - `@human` Confirm whether the vendor-versus-authoritative rollup universe and row-omission behavior are expected to differ for `arbitrum`, `zksync_era`, `linea`, and `taiko`, and whether vendor `profit_eth` changed semantics for `starknet`, `linea`, or `zksync_era`. If these are not expected source-definition differences, fix the upstream attribution/registry logic and rerun `python src/validation/validate_str_pipeline.py --as-of 2026-04-01`.
+- 2026-04-08: Assumptions / limitations for the repair run:
+  - No change to `src/validation/validate_str_pipeline.py` was required; the validator deterministically reflected the canonical manifest-backed inputs now present in this worktree.
+  - This repair execution was not recorded via a fresh `scripts/swarm.py` runtime, so Operator should capture the exact commands and outcomes above in a durable run manifest before any future review attempt after the blocker is resolved.
+- 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T050_20260408T154442Z.json

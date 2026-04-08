@@ -1,22 +1,46 @@
 # L1 rent decomposition validation
 
-- Status: `blocked`
+- Status: `pass`
 - Mode: `canonical`
 - As of: `2026-04-01`
 
 ## Summary
 
-- message: `"Canonical validation could not run because manifest-backed inputs are incomplete."`
-- requested_as_of_utc_date: `"2026-04-01"`
+- row_count: `1551`
+- panel_date_count: `1551`
+- total_l1_rent_eth_sum: `78816.39651759109`
+- date_range: `{"max": "2026-03-31", "min": "2022-01-01"}`
 
 ## Checks
 
-### canonical_input_resolution
+### l1_decomposition_schema
 
-- Status: `blocked`
-- Plausible causes: `["The processed manifests exist but their referenced CSV outputs were not materialized in this worktree.", "The ETL run that produced the manifests may have been executed outside this sandbox and only the manifests were committed."]`
-- Next step: `Restore the manifest-backed processed CSVs locally or rerun the producing ETL for 2026-04-01 before re-running this validator.`
-- Details: `{"missing_artifacts": [{"dataset": "vendor_panel", "expected_artifact_path": "data/processed/growthepie/vendor_daily_rollup_panel.csv", "manifest_path": "data/processed_manifest/vendor_daily_rollup_panel_2026-04-01.json", "reason": "processed artifact is absent in the worktree"}, {"dataset": "l1_decomposition", "expected_artifact_path": "data/processed/l1_rent/daily_l1_rent_decomposition.csv", "manifest_path": "data/processed_manifest/daily_l1_rent_decomposition_2026-04-01.json", "reason": "processed artifact is absent in the worktree"}, {"dataset": "authoritative_panel", "expected_artifact_path": "data/processed/panels/daily_rollup_panel.csv", "manifest_path": "data/processed_manifest/daily_rollup_panel_2026-04-01.json", "reason": "processed artifact is absent in the worktree"}], "missing_manifests": [], "next_step": "Restore the manifest-backed processed CSVs locally or rerun the producing ETL for 2026-04-01 before re-running this validator.", "requested_as_of_utc_date": "2026-04-01"}`
+- Status: `pass`
+- Details: `{"missing_columns": [], "present_columns": ["date_utc", "l1_base_fee_burn_eth", "l1_blob_fee_burn_eth", "l1_priority_fee_eth", "l1_total_rent_eth", "l1_blob_gas_used", "l1_calldata_gas_used", "l1_blob_base_fee_gwei"], "required_columns": ["date_utc", "l1_base_fee_burn_eth", "l1_blob_fee_burn_eth", "l1_priority_fee_eth", "l1_total_rent_eth"]}`
+
+### l1_decomposition_primary_key_uniqueness
+
+- Status: `pass`
+- Details: `{"duplicate_row_count": 0, "key_columns": ["date_utc"], "row_count": 1551, "sample_duplicates": []}`
+
+### l1_decomposition_required_non_null
+
+- Status: `pass`
+- Details: `{"null_counts": {"date_utc": 0, "l1_base_fee_burn_eth": 0, "l1_blob_fee_burn_eth": 0, "l1_priority_fee_eth": 0, "l1_total_rent_eth": 0}, "violating_columns": {}}`
+
+### l1_total_rent_identity
+
+- Status: `pass`
+- Details: `{"max_abs_difference_eth": "0", "row_count": 1551, "violating_rows": []}`
+
+### decomposition_covers_panel_dates
+
+- Status: `pass`
+- Details: `{"decomposition_date_count": 1551, "missing_panel_dates": [], "panel_date_count": 1551}`
 
 ## Provenance
 
+- vendor_panel: `{"as_of_utc_date": "2026-04-01", "dataset": "vendor_panel", "manifest_path": "data/processed_manifest/vendor_daily_rollup_panel_2026-04-01.json", "path": "data/processed/growthepie/vendor_daily_rollup_panel.csv"}`
+- l1_decomposition: `{"as_of_utc_date": "2026-04-01", "dataset": "l1_decomposition", "manifest_path": "data/processed_manifest/daily_l1_rent_decomposition_2026-04-01.json", "path": "data/processed/l1_rent/daily_l1_rent_decomposition.csv"}`
+- authoritative_panel: `{"as_of_utc_date": "2026-04-01", "dataset": "authoritative_panel", "manifest_path": "data/processed_manifest/daily_rollup_panel_2026-04-01.json", "path": "data/processed/panels/daily_rollup_panel.csv"}`
+- command_hints: `{"canonical": "python src/validation/validate_str_pipeline.py --as-of YYYY-MM-DD", "sample": "python src/validation/validate_str_pipeline.py --sample"}`
