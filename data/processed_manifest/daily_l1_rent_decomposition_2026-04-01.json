@@ -1,0 +1,23 @@
+{
+  "as_of_utc_date": "2026-04-01",
+  "inputs": [
+    "data/raw_manifest/l1_rent_2026-04-01.json"
+  ],
+  "outputs": [
+    {
+      "bytes": 174905,
+      "path": "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
+      "sha256": "782cb966171b2cbdc50d30ca447058e51e01664d8f07b2a30b3e4bc9f133c180"
+    },
+    {
+      "bytes": 551,
+      "path": "data/samples/l1_rent/daily_l1_rent_decomposition_sample.csv",
+      "sha256": "e63b71eb829f63c050cef40b252e1d884ed51afea4110ec4330f1d4c740468bd"
+    }
+  ],
+  "transform": {
+    "command": "python src/etl/build_l1_rent_panel.py --run-date 2026-04-01 --retries 2 --timeout-seconds 20.0 --blockscout-page-size 2000 --blobscan-page-size 1000",
+    "git_sha": "a981922ba8ccba9c03953b4980b8debb2c6cdd81",
+    "script_path": "src/etl/build_l1_rent_panel.py"
+  }
+}

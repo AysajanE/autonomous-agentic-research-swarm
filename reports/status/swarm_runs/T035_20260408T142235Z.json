@@ -1,0 +1,83 @@
+{
+  "artifacts": {
+    "missing_manifests": [],
+    "missing_outputs": [],
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "run_manifest_path": "reports/status/swarm_runs/T035_20260408T142235Z.json"
+  },
+  "commands": {
+    "executor": [],
+    "executor_log_path": null,
+    "gates": [
+      "make gate"
+    ]
+  },
+  "executor": {
+    "allow_network": true,
+    "error": "executor_skipped",
+    "model": null,
+    "repair_context": null,
+    "returncode": null,
+    "role": "Worker",
+    "runner": "local_swarm",
+    "sandbox": "workspace-write",
+    "tool": "manual"
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "output_tail": "python scripts/quality_gates.py\n[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 2, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 3, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 13, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 7, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n",
+      "returncode": 0
+    }
+  ],
+  "generated_at_utc": "2026-04-08T14:22:39Z",
+  "ownership": {
+    "changed_paths": [
+      ".orchestrator/active/T035_onchain_l1_rent_etl_and_decomposition.md",
+      ".orchestrator/backlog/T035_onchain_l1_rent_etl_and_decomposition.md",
+      ".orchestrator/handoff/H035_scroll_pre_dencun_attribution_blocker.md",
+      "data/processed_manifest/daily_l1_rent_decomposition_2026-04-01.json",
+      "data/processed_manifest/daily_rollup_panel_2026-04-01.json",
+      "data/raw_manifest/l1_rent_2026-04-01.json",
+      "data/samples/l1_rent/daily_l1_rent_decomposition_sample.csv",
+      "data/samples/panels/daily_rollup_panel_sample.csv",
+      "reports/status/swarm_runs/T035_20260401T135106Z.json",
+      "reports/status/swarm_runs/T035_20260401T152122Z.json",
+      "reports/status/swarm_runs/T035_20260401T155307Z.json",
+      "reports/status/swarm_runs/T035_20260401T163917Z.json",
+      "reports/status/swarm_runs/T035_20260402T112730Z.json",
+      "reports/status/swarm_runs/T035_20260403T145543Z.json",
+      "src/etl/build_l1_rent_panel.py"
+    ],
+    "ok": true,
+    "violations": []
+  },
+  "repo": {
+    "base_branch": "main",
+    "branch": "T035_l1_rent_panel",
+    "git_sha": "32fce6ffdb6430c5409ff0b778daffd50b372ad7",
+    "remote": "origin"
+  },
+  "result": {
+    "blocked_reasons": [],
+    "status": "ok"
+  },
+  "run_id": "T035_20260408T142235Z",
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "task": {
+    "dependencies": [
+      "T025",
+      "T030"
+    ],
+    "integration_ready_dependencies": [],
+    "role": "Worker",
+    "state_after": "ready_for_review",
+    "state_before": "active",
+    "task_id": "T035",
+    "task_kind": "etl",
+    "task_path": ".orchestrator/active/T035_onchain_l1_rent_etl_and_decomposition.md",
+    "title": "On-chain L1 rent extraction, decomposition, and canonical panel build",
+    "workstream": "W2"
+  }
+}
