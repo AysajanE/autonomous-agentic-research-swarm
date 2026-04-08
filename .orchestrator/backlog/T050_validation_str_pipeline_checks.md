@@ -96,10 +96,9 @@ Before any release analysis or writing, the repo needs deterministic checks on t
 - `python src/validation/validate_str_pipeline.py --as-of YYYY-MM-DD`
 
 ## Status
-
-- State: backlog
-- Last updated: 2026-03-29
-
+- State: active
+- Last updated: 2026-04-08
 ## Notes / Decisions
 
 - 2026-03-29: v1 rewrite expands T050 from vendor-only checks to the full canonical STR validation bundle.
+- 2026-04-08: Claimed by local swarm runtime on branch T050_validation_str_pipeline_checks.
