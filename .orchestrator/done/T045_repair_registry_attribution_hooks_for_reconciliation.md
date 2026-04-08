@@ -79,7 +79,7 @@ T050 is blocked on a real upstream coverage mismatch. BigQuery checks over the c
 - `make gate`
 
 ## Status
-- State: ready_for_review
+- State: done
 - Last updated: 2026-04-08
 ## Notes / Decisions
 
@@ -95,3 +95,4 @@ T050 is blocked on a real upstream coverage mismatch. BigQuery checks over the c
 - 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T045_20260408T164746Z.json
 - 2026-04-08: Judge approved; review log: reports/status/reviews/T045_20260408T164956Z.json
 - 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T045_20260408T164811Z.json
+- 2026-04-08: Operator corrected the authoritative state back to `done` after a stray post-Judge rerun rewrote the task file to `ready_for_review`. Review approval remains authoritative at `reports/status/reviews/T045_20260408T164956Z.json`.
