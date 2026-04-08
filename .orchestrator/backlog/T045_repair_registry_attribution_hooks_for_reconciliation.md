@@ -79,9 +79,15 @@ T050 is blocked on a real upstream coverage mismatch. BigQuery checks over the c
 - `make gate`
 
 ## Status
-- State: active
+- State: blocked
 - Last updated: 2026-04-08
 ## Notes / Decisions
 
 - 2026-04-08: Added as the first upstream repair task for the T050 blocker. Current evidence shows the dominant vendor-only canonical gaps coincide with stale registry sender hooks, not a validator bug.
 - 2026-04-08: Claimed by local swarm runtime on branch main.
+- 2026-04-08: Re-audited `registry/rollup_registry_v1.csv` against preserved sender coverage in `data/raw_manifest/l1_rent_2026-04-01.json`, L2BEAT tracked-transaction metadata, live `eth.blockscout.com` first-seen probes, and live `api.blobscan.com` rollup-filter windows. Updated `linea`, `zksync_era`, and `taiko` with evidence-backed historical sender hooks; kept `arbitrum` sender identities unchanged and turned the unresolved pre-2023-01-04 gap into an explicit registry caveat.
+- 2026-04-08: Files changed: `registry/rollup_registry_v1.csv`, `registry/CHANGELOG.md`. Files created: `.orchestrator/handoff/H045_registry_reconciliation_attribution_hooks.md`.
+- 2026-04-08: Reproduction commands: `python - <<'PY'` over `data/raw_manifest/l1_rent_2026-04-01.json` to enumerate preserved Blockscout sender trees by rollup; `python - <<'PY'` importing `src.etl.build_l1_rent_panel.extract_l2beat_tracked_transactions` to resolve tracked posting contracts/selectors from L2BEAT project pages; `curl -s 'https://eth.blockscout.com/api?...' | jq ...` for sender first-seen checks; `curl -s 'https://api.blobscan.com/transactions?...' | jq ...` for rollup-filter sender samples; `make gate`.
+- 2026-04-08: Validation: `make gate` passed after the final registry, changelog, task-note, and handoff edits.
+- 2026-04-08: Assumptions and limitations: local `bq` CLI is installed but had no active authenticated account, so BigQuery validation was unavailable in this worker session; `.orchestrator/handoff/H050_canonical_validation_reconciliation_blocker.md` referenced in Inputs was not present, and task naming appears to have drifted to `.orchestrator/backlog/T050_validation_str_pipeline_checks.md`; residual registry caveats remain for `arbitrum` pre-2023-01-04 and `linea` coverage before 2024-02-13 because the available evidence was incomplete or contradictory there. Downstream note: `.orchestrator/handoff/H045_registry_reconciliation_attribution_hooks.md` records the repair scope for T050, but Operator still needs to record the durable run manifest before review.
+- 2026-04-08: @human Runtime blocked: path_ownership_violation. Run manifest: reports/status/swarm_runs/T045_20260408T161648Z.json. ownership=.orchestrator/backlog/T046_rebuild_canonical_panel_after_attribution_repair.md[staged]=orchestrator_write_forbidden; .orchestrator/backlog/T047_make_vendor_profit_contract_compatible.md[staged]=orchestrator_write_forbidden

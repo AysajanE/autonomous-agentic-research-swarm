@@ -1,0 +1,97 @@
+{
+  "artifacts": {
+    "missing_manifests": [],
+    "missing_outputs": [],
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "run_manifest_path": "reports/status/swarm_runs/T045_20260408T161648Z.json"
+  },
+  "commands": {
+    "executor": [
+      "/Users/aeziz-local/.nvm/versions/node/v20.19.0/bin/codex",
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "-C",
+      "/Users/aeziz-local/Research/autonomous-agentic-research-swarm",
+      "# Prompt Template \u2014 Worker\n\nRole: **Worker**\n\nYou execute exactly one assigned task in an isolated branch/worktree.\n\n## Instructions\n\n1. Read and follow `AGENTS.md` and any nested `AGENTS.md` under your working directory.\n2. Open the assigned task file and obey its `allowed_paths`, `disallowed_paths`, declared outputs, gates, and stop conditions.\n3. Do not coordinate with other agents through chat. Use:\n   - the task file `## Notes / Decisions`\n   - a handoff note under `.orchestrator/handoff/` when downstream tasks need durable guidance\n4. Update only the task file sections:\n   - `## Status`\n   - `## Notes / Decisions`\n   Do not move task files between lifecycle folders.\n5. You may set `State: integration_ready` or `State: ready_for_review` when the task contract permits it. You may never set `State: done`.\n6. Do not edit `reports/catalog.yaml`, `reports/paper/build/`, or release manifests. Those are Operator-owned surfaces.\n7. If the run is not using the local swarm runtime, hand the exact commands, outputs, and assumptions to Operator so a durable run manifest can be recorded before review.\n\n## Completion checklist\n\n- Run the declared gates and task-specific commands.\n- Ensure declared outputs exist at the declared paths.\n- Record reproduction commands, assumptions, and limitations in the task notes.\n- Write a handoff note if downstream work depends on your output.\n\n## Runtime context (auto-filled)\n\n- Repo root: `/Users/aeziz-local/Research/autonomous-agentic-research-swarm`\n- Task path: `.orchestrator/backlog/T045_repair_registry_attribution_hooks_for_reconciliation.md`\n- Task id: `T045`\n- Workstream: `W3`\n- Task kind: `registry`\n- Network enabled: `true`\n- Repair context: `T050 root-cause evidence: BigQuery checks show current registry sender sets are stale/incomplete for dominant vendor-only gaps. Arbitrum current sender set has no Ethereum txs before 2023-01-04; Linea none before 2024-10-18; ZKsync Era none before 2026-01-31; Taiko none on 2025-11-29..2025-11-30. Repair registry attribution hooks with evidence-backed historical sender coverage only; do not change protocol or validator semantics.`\n\n### Allowed paths\n\n- registry/rollup_registry_v1.csv\n- registry/CHANGELOG.md\n\n### Disallowed paths\n\n- docs/protocol.md\n- contracts/\n- src/\n- data/\n\n### Declared outputs\n\n- registry/rollup_registry_v1.csv\n- registry/CHANGELOG.md\n\n### Gates\n\n- make gate\n\n### Stop conditions\n\n- Need to reinterpret rollup inclusion or attribution criteria\n- Evidence for historical sender hooks is unavailable or contradictory\n"
+    ],
+    "executor_log_path": "data/tmp/swarm_logs/T045_20260408T161648Z_executor.log",
+    "gates": [
+      "make gate"
+    ]
+  },
+  "executor": {
+    "allow_network": true,
+    "error": null,
+    "model": null,
+    "repair_context": "T050 root-cause evidence: BigQuery checks show current registry sender sets are stale/incomplete for dominant vendor-only gaps. Arbitrum current sender set has no Ethereum txs before 2023-01-04; Linea none before 2024-10-18; ZKsync Era none before 2026-01-31; Taiko none on 2025-11-29..2025-11-30. Repair registry attribution hooks with evidence-backed historical sender coverage only; do not change protocol or validator semantics.",
+    "returncode": 0,
+    "role": "Worker",
+    "runner": "local_swarm",
+    "sandbox": "workspace-write",
+    "tool": "codex"
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "output_tail": "python scripts/quality_gates.py\n[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 2, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 3, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 16, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 10, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n",
+      "returncode": 0
+    }
+  ],
+  "generated_at_utc": "2026-04-08T16:42:04Z",
+  "ownership": {
+    "changed_paths": [
+      ".orchestrator/backlog/T045_repair_registry_attribution_hooks_for_reconciliation.md",
+      ".orchestrator/backlog/T046_rebuild_canonical_panel_after_attribution_repair.md",
+      ".orchestrator/backlog/T047_make_vendor_profit_contract_compatible.md",
+      ".orchestrator/handoff/H045_registry_reconciliation_attribution_hooks.md",
+      "registry/CHANGELOG.md",
+      "registry/rollup_registry_v1.csv"
+    ],
+    "ok": false,
+    "violations": [
+      {
+        "path": ".orchestrator/backlog/T046_rebuild_canonical_panel_after_attribution_repair.md",
+        "reason": "orchestrator_write_forbidden",
+        "sources": "staged"
+      },
+      {
+        "path": ".orchestrator/backlog/T047_make_vendor_profit_contract_compatible.md",
+        "reason": "orchestrator_write_forbidden",
+        "sources": "staged"
+      }
+    ]
+  },
+  "repo": {
+    "base_branch": "main",
+    "branch": "main",
+    "git_sha": "2702a9755216c84055528704ef97b88bde00ad19",
+    "remote": "origin"
+  },
+  "result": {
+    "blocked_reasons": [
+      "path_ownership_violation"
+    ],
+    "status": "blocked"
+  },
+  "run_id": "T045_20260408T161648Z",
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "task": {
+    "dependencies": [
+      "T025",
+      "T050"
+    ],
+    "integration_ready_dependencies": [],
+    "role": "Worker",
+    "state_after": "blocked",
+    "state_before": "backlog",
+    "task_id": "T045",
+    "task_kind": "registry",
+    "task_path": ".orchestrator/backlog/T045_repair_registry_attribution_hooks_for_reconciliation.md",
+    "title": "Repair registry attribution hooks for canonical-vendor reconciliation gaps",
+    "workstream": "W3"
+  }
+}
