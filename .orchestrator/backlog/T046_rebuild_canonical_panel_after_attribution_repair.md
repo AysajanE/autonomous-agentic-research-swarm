@@ -92,9 +92,9 @@ T035 completed, but T050 exposed that the canonical panel still omits vendor-cov
 - `python src/etl/build_l1_rent_panel.py --run-date YYYY-MM-DD`
 
 ## Status
-- State: backlog
+- State: active
 - Last updated: 2026-04-08
-
 ## Notes / Decisions
 
 - 2026-04-08: Added as the canonical rebuild step after T045. This task should not start until the registry attribution-hook repair is complete.
+- 2026-04-08: Claimed by local swarm runtime on branch T046_rebuild_canonical_panel_after_attribution_repair.
