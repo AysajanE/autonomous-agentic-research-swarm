@@ -92,7 +92,7 @@ T035 completed, but T050 exposed that the canonical panel still omits vendor-cov
 - `python src/etl/build_l1_rent_panel.py --run-date YYYY-MM-DD`
 
 ## Status
-- State: ready_for_review
+- State: active
 - Last updated: 2026-04-08
 ## Notes / Decisions
 
@@ -111,4 +111,4 @@ T035 completed, but T050 exposed that the canonical panel still omits vendor-cov
 - 2026-04-08: Patched `src/etl/build_l1_rent_panel.py` to make seeded cache reuse compatible with the preserved T035 snapshot and the repaired registry inputs. Changes in this worker pass: `parse_datetime(...)` now normalizes legacy offset-naive cached timestamps to UTC; Blockscout exact-window continuations can reuse a complete enclosing cached window instead of forcing BigQuery/live fallback; cached Blockscout windows now continue with their stored page size instead of switching mid-window to the user-requested page size; and page-1 Blockscout misses can now use the exact-window BigQuery backfill path even when there is no overlapping cache yet.
 - 2026-04-08: This sandbox has readable Google Cloud credentials but `bq` cannot write to `~/.config/gcloud`. Mirroring that config into `/tmp/codex-gcloud-auth/` restored authenticated BigQuery access (`CLOUDSDK_CONFIG=/tmp/codex-gcloud-auth bq --quiet query --use_legacy_sql=false 'SELECT 1 AS x'` succeeded), and the live rerun now uses `CLOUDSDK_CONFIG=/tmp/codex-gcloud-auth python src/etl/build_l1_rent_panel.py --run-date 2026-04-08 --blockscout-page-size 250`.
 - 2026-04-08: Current runtime state at turn end: still `active`, not blocked. The seeded rerun has progressed past the initial Arbitrum/Starknet/Optimism cache-compatibility failures, is backfilling previously uncached exact Blockscout windows via BigQuery (including the new `2026-04-01..2026-04-07` tail windows for Optimism/ZKsync/Linea), and has moved into later rollups plus Blobscan reuse/fallback handling. Final outputs/manifests for `2026-04-08` have not been written yet, `make gate` has not been rerun on the final artifacts, and the task should remain `active` until the live rerun finishes and outputs can be validated.
-- 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T046_20260408T201426Z.json
+- 2026-04-08: The prior `ready_for_review` promotion and run manifest `reports/status/swarm_runs/T046_20260408T201426Z.json` were false positives from the old swarm runtime, which auto-promoted `active` tasks and matched older manifest surfaces too loosely. The worker itself had explicitly recorded that T046 was still active and not complete. Operator reverted the task to `active`; rerun must finish and produce real `2026-04-08` raw/processed manifests before this task can move back to review.
