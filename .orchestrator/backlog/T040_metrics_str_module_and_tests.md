@@ -81,9 +81,18 @@ This task locks the reusable STR math against the canonical sample panel produce
 - `pytest tests/test_metrics_str.py`
 
 ## Status
-- State: active
+- State: ready_for_review
 - Last updated: 2026-04-08
 ## Notes / Decisions
 
 - 2026-03-29: v1 rewrite retargets T040 to the canonical panel sample from T035 instead of the vendor-only sample from the old vertical slice.
 - 2026-04-08: Claimed by local swarm runtime on branch T040_metrics_str_module_and_tests.
+- 2026-04-08: Added `src/analysis/metrics_str.py` with `compute_rollup_str(panel)` and `compute_ecosystem_str(panel)`. Both helpers require `date_utc`, `rollup_id`, `l2_fees_eth`, and `rent_paid_eth`; rows missing either metric column are omitted before aggregation; zero denominators return `NaN` instead of `0`.
+- 2026-04-08: Added `tests/test_metrics_str.py` covering canonical sample-panel rollup/ecosystem values, row-omission missingness behavior, and denominator-zero days.
+- 2026-04-08: Reproduction commands run:
+  - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/test_metrics_str.py` → passed (`4 passed`)
+  - `make gate` → passed
+  - `make test` → passed (`35 tests`)
+- 2026-04-08: Files changed: `src/analysis/metrics_str.py`, `tests/test_metrics_str.py`.
+- 2026-04-08: Limitation/process note: plain `pytest tests/test_metrics_str.py` on this workstation fails before collection because auto-loaded third-party `web3` plugins crash in the host environment. Repo code is green under `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest ...` and the declared `make test` path. This run was not recorded by the local swarm runtime, so Operator still needs to capture a durable run manifest before review.
+- 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T040_20260408T150755Z.json
