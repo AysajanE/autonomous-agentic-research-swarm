@@ -1829,7 +1829,10 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     blocked_reasons = _dedupe_preserve(blocked_reasons)
     if blocked_reasons:
         state_after = "blocked"
-    elif task_state_after_executor in {"integration_ready", "ready_for_review"}:
+    elif task_state_after_executor in {"active", "integration_ready", "ready_for_review"}:
+        # Respect the task state the worker left behind. The runtime should not
+        # silently promote an active task to ready_for_review just because the
+        # default final_state is reviewable.
         state_after = task_state_after_executor
     else:
         state_after = args.final_state
@@ -1905,6 +1908,11 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         note = (
             f"Runtime passed: outputs, gates, manifests, and run manifest are present. "
             f"Ready for Judge review. Run manifest: {run_manifest_relpath}"
+        )
+    elif state_after == "active":
+        note = (
+            f"Runtime completed without promotion; preserving worker state active. "
+            f"Run manifest: {run_manifest_relpath}"
         )
     else:
         details: list[str] = []
