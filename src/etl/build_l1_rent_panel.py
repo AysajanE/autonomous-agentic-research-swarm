@@ -220,9 +220,12 @@ def parse_date(value: str) -> date:
 
 def parse_datetime(value: str) -> datetime:
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise SystemExit(f"invalid timestamp in source response: {value!r}") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def repo_root() -> Path:
@@ -379,6 +382,122 @@ def overlapping_blockscout_cache_exists(
             continue
         return True
     return False
+
+
+def maybe_reuse_blockscout_window_from_overlapping_cache(
+    *,
+    page_dir: Path,
+    rollup_id: str,
+    address: str,
+    window_start_dt: datetime,
+    window_end_exclusive_dt: datetime,
+    window_id: str,
+    request_log: list[dict[str, Any]],
+    address_role: str,
+    method_selectors: tuple[str, ...] | None,
+    scope_id: str | None,
+) -> list[BlockscoutTx] | None:
+    if not page_dir.exists():
+        return None
+
+    groups: dict[tuple[datetime, datetime], list[tuple[int, Path]]] = {}
+    for candidate_path in sorted(page_dir.glob("*_page-*.json")):
+        if candidate_path.name.startswith(f"{window_id}_page-"):
+            continue
+        payload = read_json(candidate_path)
+        raw_start = payload.get("window_start_utc")
+        raw_end = payload.get("window_end_exclusive_utc")
+        if not isinstance(raw_start, str) or not isinstance(raw_end, str):
+            continue
+        try:
+            candidate_start_dt = parse_datetime(raw_start)
+            candidate_end_exclusive_dt = parse_datetime(raw_end)
+        except SystemExit:
+            continue
+        if candidate_start_dt > window_start_dt or candidate_end_exclusive_dt < window_end_exclusive_dt:
+            continue
+        try:
+            page_number = int(candidate_path.stem.rsplit("_page-", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        groups.setdefault((candidate_start_dt, candidate_end_exclusive_dt), []).append((page_number, candidate_path))
+
+    candidate_groups = sorted(
+        groups.items(),
+        key=lambda item: (
+            (item[0][1] - item[0][0]).total_seconds(),
+            item[0][0],
+        ),
+    )
+    for (candidate_start_dt, candidate_end_exclusive_dt), page_entries in candidate_groups:
+        sorted_entries = sorted(page_entries, key=lambda entry: entry[0])
+        expected_page = 1
+        stored_page_size: int | None = None
+        stored_result_count: int | None = None
+        candidate_rows: list[BlockscoutTx] = []
+        reusable = True
+        for page_number, candidate_path in sorted_entries:
+            if page_number != expected_page:
+                reusable = False
+                break
+            rows, page_size, result_count = load_existing_blockscout_page(
+                candidate_path,
+                rollup_id=rollup_id,
+                address=address,
+            )
+            if stored_page_size is None:
+                stored_page_size = page_size
+            elif page_size != stored_page_size:
+                reusable = False
+                break
+            request_log.append(
+                {
+                    "source": "blockscout_txlist",
+                    "rollup_id": rollup_id,
+                    "address": address,
+                    "filter_by": address_role,
+                    "method_selectors": list(method_selectors) if method_selectors else None,
+                    "scope_id": scope_id,
+                    "window_start_utc": candidate_start_dt.isoformat(),
+                    "window_end_exclusive_utc": candidate_end_exclusive_dt.isoformat(),
+                    "page": page_number,
+                    "page_size": stored_page_size,
+                    "relative_path": str(candidate_path.relative_to(repo_root())),
+                    "fetched_at_utc": None,
+                    "reused_existing": True,
+                    "reused_via": "overlapping_complete_window",
+                }
+            )
+            candidate_rows.extend(rows)
+            stored_result_count = result_count
+            expected_page += 1
+        if not reusable or stored_page_size is None or stored_result_count is None:
+            continue
+        if stored_result_count >= stored_page_size:
+            continue
+
+        filtered_rows: list[BlockscoutTx] = []
+        seen_hashes: set[str] = set()
+        for row in candidate_rows:
+            if row.timestamp_utc < window_start_dt or row.timestamp_utc >= window_end_exclusive_dt:
+                continue
+            if row.hash in seen_hashes:
+                continue
+            seen_hashes.add(row.hash)
+            filtered_rows.append(row)
+
+        logging.info(
+            "Reused %s Blockscout rows for %s/%s within %s..%s from enclosing cached window %s..%s",
+            len(filtered_rows),
+            rollup_id,
+            address,
+            window_start_dt.isoformat(),
+            window_end_exclusive_dt.isoformat(),
+            candidate_start_dt.isoformat(),
+            candidate_end_exclusive_dt.isoformat(),
+        )
+        return filtered_rows
+    return None
 
 
 def backfill_blockscout_window_from_bigquery(
@@ -2500,17 +2619,53 @@ def fetch_blockscout_tx_window(
             page += 1
             continue
 
-        if (
-            page == 1
-            and overlapping_blockscout_cache_exists(
+        has_overlapping_cache = page == 1 and overlapping_blockscout_cache_exists(
+            page_dir=page_dir,
+            window_start_dt=window_start_dt,
+            window_end_exclusive_dt=window_end_exclusive_dt,
+            window_id=window_id,
+        )
+        if has_overlapping_cache:
+            reused_rows = maybe_reuse_blockscout_window_from_overlapping_cache(
                 page_dir=page_dir,
+                rollup_id=rollup_id,
+                address=address,
                 window_start_dt=window_start_dt,
                 window_end_exclusive_dt=window_end_exclusive_dt,
                 window_id=window_id,
+                request_log=request_log,
+                address_role=address_role,
+                method_selectors=method_selectors,
+                scope_id=scope_id,
             )
-        ):
+            if reused_rows is not None:
+                return reused_rows
             logging.info(
                 "Attempting exact-window BigQuery backfill for %s/%s within %s..%s because overlapping Blockscout cache exists but %s is missing",
+                rollup_id,
+                address,
+                window_start_dt.isoformat(),
+                window_end_exclusive_dt.isoformat(),
+                page_path.name,
+            )
+            bigquery_rows = backfill_blockscout_window_from_bigquery(
+                snapshot_dir=snapshot_dir,
+                rollup_id=rollup_id,
+                address=address,
+                window_start_dt=window_start_dt,
+                window_end_exclusive_dt=window_end_exclusive_dt,
+                page_size=page_size,
+                request_log=request_log,
+                address_role=address_role,
+                method_selectors=method_selectors,
+                path_prefix=path_prefix,
+                scope_id=scope_id,
+            )
+            if bigquery_rows is not None:
+                return bigquery_rows
+        elif page == 1:
+            logging.info(
+                "Attempting exact-window BigQuery backfill for %s/%s within %s..%s because %s is uncached",
                 rollup_id,
                 address,
                 window_start_dt.isoformat(),
@@ -2540,14 +2695,15 @@ def fetch_blockscout_tx_window(
                     f"for {rollup_id}/{address}"
                 )
             continuation_start_dt = all_rows[-1].timestamp_utc
+            resume_page_size = cached_page_size
             logging.info(
-                "Resuming Blockscout tx window for %s/%s from %s with page size %s after cached page size %s "
+                "Resuming Blockscout tx window for %s/%s from %s with cached page size %s after requested page size %s "
                 "within %s..%s",
                 rollup_id,
                 address,
                 continuation_start_dt.isoformat(),
+                resume_page_size,
                 page_size,
-                cached_page_size,
                 window_start_dt.isoformat(),
                 window_end_exclusive_dt.isoformat(),
             )
@@ -2557,7 +2713,7 @@ def fetch_blockscout_tx_window(
                 address=address,
                 start_day=continuation_start_dt.date(),
                 end_day_exclusive=window_end_exclusive_dt.date(),
-                page_size=page_size,
+                page_size=resume_page_size,
                 retries=retries,
                 timeout_seconds=timeout_seconds,
                 request_log=request_log,

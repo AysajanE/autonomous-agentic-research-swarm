@@ -1,0 +1,86 @@
+{
+  "artifacts": {
+    "missing_manifests": [],
+    "missing_outputs": [],
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "run_manifest_path": "reports/status/swarm_runs/T046_20260408T201426Z.json"
+  },
+  "commands": {
+    "executor": [
+      "/Users/aeziz-local/.nvm/versions/node/v20.19.0/bin/codex",
+      "-a",
+      "never",
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "-C",
+      "/Users/aeziz-local/Research/wt-T046",
+      "# Prompt Template \u2014 Worker\n\nRole: **Worker**\n\nYou execute exactly one assigned task in an isolated branch/worktree.\n\n## Instructions\n\n1. Read and follow `AGENTS.md` and any nested `AGENTS.md` under your working directory.\n2. Open the assigned task file and obey its `allowed_paths`, `disallowed_paths`, declared outputs, gates, and stop conditions.\n3. Do not coordinate with other agents through chat. Use:\n   - the task file `## Notes / Decisions`\n   - a handoff note under `.orchestrator/handoff/` when downstream tasks need durable guidance\n4. Update only the task file sections:\n   - `## Status`\n   - `## Notes / Decisions`\n   Do not move task files between lifecycle folders.\n5. You may set `State: integration_ready` or `State: ready_for_review` when the task contract permits it. You may never set `State: done`.\n6. Do not edit `reports/catalog.yaml`, `reports/paper/build/`, or release manifests. Those are Operator-owned surfaces.\n7. If the run is not using the local swarm runtime, hand the exact commands, outputs, and assumptions to Operator so a durable run manifest can be recorded before review.\n\n## Completion checklist\n\n- Run the declared gates and task-specific commands.\n- Ensure declared outputs exist at the declared paths.\n- Record reproduction commands, assumptions, and limitations in the task notes.\n- Write a handoff note if downstream work depends on your output.\n\n## Runtime context (auto-filled)\n\n- Repo root: `/Users/aeziz-local/Research/wt-T046`\n- Task path: `.orchestrator/active/T046_rebuild_canonical_panel_after_attribution_repair.md`\n- Task id: `T046`\n- Workstream: `W2`\n- Task kind: `etl`\n- Network enabled: `true`\n- Repair context: ``\n\n### Allowed paths\n\n- src/etl/build_l1_rent_panel.py\n- data/raw/l1_rent/\n- data/raw_manifest/l1_rent_\n- data/processed/l1_rent/\n- data/processed/panels/\n- data/processed_manifest/daily_\n- data/samples/l1_rent/\n- data/samples/panels/\n\n### Disallowed paths\n\n- docs/protocol.md\n- contracts/\n- registry/\n\n### Declared outputs\n\n- src/etl/build_l1_rent_panel.py\n- data/raw/l1_rent/<YYYY-MM-DD>/...\n- data/raw_manifest/l1_rent_<YYYY-MM-DD>.json\n- data/processed/l1_rent/daily_l1_rent_decomposition.csv\n- data/processed/panels/daily_rollup_panel.csv\n- data/processed_manifest/daily_l1_rent_decomposition_<YYYY-MM-DD>.json\n- data/processed_manifest/daily_rollup_panel_<YYYY-MM-DD>.json\n- data/samples/l1_rent/daily_l1_rent_decomposition_sample.csv\n- data/samples/panels/daily_rollup_panel_sample.csv\n\n### Gates\n\n- make gate\n\n### Stop conditions\n\n- Need protocol or contract changes\n- Upstream attribution evidence remains missing after T045\n- Source instability or breaking API changes\n"
+    ],
+    "executor_log_path": "data/tmp/swarm_logs/T046_20260408T201426Z_executor.log",
+    "gates": [
+      "make gate"
+    ]
+  },
+  "executor": {
+    "allow_network": true,
+    "error": null,
+    "model": null,
+    "repair_context": null,
+    "returncode": 0,
+    "role": "Worker",
+    "runner": "local_swarm",
+    "sandbox": "workspace-write",
+    "tool": "codex"
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "output_tail": "python scripts/quality_gates.py\n[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 3, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 4, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 21, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 12, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n",
+      "returncode": 0
+    }
+  ],
+  "generated_at_utc": "2026-04-08T20:59:09Z",
+  "ownership": {
+    "changed_paths": [
+      ".orchestrator/active/T046_rebuild_canonical_panel_after_attribution_repair.md",
+      ".orchestrator/backlog/T046_rebuild_canonical_panel_after_attribution_repair.md",
+      ".orchestrator/handoff/H046_canonical_rebuild_blocked_on_growthepie_inputs.md",
+      ".orchestrator/handoff/H046_canonical_rebuild_resume_state.md",
+      "reports/status/swarm_runs/T046_20260408T165337Z.json",
+      "src/etl/build_l1_rent_panel.py"
+    ],
+    "ok": true,
+    "violations": []
+  },
+  "repo": {
+    "base_branch": "main",
+    "branch": "T046_rebuild_canonical_panel_after_attribution_repair",
+    "git_sha": "81d9fcc81f481f58689a87769ca80f736e76f94d",
+    "remote": "origin"
+  },
+  "result": {
+    "blocked_reasons": [],
+    "status": "ok"
+  },
+  "run_id": "T046_20260408T201426Z",
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "task": {
+    "dependencies": [
+      "T035",
+      "T045"
+    ],
+    "integration_ready_dependencies": [],
+    "role": "Worker",
+    "state_after": "ready_for_review",
+    "state_before": "active",
+    "task_id": "T046",
+    "task_kind": "etl",
+    "task_path": ".orchestrator/active/T046_rebuild_canonical_panel_after_attribution_repair.md",
+    "title": "Rebuild canonical L1 rent outputs after attribution-hook repair",
+    "workstream": "W2"
+  }
+}
