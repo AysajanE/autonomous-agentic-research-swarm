@@ -1822,8 +1822,17 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     if manifest_failures:
         blocked_reasons.append("missing_required_manifests")
 
+    task_state_after_executor = load_task(task.path, contract).state
+    if task_state_after_executor == "blocked":
+        blocked_reasons.append("task_marked_blocked")
+
     blocked_reasons = _dedupe_preserve(blocked_reasons)
-    state_after = args.final_state if not blocked_reasons else "blocked"
+    if blocked_reasons:
+        state_after = "blocked"
+    elif task_state_after_executor in {"integration_ready", "ready_for_review"}:
+        state_after = task_state_after_executor
+    else:
+        state_after = args.final_state
 
     run_manifest_path = _next_json_artifact_path(contract.run_manifest_dir, task.task_id, run_timestamp)
     run_manifest_relpath = run_manifest_path.relative_to(repo).as_posix()
