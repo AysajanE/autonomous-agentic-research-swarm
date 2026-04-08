@@ -1,0 +1,27 @@
+{
+  "checks": {
+    "failures": [],
+    "gates_ok": true,
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "review_bundle_ok": true
+  },
+  "decision": {
+    "note": "Judge approved deterministic review.",
+    "outcome": "approve"
+  },
+  "generated_at_utc": "2026-04-08T19:16:06Z",
+  "review_id": "T047_20260408T191606Z",
+  "reviewer": {
+    "role": "Judge"
+  },
+  "schema_version": "research_swarm.judge_review_log.v1",
+  "task": {
+    "role": "Worker",
+    "run_manifest_path": "reports/status/swarm_runs/T047_20260408T170541Z.json",
+    "state_after": "done",
+    "state_before": "ready_for_review",
+    "task_id": "T047",
+    "task_path": ".orchestrator/backlog/T047_make_vendor_profit_contract_compatible.md"
+  }
+}

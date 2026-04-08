@@ -86,7 +86,7 @@ T050 confirmed that the current vendor `profit_eth` series is materially inconsi
 - `python src/etl/growthepie_fetch.py --run-date YYYY-MM-DD`
 
 ## Status
-- State: ready_for_review
+- State: done
 - Last updated: 2026-04-08
 ## Notes / Decisions
 
@@ -97,3 +97,4 @@ T050 confirmed that the current vendor `profit_eth` series is materially inconsi
 - 2026-04-08: The 2026-04-08 rerun emitted 12,420 panel rows and blanked 547 incoherent `profit_eth` values under the protocol tolerance (`starknet=508`, `zksync_era=29`, `linea=6`, `taiko=4`). The tracked sample remained present and `make gate` passed.
 - 2026-04-08: Assumption for downstream validation: blank `profit_eth` in the vendor panel means the upstream vendor profit failed the protocol identity and is intentionally treated as explicit absence, not as a fetch failure or missing panel row. State remains `active` until Operator records the required durable run manifest under `reports/status/swarm_runs/`.
 - 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T047_20260408T170541Z.json
+- 2026-04-08: Judge approved; review log: reports/status/reviews/T047_20260408T191606Z.json
