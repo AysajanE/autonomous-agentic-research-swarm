@@ -81,7 +81,7 @@ This task locks the reusable STR math against the canonical sample panel produce
 - `pytest tests/test_metrics_str.py`
 
 ## Status
-- State: ready_for_review
+- State: done
 - Last updated: 2026-04-08
 ## Notes / Decisions
 
@@ -96,3 +96,4 @@ This task locks the reusable STR math against the canonical sample panel produce
 - 2026-04-08: Files changed: `src/analysis/metrics_str.py`, `tests/test_metrics_str.py`.
 - 2026-04-08: Limitation/process note: plain `pytest tests/test_metrics_str.py` on this workstation fails before collection because auto-loaded third-party `web3` plugins crash in the host environment. Repo code is green under `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest ...` and the declared `make test` path. This run was not recorded by the local swarm runtime, so Operator still needs to capture a durable run manifest before review.
 - 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T040_20260408T150755Z.json
+- 2026-04-08: Judge approved; review log: reports/status/reviews/T040_20260408T151504Z.json
