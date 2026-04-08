@@ -81,10 +81,9 @@ This task locks the reusable STR math against the canonical sample panel produce
 - `pytest tests/test_metrics_str.py`
 
 ## Status
-
-- State: backlog
-- Last updated: 2026-03-29
-
+- State: active
+- Last updated: 2026-04-08
 ## Notes / Decisions
 
 - 2026-03-29: v1 rewrite retargets T040 to the canonical panel sample from T035 instead of the vendor-only sample from the old vertical slice.
+- 2026-04-08: Claimed by local swarm runtime on branch T040_metrics_str_module_and_tests.
