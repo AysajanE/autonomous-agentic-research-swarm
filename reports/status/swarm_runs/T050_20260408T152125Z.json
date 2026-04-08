@@ -1,0 +1,86 @@
+{
+  "artifacts": {
+    "missing_manifests": [],
+    "missing_outputs": [],
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "run_manifest_path": "reports/status/swarm_runs/T050_20260408T152125Z.json"
+  },
+  "commands": {
+    "executor": [
+      "/Users/aeziz-local/.nvm/versions/node/v20.19.0/bin/codex",
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "-C",
+      "/Users/aeziz-local/Research/wt-T050",
+      "# Prompt Template \u2014 Worker\n\nRole: **Worker**\n\nYou execute exactly one assigned task in an isolated branch/worktree.\n\n## Instructions\n\n1. Read and follow `AGENTS.md` and any nested `AGENTS.md` under your working directory.\n2. Open the assigned task file and obey its `allowed_paths`, `disallowed_paths`, declared outputs, gates, and stop conditions.\n3. Do not coordinate with other agents through chat. Use:\n   - the task file `## Notes / Decisions`\n   - a handoff note under `.orchestrator/handoff/` when downstream tasks need durable guidance\n4. Update only the task file sections:\n   - `## Status`\n   - `## Notes / Decisions`\n   Do not move task files between lifecycle folders.\n5. You may set `State: integration_ready` or `State: ready_for_review` when the task contract permits it. You may never set `State: done`.\n6. Do not edit `reports/catalog.yaml`, `reports/paper/build/`, or release manifests. Those are Operator-owned surfaces.\n7. If the run is not using the local swarm runtime, hand the exact commands, outputs, and assumptions to Operator so a durable run manifest can be recorded before review.\n\n## Completion checklist\n\n- Run the declared gates and task-specific commands.\n- Ensure declared outputs exist at the declared paths.\n- Record reproduction commands, assumptions, and limitations in the task notes.\n- Write a handoff note if downstream work depends on your output.\n\n## Runtime context (auto-filled)\n\n- Repo root: `/Users/aeziz-local/Research/wt-T050`\n- Task path: `.orchestrator/backlog/T050_validation_str_pipeline_checks.md`\n- Task id: `T050`\n- Workstream: `W5`\n- Task kind: `validation`\n- Network enabled: `false`\n- Repair context: ``\n\n### Allowed paths\n\n- src/validation/validate_str_pipeline.py\n- reports/validation/rollup_panel_validation.json\n- reports/validation/rollup_panel_validation.md\n- reports/validation/l1_rent_decomposition_validation.json\n- reports/validation/l1_rent_decomposition_validation.md\n- reports/validation/cross_source_reconciliation.json\n- reports/validation/cross_source_reconciliation.md\n\n### Disallowed paths\n\n- docs/protocol.md\n- contracts/\n- src/etl/\n- data/raw/\n\n### Declared outputs\n\n- src/validation/validate_str_pipeline.py\n- reports/validation/rollup_panel_validation.json\n- reports/validation/rollup_panel_validation.md\n- reports/validation/l1_rent_decomposition_validation.json\n- reports/validation/l1_rent_decomposition_validation.md\n- reports/validation/cross_source_reconciliation.json\n- reports/validation/cross_source_reconciliation.md\n\n### Gates\n\n- make gate\n\n### Stop conditions\n\n- Validation failure beyond tolerance\n- Canonical processed manifests are missing\n"
+    ],
+    "executor_log_path": "data/tmp/swarm_logs/T050_20260408T152125Z_executor.log",
+    "gates": [
+      "make gate"
+    ]
+  },
+  "executor": {
+    "allow_network": false,
+    "error": null,
+    "model": null,
+    "repair_context": null,
+    "returncode": 0,
+    "role": "Worker",
+    "runner": "local_swarm",
+    "sandbox": "workspace-write",
+    "tool": "codex"
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "output_tail": "python scripts/quality_gates.py\n[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 2, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 3, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 16, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 10, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n",
+      "returncode": 0
+    }
+  ],
+  "generated_at_utc": "2026-04-08T15:31:13Z",
+  "ownership": {
+    "changed_paths": [
+      ".orchestrator/backlog/T050_validation_str_pipeline_checks.md",
+      ".orchestrator/handoff/H050_canonical_validation_blocker.md",
+      "reports/validation/cross_source_reconciliation.json",
+      "reports/validation/cross_source_reconciliation.md",
+      "reports/validation/l1_rent_decomposition_validation.json",
+      "reports/validation/l1_rent_decomposition_validation.md",
+      "reports/validation/rollup_panel_validation.json",
+      "reports/validation/rollup_panel_validation.md",
+      "src/validation/validate_str_pipeline.py"
+    ],
+    "ok": true,
+    "violations": []
+  },
+  "repo": {
+    "base_branch": "main",
+    "branch": "T050_validation_str_pipeline_checks",
+    "git_sha": "d5296fe7404b0f0f164cbaf44a9ed366fd65ba46",
+    "remote": "origin"
+  },
+  "result": {
+    "blocked_reasons": [],
+    "status": "ok"
+  },
+  "run_id": "T050_20260408T152125Z",
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "task": {
+    "dependencies": [
+      "T030",
+      "T035",
+      "T040"
+    ],
+    "integration_ready_dependencies": [],
+    "role": "Worker",
+    "state_after": "ready_for_review",
+    "state_before": "backlog",
+    "task_id": "T050",
+    "task_kind": "validation",
+    "task_path": ".orchestrator/backlog/T050_validation_str_pipeline_checks.md",
+    "title": "Validation: canonical STR pipeline checks and cross-source reconciliation",
+    "workstream": "W5"
+  }
+}
