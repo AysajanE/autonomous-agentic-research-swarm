@@ -1,0 +1,91 @@
+{
+  "artifacts": {
+    "missing_manifests": [],
+    "missing_outputs": [],
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "run_manifest_path": "reports/status/swarm_runs/T050_20260408T155210Z.json"
+  },
+  "commands": {
+    "executor": [],
+    "executor_log_path": null,
+    "gates": [
+      "make gate"
+    ]
+  },
+  "executor": {
+    "allow_network": false,
+    "error": "executor_skipped",
+    "model": null,
+    "repair_context": "Operator rerun after fixing swarm state-promotion bug. The task is scientifically blocked because canonical validation fails beyond tolerance; record a blocked run manifest and preserve the blocked task state.",
+    "returncode": null,
+    "role": "Worker",
+    "runner": "local_swarm",
+    "sandbox": "workspace-write",
+    "tool": "manual"
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "output_tail": "python scripts/quality_gates.py\n[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 2, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 3, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 18, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 10, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n",
+      "returncode": 0
+    }
+  ],
+  "generated_at_utc": "2026-04-08T15:52:11Z",
+  "ownership": {
+    "changed_paths": [
+      ".orchestrator/backlog/T050_validation_str_pipeline_checks.md",
+      ".orchestrator/handoff/H050_canonical_validation_blocker.md",
+      ".orchestrator/handoff/H050_canonical_validation_reconciliation_blocker.md",
+      "reports/status/swarm_runs/T050_20260408T152125Z.json",
+      "reports/status/swarm_runs/T050_20260408T154442Z.json",
+      "reports/validation/cross_source_reconciliation.json",
+      "reports/validation/cross_source_reconciliation.md",
+      "reports/validation/l1_rent_decomposition_validation.json",
+      "reports/validation/l1_rent_decomposition_validation.md",
+      "reports/validation/rollup_panel_validation.json",
+      "reports/validation/rollup_panel_validation.md",
+      "scripts/swarm.py",
+      "src/validation/validate_str_pipeline.py"
+    ],
+    "ok": false,
+    "violations": [
+      {
+        "path": "scripts/swarm.py",
+        "reason": "outside_allowed_paths",
+        "sources": "unstaged"
+      }
+    ]
+  },
+  "repo": {
+    "base_branch": "main",
+    "branch": "T050_validation_str_pipeline_checks",
+    "git_sha": "9f45bb7cb912234915eb83e8a992f87f217ee45b",
+    "remote": "origin"
+  },
+  "result": {
+    "blocked_reasons": [
+      "path_ownership_violation",
+      "task_marked_blocked"
+    ],
+    "status": "blocked"
+  },
+  "run_id": "T050_20260408T155210Z",
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "task": {
+    "dependencies": [
+      "T030",
+      "T035",
+      "T040"
+    ],
+    "integration_ready_dependencies": [],
+    "role": "Worker",
+    "state_after": "blocked",
+    "state_before": "blocked",
+    "task_id": "T050",
+    "task_kind": "validation",
+    "task_path": ".orchestrator/backlog/T050_validation_str_pipeline_checks.md",
+    "title": "Validation: canonical STR pipeline checks and cross-source reconciliation",
+    "workstream": "W5"
+  }
+}

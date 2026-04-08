@@ -96,7 +96,7 @@ Before any release analysis or writing, the repo needs deterministic checks on t
 - `python src/validation/validate_str_pipeline.py --as-of YYYY-MM-DD`
 
 ## Status
-- State: ready_for_review
+- State: blocked
 - Last updated: 2026-04-08
 ## Notes / Decisions
 
@@ -145,4 +145,5 @@ Before any release analysis or writing, the repo needs deterministic checks on t
 - 2026-04-08: Assumptions / limitations for the repair run:
   - No change to `src/validation/validate_str_pipeline.py` was required; the validator deterministically reflected the canonical manifest-backed inputs now present in this worktree.
   - This repair execution was not recorded via a fresh `scripts/swarm.py` runtime, so Operator should capture the exact commands and outcomes above in a durable run manifest before any future review attempt after the blocker is resolved.
-- 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T050_20260408T154442Z.json
+- 2026-04-08: Operator correction: the prior `ready_for_review` promotion from `reports/status/swarm_runs/T050_20260408T154442Z.json` was a swarm-runtime bug. The canonical reports fail beyond tolerance, so this task remains `blocked` until the upstream reconciliation questions are resolved.
+- 2026-04-08: @human Runtime blocked: path_ownership_violation, task_marked_blocked. Run manifest: reports/status/swarm_runs/T050_20260408T155210Z.json. ownership=scripts/swarm.py[unstaged]=outside_allowed_paths
