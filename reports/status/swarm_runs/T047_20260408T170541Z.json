@@ -1,0 +1,86 @@
+{
+  "artifacts": {
+    "missing_manifests": [],
+    "missing_outputs": [],
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "run_manifest_path": "reports/status/swarm_runs/T047_20260408T170541Z.json"
+  },
+  "commands": {
+    "executor": [
+      "/Users/aeziz-local/.nvm/versions/node/v20.19.0/bin/codex",
+      "-a",
+      "never",
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "-C",
+      "/Users/aeziz-local/Research/wt-T047",
+      "# Prompt Template \u2014 Worker\n\nRole: **Worker**\n\nYou execute exactly one assigned task in an isolated branch/worktree.\n\n## Instructions\n\n1. Read and follow `AGENTS.md` and any nested `AGENTS.md` under your working directory.\n2. Open the assigned task file and obey its `allowed_paths`, `disallowed_paths`, declared outputs, gates, and stop conditions.\n3. Do not coordinate with other agents through chat. Use:\n   - the task file `## Notes / Decisions`\n   - a handoff note under `.orchestrator/handoff/` when downstream tasks need durable guidance\n4. Update only the task file sections:\n   - `## Status`\n   - `## Notes / Decisions`\n   Do not move task files between lifecycle folders.\n5. You may set `State: integration_ready` or `State: ready_for_review` when the task contract permits it. You may never set `State: done`.\n6. Do not edit `reports/catalog.yaml`, `reports/paper/build/`, or release manifests. Those are Operator-owned surfaces.\n7. If the run is not using the local swarm runtime, hand the exact commands, outputs, and assumptions to Operator so a durable run manifest can be recorded before review.\n\n## Completion checklist\n\n- Run the declared gates and task-specific commands.\n- Ensure declared outputs exist at the declared paths.\n- Record reproduction commands, assumptions, and limitations in the task notes.\n- Write a handoff note if downstream work depends on your output.\n\n## Runtime context (auto-filled)\n\n- Repo root: `/Users/aeziz-local/Research/wt-T047`\n- Task path: `.orchestrator/backlog/T047_make_vendor_profit_contract_compatible.md`\n- Task id: `T047`\n- Workstream: `W1`\n- Task kind: `etl`\n- Network enabled: `true`\n- Repair context: `Operator unblock context: main now tracks the manifest-backed processed CSV baselines at commit eb6e09b so downstream worktrees inherit local vendor/canonical CSV inputs. T046 is still blocked because it needs a fresh Growthepie bundle for a new rerun date. Repair src/etl/growthepie_fetch.py so the normalized vendor panel becomes contract-compatible, then produce a fresh append-only growthepie snapshot plus raw manifest, processed manifest, vendor_daily_rollup_panel.csv, and sample for run-date 2026-04-08. Do not redefine protocol semantics or silently coerce unsupported source fields; either emit a contract-compatible profit handling choice or make profit explicitly absent in the normalized panel, and document the choice clearly for T050.`\n\n### Allowed paths\n\n- src/etl/growthepie_fetch.py\n- data/raw/growthepie/\n- data/raw_manifest/growthepie_\n- data/processed/growthepie/\n- data/processed_manifest/vendor_daily_rollup_panel_\n- data/samples/growthepie/\n\n### Disallowed paths\n\n- docs/protocol.md\n- contracts/\n- registry/\n- src/validation/\n\n### Declared outputs\n\n- src/etl/growthepie_fetch.py\n- data/raw/growthepie/<YYYY-MM-DD>/...\n- data/raw_manifest/growthepie_<YYYY-MM-DD>.json\n- data/processed/growthepie/vendor_daily_rollup_panel.csv\n- data/processed_manifest/vendor_daily_rollup_panel_<YYYY-MM-DD>.json\n- data/samples/growthepie/vendor_daily_rollup_panel_sample.csv\n\n### Gates\n\n- make gate\n\n### Stop conditions\n\n- Need protocol or contract changes\n- Source semantics are contradictory or unsupported by evidence\n- Source instability or breaking API changes\n"
+    ],
+    "executor_log_path": "data/tmp/swarm_logs/T047_20260408T170541Z_executor.log",
+    "gates": [
+      "make gate"
+    ]
+  },
+  "executor": {
+    "allow_network": true,
+    "error": null,
+    "model": null,
+    "repair_context": "Operator unblock context: main now tracks the manifest-backed processed CSV baselines at commit eb6e09b so downstream worktrees inherit local vendor/canonical CSV inputs. T046 is still blocked because it needs a fresh Growthepie bundle for a new rerun date. Repair src/etl/growthepie_fetch.py so the normalized vendor panel becomes contract-compatible, then produce a fresh append-only growthepie snapshot plus raw manifest, processed manifest, vendor_daily_rollup_panel.csv, and sample for run-date 2026-04-08. Do not redefine protocol semantics or silently coerce unsupported source fields; either emit a contract-compatible profit handling choice or make profit explicitly absent in the normalized panel, and document the choice clearly for T050.",
+    "returncode": 0,
+    "role": "Worker",
+    "runner": "local_swarm",
+    "sandbox": "workspace-write",
+    "tool": "codex"
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "output_tail": "python scripts/quality_gates.py\n[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 3, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 4, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 19, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 11, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n",
+      "returncode": 0
+    }
+  ],
+  "generated_at_utc": "2026-04-08T17:10:24Z",
+  "ownership": {
+    "changed_paths": [
+      ".orchestrator/backlog/T047_make_vendor_profit_contract_compatible.md",
+      ".orchestrator/handoff/H050_canonical_validation_reconciliation_blocker.md",
+      "data/processed/growthepie/vendor_daily_rollup_panel.csv",
+      "data/processed_manifest/vendor_daily_rollup_panel_2026-04-08.json",
+      "data/raw_manifest/growthepie_2026-04-08.json",
+      "src/etl/growthepie_fetch.py"
+    ],
+    "ok": true,
+    "violations": []
+  },
+  "repo": {
+    "base_branch": "main",
+    "branch": "T047_make_vendor_profit_contract_compatible",
+    "git_sha": "eb6e09b6fc229ef10a638d1bd8590cb5e4b938b8",
+    "remote": "origin"
+  },
+  "result": {
+    "blocked_reasons": [],
+    "status": "ok"
+  },
+  "run_id": "T047_20260408T170541Z",
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "task": {
+    "dependencies": [
+      "T030",
+      "T050"
+    ],
+    "integration_ready_dependencies": [],
+    "role": "Worker",
+    "state_after": "ready_for_review",
+    "state_before": "active",
+    "task_id": "T047",
+    "task_kind": "etl",
+    "task_path": ".orchestrator/backlog/T047_make_vendor_profit_contract_compatible.md",
+    "title": "Make vendor profit series contract-compatible for STR validation",
+    "workstream": "W1"
+  }
+}

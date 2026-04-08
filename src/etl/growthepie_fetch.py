@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import csv
 import hashlib
 import json
@@ -34,6 +35,8 @@ SAMPLE_DATES = ("2024-03-13", "2024-03-14", "2024-03-15")
 REQUIRED_METRICS = ("fees", "rent_paid")
 OPTIONAL_METRICS = ("profit", "txcount")
 ALL_METRICS = REQUIRED_METRICS + OPTIONAL_METRICS
+PROFIT_ABS_TOLERANCE = Decimal("1e-9")
+PROFIT_REL_TOLERANCE = Decimal("0.01")
 HTTP_HEADERS = {
     "Accept": "application/json,text/plain,*/*",
     "Origin": "https://www.growthepie.com",
@@ -249,6 +252,21 @@ def format_decimal(value: Decimal) -> str:
     return text if text not in {"", "-0"} else "0"
 
 
+def require_decimal_metric(value: Decimal | int, *, metric: str) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    raise SystemExit(f"{metric} normalization expected Decimal values, got {value!r}")
+
+
+def profit_within_protocol_tolerance(*, fees_value: Decimal, rent_value: Decimal, profit_value: Decimal) -> bool:
+    implied_profit = fees_value - rent_value
+    tolerance = max(
+        PROFIT_ABS_TOLERANCE,
+        PROFIT_REL_TOLERANCE * max(abs(fees_value), abs(rent_value), PROFIT_ABS_TOLERANCE),
+    )
+    return abs(profit_value - implied_profit) <= tolerance
+
+
 def row_with_optional_values(
     *,
     day: date,
@@ -257,20 +275,33 @@ def row_with_optional_values(
     rent_by_day: dict[date, Decimal | int],
     profit_by_day: dict[date, Decimal | int] | None,
     txcount_by_day: dict[date, Decimal | int] | None,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], bool]:
+    fees_value = require_decimal_metric(fees_by_day[day], metric="fees")
+    rent_value = require_decimal_metric(rent_by_day[day], metric="rent_paid")
+    omitted_profit = False
     row = {
         "date_utc": day.isoformat(),
         "rollup_id": rollup_id,
-        "l2_fees_eth": format_decimal(fees_by_day[day]),  # type: ignore[arg-type]
-        "rent_paid_eth": format_decimal(rent_by_day[day]),  # type: ignore[arg-type]
+        "l2_fees_eth": format_decimal(fees_value),
+        "rent_paid_eth": format_decimal(rent_value),
         "profit_eth": "",
         "txcount": "",
     }
     if profit_by_day and day in profit_by_day:
-        row["profit_eth"] = format_decimal(profit_by_day[day])  # type: ignore[arg-type]
+        # Only surface vendor profit when the reported series satisfies the locked
+        # accounting identity against the same vendor fees and rent inputs.
+        profit_value = require_decimal_metric(profit_by_day[day], metric="profit")
+        if profit_within_protocol_tolerance(
+            fees_value=fees_value,
+            rent_value=rent_value,
+            profit_value=profit_value,
+        ):
+            row["profit_eth"] = format_decimal(profit_value)
+        else:
+            omitted_profit = True
     if txcount_by_day and day in txcount_by_day:
         row["txcount"] = str(txcount_by_day[day])
-    return row
+    return row, omitted_profit
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -358,6 +389,8 @@ def main(argv: list[str]) -> int:
     ]
 
     all_rows: list[dict[str, str]] = []
+    omitted_profit_rows = 0
+    omitted_profit_by_rollup: Counter[str] = Counter()
     master_chains = master_result.payload["chains"]
     for rollup in rollups:
         chain_meta = master_chains[rollup.rollup_id]
@@ -420,19 +453,28 @@ def main(argv: list[str]) -> int:
             if active_start <= day <= active_end
         )
         for day in eligible_days:
-            all_rows.append(
-                row_with_optional_values(
-                    day=day,
-                    rollup_id=rollup.rollup_id,
-                    fees_by_day=fees_by_day,
-                    rent_by_day=rent_by_day,
-                    profit_by_day=profit_by_day,
-                    txcount_by_day=txcount_by_day,
-                )
+            row, omitted_profit = row_with_optional_values(
+                day=day,
+                rollup_id=rollup.rollup_id,
+                fees_by_day=fees_by_day,
+                rent_by_day=rent_by_day,
+                profit_by_day=profit_by_day,
+                txcount_by_day=txcount_by_day,
             )
+            all_rows.append(row)
+            if omitted_profit:
+                omitted_profit_rows += 1
+                omitted_profit_by_rollup[rollup.rollup_id] += 1
 
     all_rows.sort(key=lambda row: (row["date_utc"], row["rollup_id"]))
     sample_rows = sample_rows_or_die(all_rows)
+
+    if omitted_profit_rows:
+        logging.info(
+            "Omitted %s vendor profit rows that failed the protocol accounting identity: %s",
+            omitted_profit_rows,
+            dict(sorted(omitted_profit_by_rollup.items())),
+        )
 
     write_csv(panel_path, all_rows)
     write_csv(sample_path, sample_rows)

@@ -86,9 +86,14 @@ T050 confirmed that the current vendor `profit_eth` series is materially inconsi
 - `python src/etl/growthepie_fetch.py --run-date YYYY-MM-DD`
 
 ## Status
-- State: active
+- State: ready_for_review
 - Last updated: 2026-04-08
 ## Notes / Decisions
 
 - 2026-04-08: Added as the W1 half of the T050 unblock path. Live growthepie responses currently include rows where `profit_eth` is not contract-compatible with `fees − rent_paid`, so the normalized vendor panel needs repair or explicit omission rather than silent mirroring.
 - 2026-04-08: Claimed by local swarm runtime on branch main.
+- 2026-04-08: Repaired `src/etl/growthepie_fetch.py` so the normalized vendor panel only emits `profit_eth` when the vendor `profit` value satisfies the locked protocol accounting identity against the same vendor `fees` and `rent_paid` inputs; incompatible vendor profit values are left blank rather than recomputed or silently coerced.
+- 2026-04-08: Reproduced with `python src/etl/growthepie_fetch.py --run-date 2026-04-08`, `python scripts/make_raw_manifest.py growthepie data/raw/growthepie/2026-04-08 --as-of 2026-04-08 -- python src/etl/growthepie_fetch.py --run-date 2026-04-08`, and `make gate`. Outputs now exist at `data/raw/growthepie/2026-04-08/` (58 files), `data/raw_manifest/growthepie_2026-04-08.json`, `data/processed/growthepie/vendor_daily_rollup_panel.csv`, `data/processed_manifest/vendor_daily_rollup_panel_2026-04-08.json`, and `data/samples/growthepie/vendor_daily_rollup_panel_sample.csv`.
+- 2026-04-08: The 2026-04-08 rerun emitted 12,420 panel rows and blanked 547 incoherent `profit_eth` values under the protocol tolerance (`starknet=508`, `zksync_era=29`, `linea=6`, `taiko=4`). The tracked sample remained present and `make gate` passed.
+- 2026-04-08: Assumption for downstream validation: blank `profit_eth` in the vendor panel means the upstream vendor profit failed the protocol identity and is intentionally treated as explicit absence, not as a fetch failure or missing panel row. State remains `active` until Operator records the required durable run manifest under `reports/status/swarm_runs/`.
+- 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T047_20260408T170541Z.json
