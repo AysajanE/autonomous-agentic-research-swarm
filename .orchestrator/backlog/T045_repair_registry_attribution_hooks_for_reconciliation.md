@@ -79,7 +79,7 @@ T050 is blocked on a real upstream coverage mismatch. BigQuery checks over the c
 - `make gate`
 
 ## Status
-- State: ready_for_review
+- State: done
 - Last updated: 2026-04-08
 ## Notes / Decisions
 
@@ -93,3 +93,4 @@ T050 is blocked on a real upstream coverage mismatch. BigQuery checks over the c
 - 2026-04-08: @human Runtime blocked: path_ownership_violation. Run manifest: reports/status/swarm_runs/T045_20260408T161648Z.json. ownership=.orchestrator/backlog/T046_rebuild_canonical_panel_after_attribution_repair.md[staged]=orchestrator_write_forbidden; .orchestrator/backlog/T047_make_vendor_profit_contract_compatible.md[staged]=orchestrator_write_forbidden
 - 2026-04-08: Re-verified the task in a clean worktree after the local swarm run. `reports/status/swarm_runs/T045_20260408T161648Z.json` and `.orchestrator/handoff/H045_registry_reconciliation_attribution_hooks.md` both exist, and `make gate` passed again. The earlier `path_ownership_violation` was caused by unrelated staged edits in `T046` and `T047`, not by T045 outputs, so the stale blocker was cleared and the task is now ready for review.
 - 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T045_20260408T164746Z.json
+- 2026-04-08: Judge approved; review log: reports/status/reviews/T045_20260408T164956Z.json
