@@ -99,6 +99,17 @@ data/raw/
 data/processed/
 data/tmp/
 data/cache/
+!data/processed/
+data/processed/*
+!data/processed/growthepie/
+data/processed/growthepie/*
+!data/processed/growthepie/vendor_daily_rollup_panel.csv
+!data/processed/l1_rent/
+data/processed/l1_rent/*
+!data/processed/l1_rent/daily_l1_rent_decomposition.csv
+!data/processed/panels/
+data/processed/panels/*
+!data/processed/panels/daily_rollup_panel.csv
 
 # Logs / temp
 *.log
