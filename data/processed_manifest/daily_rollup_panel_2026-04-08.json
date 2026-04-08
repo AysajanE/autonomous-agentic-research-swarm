@@ -1,0 +1,25 @@
+{
+  "as_of_utc_date": "2026-04-08",
+  "inputs": [
+    "data/raw_manifest/growthepie_2026-04-08.json",
+    "data/raw_manifest/l1_rent_2026-04-08.json",
+    "data/processed/growthepie/vendor_daily_rollup_panel.csv"
+  ],
+  "outputs": [
+    {
+      "bytes": 750929,
+      "path": "data/processed/panels/daily_rollup_panel.csv",
+      "sha256": "b92908287063706f26fbc0efd364de6ac7566d90eea9d513ecbbabf823fd4a08"
+    },
+    {
+      "bytes": 673,
+      "path": "data/samples/panels/daily_rollup_panel_sample.csv",
+      "sha256": "e01608b02ff49e7c3e18897112772e0978b4c0c1683d40487e8f5de668b5df46"
+    }
+  ],
+  "transform": {
+    "command": "python src/etl/build_l1_rent_panel.py --run-date 2026-04-08 --blockscout-page-size 250",
+    "git_sha": "9cbfdeddb1a8dace74baeb7245ccde2246e3723d",
+    "script_path": "src/etl/build_l1_rent_panel.py"
+  }
+}

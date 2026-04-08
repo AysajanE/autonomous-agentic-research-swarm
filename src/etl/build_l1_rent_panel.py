@@ -3027,6 +3027,7 @@ def fetch_blobscan_window(
     end_timestamp_exclusive_utc: datetime | None = None,
     instability_retries_remaining: int = BLOBSCAN_INSTABILITY_RETRY_ROUNDS,
     terminal_window_retries_remaining: int = BLOBSCAN_TERMINAL_WINDOW_RETRY_ROUNDS,
+    allow_rollup_discovery_fallback: bool = True,
 ) -> list[BlobscanTx]:
     if not from_address and not rollup_filter:
         raise ValueError("blobscan fetch requires from_address or rollup_filter")
@@ -3076,6 +3077,7 @@ def fetch_blobscan_window(
                 and not total_rows
                 and from_address is not None
                 and rollup_filter is None
+                and allow_rollup_discovery_fallback
                 and existing_total is not None
                 and existing_total > 0
                 and not normalized_rows
@@ -3101,6 +3103,7 @@ def fetch_blobscan_window(
                     rollup_filter=rollup_id,
                     start_timestamp_utc=window_start_dt,
                     end_timestamp_exclusive_utc=window_end_exclusive_dt,
+                    allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
                 )
             request_log.append(
                 {
@@ -3155,6 +3158,7 @@ def fetch_blobscan_window(
                 rollup_filter=rollup_filter,
                 start_timestamp_utc=window_start_dt,
                 end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
+                allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
             )
             merged_rows = list(total_rows)
             seen_hashes = {row.hash for row in merged_rows}
@@ -3261,6 +3265,7 @@ def fetch_blobscan_window(
                     start_timestamp_utc=window_start_dt,
                     end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
                     instability_retries_remaining=instability_retries_remaining - 1,
+                    allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
                 )
             if (
                 not total_rows
@@ -3294,6 +3299,7 @@ def fetch_blobscan_window(
                     end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
                     instability_retries_remaining=BLOBSCAN_INSTABILITY_RETRY_ROUNDS,
                     terminal_window_retries_remaining=terminal_window_retries_remaining - 1,
+                    allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
                 )
             fallback_page_size = max(BLOBSCAN_MIN_PAGE_SIZE, page_size // 2)
             if fallback_page_size < page_size:
@@ -3321,6 +3327,7 @@ def fetch_blobscan_window(
                     start_timestamp_utc=window_start_dt,
                     end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
                     terminal_window_retries_remaining=terminal_window_retries_remaining,
+                    allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
                 )
                 merged_rows = list(total_rows)
                 seen_hashes = {row.hash for row in merged_rows}
@@ -3360,6 +3367,7 @@ def fetch_blobscan_window(
                     start_timestamp_utc=window_start_dt,
                     end_timestamp_exclusive_utc=split_dt,
                     terminal_window_retries_remaining=terminal_window_retries_remaining,
+                    allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
                 )
                 newer_rows = fetch_blobscan_window(
                     snapshot_dir=snapshot_dir,
@@ -3375,6 +3383,7 @@ def fetch_blobscan_window(
                     start_timestamp_utc=split_dt,
                     end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
                     terminal_window_retries_remaining=terminal_window_retries_remaining,
+                    allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
                 )
                 merged_rows = list(total_rows)
                 seen_hashes = {row.hash for row in merged_rows}
@@ -3405,6 +3414,7 @@ def fetch_blobscan_window(
             and not total_rows
             and from_address is not None
             and rollup_filter is None
+            and allow_rollup_discovery_fallback
             and total_transactions is not None
             and total_transactions > 0
             and not normalized_rows
@@ -3430,6 +3440,7 @@ def fetch_blobscan_window(
                 rollup_filter=rollup_id,
                 start_timestamp_utc=window_start_dt,
                 end_timestamp_exclusive_utc=window_end_exclusive_dt,
+                allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
             )
         for row in normalized_rows:
             if row.rollup_id != rollup_id:
@@ -4549,6 +4560,9 @@ def main(argv: list[str]) -> int:
                             timeout_seconds=args.timeout_seconds,
                             request_log=request_log,
                             from_address=address,
+                            # When every sender-scoped query is empty, the caller retries the
+                            # whole window once via rollup filter after the loop.
+                            allow_rollup_discovery_fallback=False,
                         )
                         window_blob_rows.extend(rows)
                         for row in rows:
