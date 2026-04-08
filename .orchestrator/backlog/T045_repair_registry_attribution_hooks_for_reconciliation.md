@@ -79,7 +79,7 @@ T050 is blocked on a real upstream coverage mismatch. BigQuery checks over the c
 - `make gate`
 
 ## Status
-- State: blocked
+- State: ready_for_review
 - Last updated: 2026-04-08
 ## Notes / Decisions
 
@@ -91,3 +91,5 @@ T050 is blocked on a real upstream coverage mismatch. BigQuery checks over the c
 - 2026-04-08: Validation: `make gate` passed after the final registry, changelog, task-note, and handoff edits.
 - 2026-04-08: Assumptions and limitations: local `bq` CLI is installed but had no active authenticated account, so BigQuery validation was unavailable in this worker session; `.orchestrator/handoff/H050_canonical_validation_reconciliation_blocker.md` referenced in Inputs was not present, and task naming appears to have drifted to `.orchestrator/backlog/T050_validation_str_pipeline_checks.md`; residual registry caveats remain for `arbitrum` pre-2023-01-04 and `linea` coverage before 2024-02-13 because the available evidence was incomplete or contradictory there. Downstream note: `.orchestrator/handoff/H045_registry_reconciliation_attribution_hooks.md` records the repair scope for T050, but Operator still needs to record the durable run manifest before review.
 - 2026-04-08: @human Runtime blocked: path_ownership_violation. Run manifest: reports/status/swarm_runs/T045_20260408T161648Z.json. ownership=.orchestrator/backlog/T046_rebuild_canonical_panel_after_attribution_repair.md[staged]=orchestrator_write_forbidden; .orchestrator/backlog/T047_make_vendor_profit_contract_compatible.md[staged]=orchestrator_write_forbidden
+- 2026-04-08: Re-verified the task in a clean worktree after the local swarm run. `reports/status/swarm_runs/T045_20260408T161648Z.json` and `.orchestrator/handoff/H045_registry_reconciliation_attribution_hooks.md` both exist, and `make gate` passed again. The earlier `path_ownership_violation` was caused by unrelated staged edits in `T046` and `T047`, not by T045 outputs, so the stale blocker was cleared and the task is now ready for review.
+- 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T045_20260408T164746Z.json
