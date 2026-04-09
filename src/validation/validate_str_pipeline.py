@@ -538,26 +538,54 @@ def check_required_non_null(
     )
 
 
+def summarize_unmatched_keys(unmatched_keys: pd.DataFrame) -> list[dict[str, object]]:
+    if unmatched_keys.empty:
+        return []
+
+    summary = (
+        unmatched_keys.groupby("rollup_id", as_index=False)
+        .agg(
+            key_count=("date_utc", "size"),
+            min_date_utc=("date_utc", "min"),
+            max_date_utc=("date_utc", "max"),
+        )
+        .sort_values(["key_count", "rollup_id"], ascending=[False, True], kind="stable")
+        .reset_index(drop=True)
+    )
+    return summary.to_dict(orient="records")
+
+
 def check_key_coverage(panel: pd.DataFrame, vendor_panel: pd.DataFrame) -> CheckResult:
-    panel_keys = set(zip(panel["date_utc"], panel["rollup_id"]))
-    vendor_keys = set(zip(vendor_panel["date_utc"], vendor_panel["rollup_id"]))
-    only_in_panel = sorted(panel_keys - vendor_keys)[:10]
-    only_in_vendor = sorted(vendor_keys - panel_keys)[:10]
-    status = "pass" if panel_keys == vendor_keys else "fail"
+    key_columns = ["date_utc", "rollup_id"]
+    merged_keys = vendor_panel[key_columns].drop_duplicates().merge(
+        panel[key_columns].drop_duplicates(),
+        on=key_columns,
+        how="outer",
+        indicator=True,
+    )
+    only_in_vendor = (
+        merged_keys.loc[merged_keys["_merge"] == "left_only", key_columns]
+        .sort_values(key_columns, kind="stable")
+        .reset_index(drop=True)
+    )
+    only_in_panel = (
+        merged_keys.loc[merged_keys["_merge"] == "right_only", key_columns]
+        .sort_values(key_columns, kind="stable")
+        .reset_index(drop=True)
+    )
+    status = "pass" if only_in_panel.empty and only_in_vendor.empty else "fail"
     return CheckResult(
         name="authoritative_vs_vendor_key_coverage",
         status=status,
         details={
-            "authoritative_panel_key_count": len(panel_keys),
-            "vendor_panel_key_count": len(vendor_keys),
-            "only_in_authoritative_panel": [
-                {"date_utc": date_utc, "rollup_id": rollup_id}
-                for date_utc, rollup_id in only_in_panel
-            ],
-            "only_in_vendor_panel": [
-                {"date_utc": date_utc, "rollup_id": rollup_id}
-                for date_utc, rollup_id in only_in_vendor
-            ],
+            "authoritative_panel_key_count": int(len(panel[key_columns].drop_duplicates())),
+            "vendor_panel_key_count": int(len(vendor_panel[key_columns].drop_duplicates())),
+            "only_in_authoritative_panel_count": int(len(only_in_panel)),
+            "only_in_authoritative_panel": only_in_panel.head(10).to_dict(orient="records"),
+            "only_in_authoritative_panel_by_rollup": summarize_unmatched_keys(only_in_panel),
+            "only_in_vendor_panel_count": int(len(only_in_vendor)),
+            "only_in_vendor_panel": only_in_vendor.head(10).to_dict(orient="records"),
+            "only_in_vendor_panel_by_rollup": summarize_unmatched_keys(only_in_vendor),
         },
         plausible_causes=(
             []
@@ -779,12 +807,28 @@ def check_vendor_profit_identity(vendor_panel: pd.DataFrame) -> CheckResult:
 
 
 def check_monthly_reconciliation(merged: pd.DataFrame) -> CheckResult:
-    missing_keys = merged.loc[merged["_merge"] != "both", ["date_utc", "rollup_id", "_merge"]]
-    if not missing_keys.empty:
-        details = {
-            "mismatched_key_count": int(len(missing_keys)),
-            "sample_key_mismatches": missing_keys.head(10).to_dict(orient="records"),
-        }
+    key_columns = ["date_utc", "rollup_id"]
+    merged_keys = merged[key_columns + ["_merge"]].drop_duplicates().copy()
+    missing_keys = (
+        merged_keys.loc[merged_keys["_merge"] != "both", key_columns + ["_merge"]]
+        .sort_values(key_columns + ["_merge"], kind="stable")
+        .reset_index(drop=True)
+    )
+    matched_rows = merged.loc[merged["_merge"] == "both"].copy()
+
+    details: dict[str, object] = {
+        "mismatched_key_count": int(len(missing_keys)),
+        "sample_key_mismatches": missing_keys.head(10).to_dict(orient="records"),
+        "only_in_vendor_panel_by_rollup": summarize_unmatched_keys(
+            missing_keys.loc[missing_keys["_merge"] == "left_only", key_columns]
+        ),
+        "only_in_authoritative_panel_by_rollup": summarize_unmatched_keys(
+            missing_keys.loc[missing_keys["_merge"] == "right_only", key_columns]
+        ),
+        "matched_row_count": int(len(matched_rows)),
+    }
+
+    if matched_rows.empty:
         return CheckResult(
             name="monthly_cross_source_reconciliation",
             status="fail",
@@ -797,7 +841,7 @@ def check_monthly_reconciliation(merged: pd.DataFrame) -> CheckResult:
         )
 
     numeric = numeric_frame(
-        merged,
+        matched_rows,
         columns=("rent_paid_eth_vendor", "rent_paid_eth_authoritative"),
     )
     numeric["month_utc"] = numeric["date_utc"].str.slice(0, 7)
@@ -848,10 +892,8 @@ def check_monthly_reconciliation(merged: pd.DataFrame) -> CheckResult:
     )
     daily_outliers = daily.loc[daily["pct_difference"] > float(RECONCILIATION_PASS_THRESHOLD)]
 
-    return CheckResult(
-        name="monthly_cross_source_reconciliation",
-        status=status,
-        details={
+    details.update(
+        {
             "target_tolerance_pct": float(RECONCILIATION_PASS_THRESHOLD * Decimal("100")),
             "monthly_top_rollups": monthly.head(10).to_dict(orient="records"),
             "monthly_aggregate": aggregate.to_dict(orient="records"),
@@ -867,20 +909,44 @@ def check_monthly_reconciliation(merged: pd.DataFrame) -> CheckResult:
                     "pct_difference",
                 ]
             ].to_dict(orient="records"),
-        },
-        plausible_causes=(
-            []
-            if status == "pass"
-            else [
+        }
+    )
+
+    status = "pass" if not details["mismatched_key_count"] and rollup_violations.empty and aggregate_violations.empty else "fail"
+    plausible_causes: list[str] = []
+    if details["mismatched_key_count"]:
+        plausible_causes.extend(
+            [
+                "The vendor and authoritative panels do not cover the same rollup-day keys.",
+                "One input was built from a different sample window or rollup registry snapshot.",
+            ]
+        )
+    if not rollup_violations.empty or not aggregate_violations.empty:
+        plausible_causes.extend(
+            [
                 "The authoritative on-chain rent series diverged materially from the vendor proxy for a top rollup-month.",
                 "A registry or attribution change altered the canonical rollup universe between sources.",
             ]
-        ),
-        next_step=(
-            None
-            if status == "pass"
-            else "Document the dominant rollup-month deltas and isolate whether the gap comes from source coverage or attribution logic."
-        ),
+        )
+
+    if status == "pass":
+        next_step = None
+    elif details["mismatched_key_count"] and (not rollup_violations.empty or not aggregate_violations.empty):
+        next_step = (
+            "First reconcile the vendor-only or authoritative-only rollup-day keys, then inspect the "
+            "matched-key rollup-month deltas that still exceed the 10% tolerance band."
+        )
+    elif details["mismatched_key_count"]:
+        next_step = "Resolve the key mismatch before interpreting cross-source rent deltas."
+    else:
+        next_step = "Document the dominant rollup-month deltas and isolate whether the gap comes from source coverage or attribution logic."
+
+    return CheckResult(
+        name="monthly_cross_source_reconciliation",
+        status=status,
+        details=details,
+        plausible_causes=plausible_causes,
+        next_step=next_step,
     )
 
 

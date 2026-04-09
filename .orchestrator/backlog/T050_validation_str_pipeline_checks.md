@@ -96,8 +96,8 @@ Before any release analysis or writing, the repo needs deterministic checks on t
 - `python src/validation/validate_str_pipeline.py --as-of YYYY-MM-DD`
 
 ## Status
-- State: ready_for_review
-- Last updated: 2026-04-08
+- State: blocked
+- Last updated: 2026-04-09
 ## Notes / Decisions
 
 - 2026-03-29: v1 rewrite expands T050 from vendor-only checks to the full canonical STR validation bundle.
@@ -145,4 +145,31 @@ Before any release analysis or writing, the repo needs deterministic checks on t
 - 2026-04-08: Assumptions / limitations for the repair run:
   - No change to `src/validation/validate_str_pipeline.py` was required; the validator deterministically reflected the canonical manifest-backed inputs now present in this worktree.
   - This repair execution was not recorded via a fresh `scripts/swarm.py` runtime, so Operator should capture the exact commands and outcomes above in a durable run manifest before any future review attempt after the blocker is resolved.
-- 2026-04-08: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T050_20260408T154442Z.json
+- 2026-04-09: Operator reopened T050 to `active` on rebased branch `T050-rerun-20260409` after preserving the stale diagnostic branch separately. The earlier review-ready promotion predates the current canonical `main` state and must be re-executed against the synced 2026-04-08 manifests before review.
+- 2026-04-09: Refined `src/validation/validate_str_pipeline.py` diagnostics so the stable reports now group key-coverage mismatches by rollup/date range and still emit matched-key reconciliation statistics even when source coverage differs.
+- 2026-04-09: Reproduction and outcomes on the synced `2026-04-08` manifests:
+  - `python -m py_compile src/validation/validate_str_pipeline.py` → passed.
+  - `python src/validation/validate_str_pipeline.py --sample` → exit `0`; sample validation still passes after the diagnostic refinement.
+  - `python src/validation/validate_str_pipeline.py --as-of 2026-04-08` → exit `1`; refreshed the three canonical report pairs against the current processed manifests and recorded an actionable reconciliation blocker instead of the stale `2026-04-01` state.
+  - `make gate` → passed.
+- 2026-04-09: Refreshed canonical output status:
+  - `reports/validation/rollup_panel_validation.{json,md}` → status `fail`; authoritative schema, primary-key uniqueness, required non-null, and `metrics_str` compatibility passed, but key coverage still fails with `11,295` authoritative keys versus `12,420` vendor keys and `1,125` vendor-only rollup-days.
+  - `reports/validation/l1_rent_decomposition_validation.{json,md}` → status `pass`; schema, primary-key uniqueness, required non-null, total-rent identity, and panel-date coverage all passed for `1,558` days through `2026-04-07`.
+  - `reports/validation/cross_source_reconciliation.{json,md}` → status `fail`; vendor schema/key/non-null checks passed, vendor profit identity now passes with `0` violations, but reconciliation still fails with `1,125` vendor-only keys, `32` monthly aggregate deltas above the protocol’s `10%` ceiling, `247` rollup-month violations, and matched-key aggregate rent difference of `10.667051775329645%`.
+- 2026-04-09: Canonical failure details for the minimal unblock:
+  - Vendor-only key coverage is concentrated in `zksync_era` (`538` dates from `2023-03-24` to `2026-01-30`), `arbitrum` (`368` dates from `2022-01-01` to `2023-01-03`), and `linea` (`219` dates from `2023-07-13` to `2026-03-26`); there are no authoritative-only keys.
+  - The matched-key monthly reconciliation still exceeds tolerance after excluding unmatched rows. The report records `32` aggregate month violations and `247` rollup-month violations, led by early-2022 `optimism` deltas and a matched-key aggregate rent gap of `10.667051775329645%` (`88,530.13334555583` vendor ETH versus `79,996.83006400586` authoritative ETH).
+- 2026-04-09: Outputs refreshed by the rerun:
+  - `src/validation/validate_str_pipeline.py`
+  - `reports/validation/rollup_panel_validation.json`
+  - `reports/validation/rollup_panel_validation.md`
+  - `reports/validation/l1_rent_decomposition_validation.json`
+  - `reports/validation/l1_rent_decomposition_validation.md`
+  - `reports/validation/cross_source_reconciliation.json`
+  - `reports/validation/cross_source_reconciliation.md`
+- 2026-04-09: Blocker and minimal next step:
+  - `@human` Confirm whether the vendor-only `arbitrum`, `zksync_era`, and `linea` rollup-days in the `2026-04-08` vendor extract are expected to be excluded from the canonical panel. If not, fix the upstream registry/attribution/row-omission logic so the rollup-day key universe aligns, rerun `python src/validation/validate_str_pipeline.py --as-of 2026-04-08`, and then inspect the matched-key monthly rent deltas that still exceed the `10%` reconciliation ceiling.
+- 2026-04-09: Assumptions / limitations for the rerun:
+  - This execution was run directly in the worktree rather than through a fresh `scripts/swarm.py` runtime, so no new durable swarm run manifest was created.
+  - Operator should capture the commands and outcomes above in a run manifest before any future review attempt once the reconciliation blocker is resolved.
+- 2026-04-09: @human Runtime blocked: task_marked_blocked. Run manifest: reports/status/swarm_runs/T050_20260409T115203Z.json.

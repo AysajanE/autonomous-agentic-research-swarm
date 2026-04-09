@@ -1,5 +1,5 @@
 {
-  "as_of_utc_date": "2026-04-01",
+  "as_of_utc_date": "2026-04-08",
   "checks": [
     {
       "details": {
@@ -31,7 +31,7 @@
           "date_utc",
           "rollup_id"
         ],
-        "row_count": 11164,
+        "row_count": 11295,
         "sample_duplicates": []
       },
       "name": "authoritative_panel_primary_key_uniqueness",
@@ -56,8 +56,10 @@
     },
     {
       "details": {
-        "authoritative_panel_key_count": 11164,
+        "authoritative_panel_key_count": 11295,
         "only_in_authoritative_panel": [],
+        "only_in_authoritative_panel_by_rollup": [],
+        "only_in_authoritative_panel_count": 0,
         "only_in_vendor_panel": [
           {
             "date_utc": "2022-01-01",
@@ -100,7 +102,28 @@
             "rollup_id": "arbitrum"
           }
         ],
-        "vendor_panel_key_count": 12322
+        "only_in_vendor_panel_by_rollup": [
+          {
+            "key_count": 538,
+            "max_date_utc": "2026-01-30",
+            "min_date_utc": "2023-03-24",
+            "rollup_id": "zksync_era"
+          },
+          {
+            "key_count": 368,
+            "max_date_utc": "2023-01-03",
+            "min_date_utc": "2022-01-01",
+            "rollup_id": "arbitrum"
+          },
+          {
+            "key_count": 219,
+            "max_date_utc": "2026-03-26",
+            "min_date_utc": "2023-07-13",
+            "rollup_id": "linea"
+          }
+        ],
+        "only_in_vendor_panel_count": 1125,
+        "vendor_panel_key_count": 12420
       },
       "name": "authoritative_vs_vendor_key_coverage",
       "next_step": "Reconcile the key-level coverage mismatch before trusting STR comparisons or downstream figures.",
@@ -112,8 +135,8 @@
     },
     {
       "details": {
-        "authoritative_panel_row_count": 11164,
-        "distinct_date_count": 1551,
+        "authoritative_panel_row_count": 11295,
+        "distinct_date_count": 1558,
         "ecosystem_str_preview": [
           {
             "date_utc": "2022-01-01",
@@ -146,8 +169,8 @@
             "str": 0.1714920687125195
           }
         ],
-        "ecosystem_str_row_count": 1551,
-        "rollup_str_row_count": 11164
+        "ecosystem_str_row_count": 1558,
+        "rollup_str_row_count": 11295
       },
       "name": "metrics_module_compatibility",
       "next_step": null,
@@ -159,21 +182,21 @@
   "provenance": {
     "artifacts": [
       {
-        "as_of_utc_date": "2026-04-01",
+        "as_of_utc_date": "2026-04-08",
         "dataset": "vendor_panel",
-        "manifest_path": "data/processed_manifest/vendor_daily_rollup_panel_2026-04-01.json",
+        "manifest_path": "data/processed_manifest/vendor_daily_rollup_panel_2026-04-08.json",
         "path": "data/processed/growthepie/vendor_daily_rollup_panel.csv"
       },
       {
-        "as_of_utc_date": "2026-04-01",
+        "as_of_utc_date": "2026-04-08",
         "dataset": "l1_decomposition",
-        "manifest_path": "data/processed_manifest/daily_l1_rent_decomposition_2026-04-01.json",
+        "manifest_path": "data/processed_manifest/daily_l1_rent_decomposition_2026-04-08.json",
         "path": "data/processed/l1_rent/daily_l1_rent_decomposition.csv"
       },
       {
-        "as_of_utc_date": "2026-04-01",
+        "as_of_utc_date": "2026-04-08",
         "dataset": "authoritative_panel",
-        "manifest_path": "data/processed_manifest/daily_rollup_panel_2026-04-01.json",
+        "manifest_path": "data/processed_manifest/daily_rollup_panel_2026-04-08.json",
         "path": "data/processed/panels/daily_rollup_panel.csv"
       }
     ],
@@ -186,7 +209,7 @@
   "report_id": "rollup_panel_validation",
   "status": "fail",
   "summary": {
-    "date_count": 1551,
+    "date_count": 1558,
     "ecosystem_str_preview": [
       {
         "date_utc": "2022-01-01",
@@ -220,8 +243,8 @@
       }
     ],
     "rollup_count": 14,
-    "row_count": 11164,
-    "vendor_key_count": 12322
+    "row_count": 11295,
+    "vendor_key_count": 12420
   },
   "title": "Canonical rollup panel validation"
 }
