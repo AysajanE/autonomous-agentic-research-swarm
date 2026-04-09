@@ -92,8 +92,8 @@ T035 completed, but T050 exposed that the canonical panel still omits vendor-cov
 - `python src/etl/build_l1_rent_panel.py --run-date YYYY-MM-DD`
 
 ## Status
-- State: ready_for_review
-- Last updated: 2026-04-08
+- State: done
+- Last updated: 2026-04-09
 ## Notes / Decisions
 
 - 2026-04-08: Added as the canonical rebuild step after T045. This task should not start until the registry attribution-hook repair is complete.
@@ -120,3 +120,4 @@ T035 completed, but T050 exposed that the canonical panel still omits vendor-cov
 - 2026-04-08: Task remains `active` rather than `ready_for_review` because the successful rerun was executed outside the local swarm runtime. The only existing T046 run manifest under `reports/status/swarm_runs/` is the earlier blocked manifest `T046_20260408T165337Z.json`, so Operator still needs to record a fresh durable run manifest for this successful pass before review promotion.
 - 2026-04-08: Runtime completed without promotion; preserving worker state active. Run manifest: reports/status/swarm_runs/T046_20260408T211156Z.json
 - 2026-04-09: Operator verified that the successful rerun does have a durable run manifest at `reports/status/swarm_runs/T046_20260408T211156Z.json`, the declared `2026-04-08` raw/processed manifests exist, and `make gate` passed. Promoting the task to `ready_for_review`; the earlier `active` hold was a control-plane lag, not an unfinished ETL run.
+- 2026-04-09: Judge approved; review log: reports/status/reviews/T046_20260409T112715Z.json
