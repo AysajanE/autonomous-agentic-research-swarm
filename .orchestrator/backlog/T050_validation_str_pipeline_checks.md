@@ -170,6 +170,6 @@ Before any release analysis or writing, the repo needs deterministic checks on t
 - 2026-04-09: Blocker and minimal next step:
   - `@human` Confirm whether the vendor-only `arbitrum`, `zksync_era`, and `linea` rollup-days in the `2026-04-08` vendor extract are expected to be excluded from the canonical panel. If not, fix the upstream registry/attribution/row-omission logic so the rollup-day key universe aligns, rerun `python src/validation/validate_str_pipeline.py --as-of 2026-04-08`, and then inspect the matched-key monthly rent deltas that still exceed the `10%` reconciliation ceiling.
 - 2026-04-09: Assumptions / limitations for the rerun:
-  - This execution was run directly in the worktree rather than through a fresh `scripts/swarm.py` runtime, so no new durable swarm run manifest was created.
-  - Operator should capture the commands and outcomes above in a run manifest before any future review attempt once the reconciliation blocker is resolved.
+  - The worker executed the validation commands directly inside the worktree during a local swarm runtime pass.
+  - The runtime recorded the durable run manifest at `reports/status/swarm_runs/T050_20260409T115203Z.json`; any future repair rerun should record its own fresh manifest before review.
 - 2026-04-09: @human Runtime blocked: task_marked_blocked. Run manifest: reports/status/swarm_runs/T050_20260409T115203Z.json.

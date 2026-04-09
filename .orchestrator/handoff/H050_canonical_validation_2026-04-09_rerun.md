@@ -42,11 +42,11 @@ Re-ran `T050` against the synced `2026-04-08` processed manifests and refreshed 
 
 - The canonical blocker is now narrower than the stale 2026-04-01 diagnostic: vendor profit semantics are no longer the issue on the current vendor extract.
 - Key coverage mismatch is not the only remaining gap. Even after restricting to matched rows, the rent reconciliation still exceeds the protocol ceiling, so upstream fixes should not stop at aligning the row universe.
-- This rerun was executed directly in the worktree, not via a fresh `scripts/swarm.py` runtime, so no new durable swarm run manifest was written.
+- The worker executed the rerun commands directly inside the worktree during a local swarm runtime pass. The resulting durable run manifest is `reports/status/swarm_runs/T050_20260409T115203Z.json`.
 
 ## Open questions / next steps
 
 - Confirm whether the vendor-only `arbitrum`, `zksync_era`, and `linea` rollup-days are expected to be absent from the canonical panel.
 - If the coverage mismatch is not intentional, fix the upstream registry/attribution/row-omission logic and rerun `python src/validation/validate_str_pipeline.py --as-of 2026-04-08`.
 - After key coverage aligns, inspect the matched-key monthly rent deltas that still exceed the `10%` target band, starting with the early-2022 `optimism` months surfaced in `reports/validation/cross_source_reconciliation.{json,md}`.
-- Before any future review attempt, Operator should record a durable swarm run manifest with the commands and outcomes above.
+- Before any future repair or review attempt, record a fresh durable swarm run manifest for that new rerun.
