@@ -92,7 +92,7 @@
           "date_utc",
           "rollup_id"
         ],
-        "row_count": 12434,
+        "row_count": 12563,
         "sample_duplicates": []
       },
       "name": "rent_component_primary_key_uniqueness",
@@ -122,14 +122,55 @@
     },
     {
       "details": {
+        "additional_rent_component_key_count": 129,
+        "additional_rent_component_keys": [
+          {
+            "date_utc": "2022-01-26",
+            "rollup_id": "starknet"
+          },
+          {
+            "date_utc": "2022-01-27",
+            "rollup_id": "starknet"
+          },
+          {
+            "date_utc": "2022-01-28",
+            "rollup_id": "starknet"
+          },
+          {
+            "date_utc": "2022-01-29",
+            "rollup_id": "starknet"
+          },
+          {
+            "date_utc": "2022-01-30",
+            "rollup_id": "starknet"
+          },
+          {
+            "date_utc": "2022-01-31",
+            "rollup_id": "starknet"
+          },
+          {
+            "date_utc": "2022-02-01",
+            "rollup_id": "starknet"
+          },
+          {
+            "date_utc": "2022-02-02",
+            "rollup_id": "starknet"
+          },
+          {
+            "date_utc": "2022-02-03",
+            "rollup_id": "starknet"
+          },
+          {
+            "date_utc": "2022-02-04",
+            "rollup_id": "starknet"
+          }
+        ],
         "authoritative_panel_key_count": 12434,
         "only_in_authoritative_panel": [],
         "only_in_authoritative_panel_count": 0,
-        "only_in_rent_components": [],
-        "only_in_rent_components_count": 0,
-        "rent_component_key_count": 12434
+        "rent_component_key_count": 12563
       },
-      "name": "rent_component_vs_panel_key_coverage",
+      "name": "rent_component_covers_panel_keys",
       "next_step": null,
       "plausible_causes": [],
       "status": "pass"
@@ -143,7 +184,7 @@
         ],
         "identity_tolerance_eth": "1E-9",
         "max_abs_difference_eth": "0",
-        "row_count": 12434,
+        "row_count": 12563,
         "target_column": "rent_paid_eth",
         "violating_rows": []
       },
@@ -161,7 +202,7 @@
         ],
         "identity_tolerance_eth": "1E-9",
         "max_abs_difference_eth": "0",
-        "row_count": 12434,
+        "row_count": 12563,
         "target_column": "rent_paid_eth",
         "violating_rows": []
       },
@@ -177,7 +218,7 @@
         "row_count": 12434,
         "violating_rows": []
       },
-      "name": "rent_component_panel_identity",
+      "name": "rent_component_panel_overlap_identity",
       "next_step": null,
       "plausible_causes": [],
       "status": "pass"
@@ -297,7 +338,7 @@
         "str": 0.6154301358129327
       }
     ],
-    "rent_component_row_count": 12434,
+    "rent_component_row_count": 12563,
     "rollup_count": 14,
     "row_count": 12434
   },

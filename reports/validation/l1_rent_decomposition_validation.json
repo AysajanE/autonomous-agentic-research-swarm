@@ -78,6 +78,20 @@
       "next_step": null,
       "plausible_causes": [],
       "status": "pass"
+    },
+    {
+      "details": {
+        "component_date_count": 1559,
+        "identity_tolerance_eth": "1E-9",
+        "max_abs_difference_eth": "0",
+        "row_count": 1559,
+        "violating_rows": [],
+        "zero_component_date_count": 0
+      },
+      "name": "l1_total_rent_matches_rollup_components",
+      "next_step": null,
+      "plausible_causes": [],
+      "status": "pass"
     }
   ],
   "mode": "canonical",

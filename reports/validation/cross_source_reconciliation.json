@@ -169,7 +169,7 @@
             "abs_delta_eth": 17.674247130440563,
             "audit_reason": "pct_difference_within_tolerance",
             "audit_status": "within_tolerance",
-            "batch_submissions_eth": 8558.652659250007,
+            "batch_submissions_eth": 8594.964152940009,
             "best_matching_combo_eth": 0.0,
             "best_matching_tx_family_combo": null,
             "delta_eth": -17.674247130440563,
@@ -180,7 +180,7 @@
             "residual_after_best_combo_eth": 17.674247130440563,
             "residual_after_best_combo_pct_of_authoritative": 0.002055273868738636,
             "rollup_id": "base",
-            "state_updates_eth": 40.80817138256281
+            "state_updates_eth": 41.74993568251116
           },
           {
             "abs_delta_eth": 14.000512182452724,
@@ -271,7 +271,7 @@
             "abs_delta_eth": 2.128963800537747,
             "audit_reason": "absolute_delta_below_materiality_threshold",
             "audit_status": "within_tolerance",
-            "batch_submissions_eth": 15.45098046429068,
+            "batch_submissions_eth": 15.458156663432268,
             "best_matching_combo_eth": 0.0,
             "best_matching_tx_family_combo": null,
             "delta_eth": -2.128963800537747,
@@ -282,7 +282,7 @@
             "residual_after_best_combo_eth": 2.128963800537747,
             "residual_after_best_combo_pct_of_authoritative": 0.1165757710825418,
             "rollup_id": "ink",
-            "state_updates_eth": 2.8115090802161746
+            "state_updates_eth": 2.8470931930971295
           },
           {
             "abs_delta_eth": 0.7930345461088564,
@@ -333,7 +333,7 @@
             "residual_after_best_combo_eth": 2.483004664100008e-06,
             "residual_after_best_combo_pct_of_authoritative": 1.1178187261178605e-09,
             "rollup_id": "starknet",
-            "state_updates_eth": 2221.2945677904177
+            "state_updates_eth": 2237.5698855205737
           }
         ],
         "sample_explained_rollup_months": [],

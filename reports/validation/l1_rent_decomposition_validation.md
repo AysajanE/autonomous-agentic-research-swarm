@@ -38,6 +38,11 @@
 - Status: `pass`
 - Details: `{"decomposition_date_count": 1559, "missing_panel_dates": [], "panel_date_count": 1559}`
 
+### l1_total_rent_matches_rollup_components
+
+- Status: `pass`
+- Details: `{"component_date_count": 1559, "identity_tolerance_eth": "1E-9", "max_abs_difference_eth": "0", "row_count": 1559, "violating_rows": [], "zero_component_date_count": 0}`
+
 ## Provenance
 
 - vendor_panel: `{"as_of_utc_date": "2026-04-09", "dataset": "vendor_panel", "manifest_path": "data/processed_manifest/vendor_daily_rollup_panel_2026-04-09.json", "path": "data/processed/growthepie/vendor_daily_rollup_panel.csv"}`

@@ -290,7 +290,7 @@ def build_reports(mode: str, artifacts: dict[str, DataArtifact]) -> list[ReportP
     )
 
     rollup_checks = build_rollup_panel_checks(authoritative_panel, rent_components)
-    decomp_checks = build_l1_decomposition_checks(l1_decomposition, authoritative_panel)
+    decomp_checks = build_l1_decomposition_checks(l1_decomposition, authoritative_panel, rent_components)
     reconciliation_checks = build_cross_source_checks(
         vendor_panel,
         authoritative_panel,
@@ -442,6 +442,7 @@ def build_rollup_panel_checks(
 def build_l1_decomposition_checks(
     decomposition: pd.DataFrame,
     authoritative_panel: pd.DataFrame,
+    rent_components: pd.DataFrame,
 ) -> list[CheckResult]:
     checks = [
         check_required_columns(
@@ -461,6 +462,10 @@ def build_l1_decomposition_checks(
         ),
         check_l1_identity(decomposition),
         check_decomposition_covers_panel_dates(decomposition, authoritative_panel),
+        check_component_daily_totals_match_decomposition(
+            decomposition=decomposition,
+            rent_components=rent_components,
+        ),
     ]
     return checks
 
@@ -695,30 +700,30 @@ def check_component_key_coverage(
         .sort_values(key_columns, kind="stable")
         .reset_index(drop=True)
     )
-    status = "pass" if only_in_components.empty and only_in_panel.empty else "fail"
+    status = "pass" if only_in_panel.empty else "fail"
     return CheckResult(
-        name="rent_component_vs_panel_key_coverage",
+        name="rent_component_covers_panel_keys",
         status=status,
         details={
             "authoritative_panel_key_count": int(len(panel[key_columns].drop_duplicates())),
             "rent_component_key_count": int(len(rent_components[key_columns].drop_duplicates())),
             "only_in_authoritative_panel_count": int(len(only_in_panel)),
             "only_in_authoritative_panel": only_in_panel.head(10).to_dict(orient="records"),
-            "only_in_rent_components_count": int(len(only_in_components)),
-            "only_in_rent_components": only_in_components.head(10).to_dict(orient="records"),
+            "additional_rent_component_key_count": int(len(only_in_components)),
+            "additional_rent_component_keys": only_in_components.head(10).to_dict(orient="records"),
         },
         plausible_causes=(
             []
             if status == "pass"
             else [
-                "The T049 component artifact and canonical panel were built from different rollup-day key universes.",
-                "One of the canonical outputs was refreshed without refreshing the other manifest-backed surface.",
+                "The component artifact dropped panel keys that should remain comparable to the analysis-ready authoritative panel.",
+                "The panel and component surfaces were rebuilt from different manifested canonical runs.",
             ]
         ),
         next_step=(
             None
             if status == "pass"
-            else "Rebuild the canonical panel and component artifact from the same manifested T049 run before advancing validation."
+            else "Rebuild the canonical panel and component artifact from the same manifested canonical run before advancing validation."
         ),
     )
 
@@ -793,27 +798,27 @@ def check_component_matches_panel(
     panel: pd.DataFrame,
     rent_components: pd.DataFrame,
 ) -> CheckResult:
-    merged = rent_components.merge(
-        panel[["date_utc", "rollup_id", "rent_paid_eth"]],
+    merged = panel[["date_utc", "rollup_id", "rent_paid_eth"]].merge(
+        rent_components[["date_utc", "rollup_id", "rent_paid_eth"]],
         on=["date_utc", "rollup_id"],
-        how="outer",
-        suffixes=("_components", "_panel"),
+        how="left",
+        suffixes=("_panel", "_components"),
         indicator=True,
     )
     missing_keys = merged.loc[merged["_merge"] != "both", ["date_utc", "rollup_id", "_merge"]]
     if not missing_keys.empty:
         return CheckResult(
-            name="rent_component_panel_identity",
+            name="rent_component_panel_overlap_identity",
             status="fail",
             details={
                 "mismatched_key_count": int(len(missing_keys)),
                 "sample_key_mismatches": missing_keys.head(10).to_dict(orient="records"),
             },
             plausible_causes=[
-                "The component artifact and canonical panel were materialized from different T049 runs.",
-                "One canonical output was refreshed without propagating the matching panel/component pair.",
+                "The component artifact no longer covers every authoritative panel key.",
+                "The canonical panel and component surfaces were refreshed from different manifested runs.",
             ],
-            next_step="Refresh both canonical outputs from the same manifested T049 run.",
+            next_step="Refresh both canonical outputs from the same manifested canonical run.",
         )
 
     max_abs_diff = Decimal("0")
@@ -824,7 +829,7 @@ def check_component_matches_panel(
             panel_rent = decimal_from_value(row["rent_paid_eth_panel"])
         except InvalidOperation:
             return CheckResult(
-                name="rent_component_panel_identity",
+                name="rent_component_panel_overlap_identity",
                 status="fail",
                 details={"reason": "component or panel rent could not be parsed as Decimal ETH"},
                 plausible_causes=["A canonical rent field was serialized with an invalid numeric value."],
@@ -845,10 +850,10 @@ def check_component_matches_panel(
 
     status = "pass" if not violating_rows else "fail"
     return CheckResult(
-        name="rent_component_panel_identity",
+        name="rent_component_panel_overlap_identity",
         status=status,
         details={
-            "row_count": int(len(merged)),
+            "row_count": int(len(panel)),
             "identity_tolerance_eth": str(IDENTITY_TOLERANCE_ETH),
             "max_abs_difference_eth": str(max_abs_diff),
             "violating_rows": violating_rows,
@@ -857,8 +862,8 @@ def check_component_matches_panel(
             []
             if status == "pass"
             else [
-                "The component artifact and canonical panel disagree on canonical rent for the same rollup-day.",
-                "One surface was rebuilt against a different input universe than the other.",
+                "The authoritative panel and component surface disagree on canonical rent for overlapping panel keys.",
+                "One surface was rebuilt against a different canonical input universe than the other.",
             ]
         ),
         next_step=(
@@ -993,6 +998,101 @@ def check_decomposition_covers_panel_dates(
             None
             if status == "pass"
             else "Rebuild the decomposition so every authoritative panel date has an L1 rent row."
+        ),
+    )
+
+
+def check_component_daily_totals_match_decomposition(
+    decomposition: pd.DataFrame,
+    rent_components: pd.DataFrame,
+) -> CheckResult:
+    component_totals: dict[str, Decimal] = {}
+    for _, row in rent_components.iterrows():
+        try:
+            rent_paid = decimal_from_value(row["rent_paid_eth"])
+        except (InvalidOperation, KeyError):
+            return CheckResult(
+                name="l1_total_rent_matches_rollup_components",
+                status="fail",
+                details={"reason": "component rent could not be parsed as Decimal ETH"},
+                plausible_causes=["A component rent value was serialized with an invalid numeric value."],
+                next_step="Restore numeric ETH values for the component surface before rerunning validation.",
+            )
+        component_totals[row["date_utc"]] = component_totals.get(row["date_utc"], Decimal("0")) + rent_paid
+
+    decomposition_dates = set(decomposition["date_utc"]) if "date_utc" in decomposition.columns else set()
+    component_dates = set(component_totals)
+    extra_component_dates = sorted(component_dates - decomposition_dates)
+    if extra_component_dates:
+        return CheckResult(
+            name="l1_total_rent_matches_rollup_components",
+            status="fail",
+            details={
+                "extra_component_date_count": int(len(extra_component_dates)),
+                "sample_extra_component_dates": extra_component_dates[:10],
+            },
+            plausible_causes=[
+                "The component surface was materialized over a different date window than the decomposition.",
+                "A component rebuild was mixed with an older decomposition artifact.",
+            ],
+            next_step="Refresh the decomposition and component artifacts from the same manifested canonical run.",
+        )
+
+    max_abs_diff = Decimal("0")
+    violating_rows: list[dict[str, object]] = []
+    zero_component_dates = 0
+    for _, row in decomposition.iterrows():
+        try:
+            total_rent = decimal_from_value(row["l1_total_rent_eth"])
+        except (InvalidOperation, KeyError):
+            return CheckResult(
+                name="l1_total_rent_matches_rollup_components",
+                status="fail",
+                details={"reason": "decomposition total rent could not be parsed as Decimal ETH"},
+                plausible_causes=["A decomposition rent value was serialized with an invalid numeric value."],
+                next_step="Restore numeric ETH values for the decomposition surface before rerunning validation.",
+            )
+
+        component_total = component_totals.get(row["date_utc"], Decimal("0"))
+        if component_total == 0:
+            zero_component_dates += 1
+        diff = abs(total_rent - component_total)
+        if diff > max_abs_diff:
+            max_abs_diff = diff
+        if diff > IDENTITY_TOLERANCE_ETH and len(violating_rows) < 10:
+            violating_rows.append(
+                {
+                    "date_utc": row["date_utc"],
+                    "decomposition_total_rent_eth": str(total_rent),
+                    "component_total_rent_eth": str(component_total),
+                    "difference_eth": str(diff),
+                }
+            )
+
+    status = "pass" if not violating_rows else "fail"
+    return CheckResult(
+        name="l1_total_rent_matches_rollup_components",
+        status=status,
+        details={
+            "row_count": int(len(decomposition)),
+            "component_date_count": int(len(component_totals)),
+            "zero_component_date_count": zero_component_dates,
+            "identity_tolerance_eth": str(IDENTITY_TOLERANCE_ETH),
+            "max_abs_difference_eth": str(max_abs_diff),
+            "violating_rows": violating_rows,
+        },
+        plausible_causes=(
+            []
+            if status == "pass"
+            else [
+                "The authoritative component surface omitted canonical rent that remains present in the daily decomposition.",
+                "The decomposition and component surfaces were rebuilt from different canonical rollup-day universes.",
+            ]
+        ),
+        next_step=(
+            None
+            if status == "pass"
+            else "Refresh the decomposition and component artifacts from the same manifested canonical run."
         ),
     )
 
