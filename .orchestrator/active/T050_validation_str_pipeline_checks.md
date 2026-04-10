@@ -106,7 +106,7 @@ Post-`2026-04-09` evidence shows that the old vendor-only/day-universe mismatch 
 
 ## Status
 
-- State: blocked
+- State: active
 - Last updated: 2026-04-10
 
 ## Notes / Decisions
@@ -136,6 +136,4 @@ Post-`2026-04-09` evidence shows that the old vendor-only/day-universe mismatch 
   - vendor Starknet `rent_paid_eth` matches canonical `state_updates_eth` to within `2.483e-06 ETH`
   - canonical Starknet excess matches canonical `batch_submissions_eth + proof_submissions_eth` to within floating noise
   - those excess tx families live on shared SHARP verifier-stack contracts, so the remaining problem is canonical over-attribution of shared SHARP costs, not a stale Starknet selector set
-- 2026-04-10: `T050` must remain blocked until:
-  1. `T051` locks the Starknet shared-settlement attribution contract in W0, and
-  2. `T052` repairs the Starknet ETL implementation under that contract and rebuilds the authoritative artifacts.
+- 2026-04-10: Operator resumed `T050` on branch `T050_validation_str_pipeline_checks_resumed` after `T051` and `T052` landed on the branch tip. The preserved `op_t050_*` and historical `T050*` branches remain archive provenance only; this resumed branch/worktree is the clean live validation surface.
