@@ -1,41 +1,51 @@
 # H052 — Starknet root cause: shared SHARP cost over-attribution (2026-04-10)
 
-## Summary
+## Executive conclusion
 
-The remaining Starknet `T050` benchmark failure is not a missing sender/selector issue. It is a methodology error in the canonical Starknet attribution model.
+The remaining Starknet `T050` benchmark failure is **not** a missing sender/selector problem like Taiko. It is a **methodology error** in the canonical Starknet attribution model.
 
-Canonical Starknet currently charges the full raw Ethereum tx fees of generic SHARP verifier-stack contracts to Starknet:
+Canonical Starknet currently charges the **full raw Ethereum tx fees** of generic SHARP contracts to Starknet:
 
-- `registerContinuousMemoryPage`
-- `registerContinuousPageBatch`
-- `verifyMerkle`
-- `verifyFRI`
-- `verifyProofAndRegister`
+- `MemoryPageFactRegistry` page registrations (`registerContinuousMemoryPage`, `registerContinuousPageBatch`)
+- `VerifyMerkle`
+- `VerifyFRI`
+- `VerifyProofAndRegister`
 
-That is not scientifically valid as a Starknet-specific `rent_paid_eth` measure unless those costs are Starknet-exclusive. The available protocol evidence indicates they are shared / amortized SHARP costs instead.
+That is not scientifically valid as a Starknet-specific `rent_paid_eth` measure, because Starknet’s own protocol documentation says these SHARP costs are **shared and amortized**, not directly attributable 1:1 from raw on-chain tx totals.
 
-## Evidence
+## Local evidence
 
-- Refreshed vendor Starknet total: `2221.2945702734282 ETH`
-- Refreshed canonical Starknet `state_updates_eth`: `2221.2945677904236 ETH`
-- Difference: `2.483004664100008e-06 ETH`
+### 1. The vendor series is exactly the Starknet `state_updates_eth` component
 
-- Refreshed canonical Starknet total: `15848.10965125149 ETH`
-- Canonical excess over vendor: `13626.815080978062 ETH`
-- Canonical `batch_submissions_eth + proof_submissions_eth`: `13626.815083461057 ETH`
+From the refreshed `wt-T049` component surface:
 
-So:
+- vendor Starknet total: `2221.2945702734282 ETH`
+- canonical Starknet `state_updates_eth` total: `2221.2945677904236 ETH`
+- difference: `2.483004664100008e-06 ETH`
 
-- `vendor Starknet rent ≈ canonical state_updates_eth`
-- `canonical Starknet excess ≈ canonical batch_submissions_eth + proof_submissions_eth`
+This is effectively exact equality.
 
-The post-repair validator in `wt-T050-final` reports the same result: Starknet is an explained methodology difference because its total delta matches `batch_submissions_eth + proof_submissions_eth` within floating noise.
+### 2. The canonical Starknet excess is exactly the SHARP-side components
 
-## Why this matters
+From the same surface:
 
-The local Starknet tracked tx universe includes SHARP-side addresses and methods, not just the Starknet Core `updateState*` contract.
+- canonical Starknet total: `15848.10965125149 ETH`
+- canonical excess over vendor: `13626.815080978062 ETH`
+- canonical `batch_submissions_eth + proof_submissions_eth`: `13626.815083461057 ETH`
 
-From the local L2BEAT Starknet tracked transaction snapshot:
+Again, this matches to floating noise.
+
+So the Starknet mismatch is mathematically:
+
+`vendor Starknet rent ≈ state_updates_eth`
+
+`canonical Starknet excess ≈ batch_submissions_eth + proof_submissions_eth`
+
+### 3. The tracked Starknet non-state-update surfaces are generic SHARP contracts
+
+The local L2BEAT tracked snapshot in
+`data/raw/l1_rent/2026-04-09/l2beat/starknet/tracked_transactions.json`
+contains:
 
 - `batchSubmissions`
   - `registerContinuousMemoryPage`
@@ -48,48 +58,121 @@ From the local L2BEAT Starknet tracked transaction snapshot:
   - `updateState`
   - `updateStateKzgDA`
 
-That means the current generic tracked-tx model is measuring SHARP infrastructure costs directly as if they were rollup-exclusive Starknet costs.
+The non-state-update contract surfaces in the snapshot are:
 
-## Official-source basis
+- `0xe583bcde0160b637330b27a3ea1f3c02ba2ec460`
+- `0xfd14567eaf9ba941cb8c8a94eec14831ca7fd1b4`
+- `0x32a91ff604ab2adcd832e91d68b2f3f25358fdad`
+- `0x634dcf4f1421fc4d95a968a559a450ad0245804c`
+- `0x30efaaa99f8efe310d9fdc83072e2a04c093d400`
+- `0xdef8a3b280a54ee7ed4f72e1c7d6098ad8df44fb`
+- `0x47312450b3ac8b5b8e247a6bb6d523e7605bdb60`
 
-- Starknet SHARP protocol docs describe SHARP as a shared prover / aggregator and say Starknet pays only its relative share of proof verification:
-  - https://docs.starknet.io/learn/protocol/sharp
-- Starknet cost docs describe an allocation model:
-  - fixed cost per SHARP train
-  - fixed cost per Starknet block
-  - memory-page and state-update components
-  - proof verification amortized across trains
-  - https://community.starknet.io/t/starknet-costs-and-fees/113853
-- Data-availability docs confirm the memory-page registry is part of the proof / public-memory machinery:
-  - https://community.starknet.io/t/data-availability-with-eip4844/113065
+These are SHARP verifier-stack contracts, not the Starknet Core contract.
 
-## Vendor-side methodology evidence
+## Official protocol evidence
 
-growthepie’s Starknet economics mapping includes only `updateState*` and Starknet blob-producer surfaces for `rent_paid_eth`, while proofs are loaded separately as `l1_settlement_custom_eth`.
+### 1. SHARP is shared and Starknet pays only a relative share of onchain verification
 
-Relevant local files:
+Official Starknet SHARP documentation:
 
-- `/tmp/gtp-dna/economics_da/economics_mapping.yml`
-- `/tmp/gtp-backend/backend/src/adapters/adapter_starknet_proof.py`
-- `/tmp/gtp-backend/backend/src/db_connector.py`
+- https://docs.starknet.io/learn/protocol/sharp
 
-## Root cause
+Key point: SHARP aggregates multiple Cairo programs, and for Starknet this means sending a single proof for multiple blocks and paying onchain verification cost only according to Starknet’s **relative share** in that proof.
 
-The Starknet blocker is that canonical is applying a raw tx-attribution method to a shared-settlement architecture that requires allocation.
+### 2. Starknet’s own cost model is not “sum all SHARP tx fees”
 
-This is why:
+Official Starknet costs post:
 
-- the Starknet gap remained after all sender/selector repairs
-- Taiko repair widened the aggregate without changing Starknet itself
-- vendor Starknet aligns exactly with `state_updates_eth`
-- the residual Starknet delta is exactly the SHARP-side tx families
+- https://community.starknet.io/t/starknet-costs-and-fees/113853
 
-## Required fix
+The Starknet team defines:
 
-Do not keep Starknet on the generic tracked-tx method for SHARP-side `batchSubmissions` / `proofSubmissions`.
+- **fixed per SHARP train**: about `6M gas` per train
+  - `Verify FRI`
+  - `Verify Merkle`
+  - `Verify Proof and Register`
+- **fixed per Starknet block**: about `215K gas` per block
+  - `23K` gas fact registration
+  - `56K` gas for **SHARP memory page 0**
+  - `136K` gas for **State Update**
 
-Instead:
+This is an **allocation model**:
 
-1. keep direct raw attribution for Starknet-exclusive `updateState*` and blob state-diff publication
-2. replace SHARP-side raw Starknet attribution with a Starknet-specific allocated shared-settlement model
-3. lock that model in W0 before changing the ETL
+- proof verification costs are per-train and must be amortized by train size
+- only **memory page 0** is called out as the fixed per-block memory-page cost
+- the cost model is not “charge Starknet the full raw gas of every MemoryPageFactRegistry / Merkle / FRI / VerifyProof tx”
+
+### 3. Data availability docs confirm the memory-page registry is generic proof/public-memory machinery
+
+- https://community.starknet.io/t/data-availability-with-eip4844/113065
+
+The current mechanism explicitly sends memory pages to `MemoryPageFactRegistry` as part of the public-memory proof flow. This is proof/data-availability machinery, not a simple Starknet-owned settlement inbox.
+
+### 4. External contract identity matches the local tracked surfaces
+
+- `MemoryPageFactRegistry`: https://www.codeslaw.app/contracts/ethereum/0xe583bcde0160b637330b27a3ea1f3c02ba2ec460
+- `SHARP Verifier`: https://www.codeslaw.app/contracts/ethereum/0x47312450b3ac8b5b8e247a6bb6d523e7605bdb60
+
+These addresses and methods match the local Starknet tracked-call universe.
+
+## Why earlier “Starknet was resolved” was misleading
+
+What was resolved earlier was **diagnosis**, not **scientific closure**.
+
+The component audit successfully proved that the benchmark gap was not random:
+
+- vendor Starknet tracks `state_updates_eth`
+- canonical excess tracks `batch_submissions_eth + proof_submissions_eth`
+
+That explained the mismatch, but it did **not** establish that canonical’s Starknet methodology was correct.
+
+The new investigation shows it is not enough to say “vendor excludes proofs.” The deeper issue is:
+
+**canonical Starknet is using a raw-tx attribution method on a shared SHARP architecture that requires allocation.**
+
+## Once-and-for-all fix
+
+### Do not keep Starknet on the generic tracked-tx method for `batchSubmissions` / `proofSubmissions`
+
+That method is acceptable for rollups whose settlement costs are paid on rollup-specific contracts.
+It is not acceptable for Starknet’s shared SHARP verifier stack.
+
+### Replace Starknet SHARP attribution with a Starknet-specific allocation model
+
+For Starknet:
+
+1. Keep direct raw on-chain attribution for:
+   - `updateState`
+   - `updateStateKzgDA`
+   - blob state-diff publication
+
+2. Stop charging full raw SHARP verifier-stack tx fees directly to Starknet for:
+   - `registerContinuousMemoryPage`
+   - `registerContinuousPageBatch`
+   - `verifyMerkle`
+   - `verifyFRI`
+   - `verifyProofAndRegister`
+
+3. Introduce a Starknet-specific allocated settlement component built from official sources:
+   - preferred: Starknet official SHARP pricing / allocation reports
+   - fallback: official fixed-cost formulas plus train-size allocation, if the pricing report is unavailable historically
+
+4. Split the output contractually if needed:
+   - direct exclusive L1 settlement / DA cost
+   - allocated shared SHARP settlement cost
+
+5. Update benchmark logic so growthepie `rent_paid_eth` is compared against the Starknet direct-exclusive surface, while the allocated shared SHARP settlement remains visible in components / costs / caveats.
+
+## Why this is the right root cause
+
+This diagnosis simultaneously explains all observed facts:
+
+- why the Starknet delta is huge
+- why it begins when SHARP-side tracked calls appear
+- why vendor rent matches only `state_updates_eth`
+- why the delta is exactly the SHARP-side tx families
+- why the issue persisted after all sender/selector repair work
+- why Taiko repair widened the aggregate without changing Starknet itself
+
+The Starknet problem is not a missing contract window. It is that the current canonical method is **measuring the wrong Starknet-specific object** on a shared settlement architecture.
