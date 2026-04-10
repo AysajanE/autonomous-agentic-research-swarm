@@ -5607,6 +5607,15 @@ def sample_rows_or_die(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return sample
 
 
+def sample_component_rows_or_die(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    sample = [row for row in rows if row["date_utc"] in SAMPLE_DATES]
+    present_dates = {row["date_utc"] for row in sample}
+    missing_dates = [day for day in SAMPLE_DATES if day not in present_dates]
+    if missing_dates:
+        raise SystemExit(f"sample selection missing required component dates: {missing_dates}")
+    return sample
+
+
 def sample_decomp_rows_or_die(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     by_day = {row["date_utc"]: row for row in rows}
     sample: list[dict[str, str]] = []
@@ -6430,7 +6439,7 @@ def main(argv: list[str]) -> int:
         decomp_rows.append(row)
 
     panel_sample_rows = sample_rows_or_die(panel_rows)
-    component_sample_rows = sample_rows_or_die(component_rows)
+    component_sample_rows = sample_component_rows_or_die(component_rows)
     decomp_sample_rows = sample_decomp_rows_or_die(decomp_rows)
 
     write_csv(panel_path, panel_rows, headers=PANEL_HEADERS)

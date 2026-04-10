@@ -12,14 +12,14 @@
       "sha256": "f323e2f5f124634f68ef683f96216981fc261614b0153212f1344503ceb5b29f"
     },
     {
-      "bytes": 1335,
+      "bytes": 3337,
       "path": "data/samples/l1_rent/daily_rollup_rent_components_sample.csv",
-      "sha256": "081f0fd575ec70d03e1305629dc7fbbcb342d530e26d88ccc66e90b32fb3f222"
+      "sha256": "f4100de2d22d39d10308d7852d6d10311c1780b41bbfd3826203d127b28e0aac"
     }
   ],
   "transform": {
     "command": "python src/etl/build_l1_rent_panel.py --run-date 2026-04-09 --resume-manifested-run",
-    "git_sha": "3de7f8bd3ac428dfa8696a33dcd01cefabc81060",
+    "git_sha": "61891d9a565ae80680baa2acb31e526b93b47ce0",
     "script_path": "src/etl/build_l1_rent_panel.py"
   }
 }
