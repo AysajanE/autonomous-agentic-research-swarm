@@ -97,10 +97,8 @@ Until this contract is locked, more `T035`/`T046`/`T050` reruns will keep redisc
 - `make gate`
 
 ## Status
-
-- State: active
+- State: done
 - Last updated: 2026-04-10
-
 ## Notes / Decisions
 
 - 2026-04-10: Created after post-repair `T050` evidence showed the remaining failure is now a contract-level benchmark conflict, not a generic canonical coverage defect.
@@ -109,3 +107,7 @@ Until this contract is locked, more `T035`/`T046`/`T050` reruns will keep redisc
 - 2026-04-10: Reproduction/gate command: `make gate` from repo root. Outcome: pass.
 - 2026-04-10: Downstream note: `T049` now has a contract-backed target artifact and `T050` should stay blocked until the component surface exists and validation logic is updated to apply the locked benchmark policy rather than forcing raw vendor parity.
 - 2026-04-10: Narrow W0 clarification authorized after the first `T049` implementation pass exposed a contract-level double-counting ambiguity. `daily_rollup_rent_components` now explicitly carries two parallel identities: tx-family columns sum to canonical `rent_paid_eth`, and fee-class columns separately sum to canonical `rent_paid_eth`.
+- 2026-04-10: Worker completion verification pass confirmed the declared T048 outputs exist at HEAD and match task intent: `docs/protocol.md` locks canonical on-chain `rent_paid_eth` as release truth, `contracts/data_dictionary.md` separates canonical rent from vendor benchmark semantics, `contracts/decisions.md` records the benchmark-policy rationale, and `contracts/project.yaml` encodes the corresponding benchmark and release-blocker contract.
+- 2026-04-10: Reproduction commands for this completion pass: `rg -n "rent_paid_eth|growthepie|daily_rollup_rent_components|benchmark" docs/protocol.md contracts/data_dictionary.md contracts/decisions.md contracts/project.yaml .orchestrator/handoff/H048_t050_contract_resolution_blocker.md` and `make gate`. Gate outcome: pass.
+- 2026-04-10: Assumption and caveats: the task input path `reports/validation/cross_source_reconciliation.md` is not present yet on this branch, but the needed contract evidence is already captured in the locked W0 files and `.orchestrator/handoff/H048_t050_contract_resolution_blocker.md`; no additional handoff note was needed for this Worker pass. Operator still needs to record the T048 swarm run manifest before Judge review, and downstream `T050` should apply the locked benchmark policy rather than treating raw vendor parity as release truth.
+- 2026-04-10: Judge approved; review log: reports/status/reviews/T048_20260410T192135Z.json
