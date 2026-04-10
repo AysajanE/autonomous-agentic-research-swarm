@@ -99,11 +99,18 @@ Without this contract, another W2 implementation would silently redefine the met
 - `make gate`
 
 ## Status
-
-- State: backlog
+- State: done
 - Last updated: 2026-04-10
-
 ## Notes / Decisions
 
 - 2026-04-10: Created after the Starknet deep-dive established that the remaining `T050` blocker is a shared-SHARP attribution problem, not another missing sender/selector issue.
 - 2026-04-10: The motivating root cause is recorded in `.orchestrator/handoff/H052_starknet_shared_sharp_rootcause_2026-04-10.md`.
+- 2026-04-10: Locked the Starknet contract to the narrower evidence-backed choice: canonical Starknet `rent_paid_eth` is the direct-exclusive settlement / DA surface only under the current contract. Raw generic SHARP verifier-stack tx fees are excluded unless a future W0 task locks an evidence-backed historical allocation model.
+- 2026-04-10: Updated `docs/protocol.md`, `contracts/data_dictionary.md`, `contracts/decisions.md`, `contracts/project.yaml`, and `contracts/CHANGELOG.md` so Starknet shared SHARP costs cannot silently re-enter canonical rent through naive raw-fee attribution.
+- 2026-04-10: Benchmark implication: growthepie Starknet `rent_paid` is interpreted as a benchmark for the direct-exclusive Starknet surface, which current evidence shows aligns with the `state_updates_eth` family rather than with full raw SHARP verifier-stack fees.
+- 2026-04-10: Reproduction/gate command: `make gate` from repo root. Outcome in this worktree: fail, but only on repo-wide review-bundle issues outside T051-owned paths:
+  - `.orchestrator/backlog/T051_lock_starknet_shared_settlement_attribution_contract.md:missing_run_manifest`
+  - `.orchestrator/ready_for_review/T049_emit_rollup_day_rent_components_for_auditability.md:missing_outputs:data/processed/l1_rent/daily_rollup_rent_components.csv=missing_file`
+- 2026-04-10: Assumption: available evidence is strong enough to reject naive full-fee SHARP attribution but not strong enough to lock a reviewed historical allocation formula, so the contract excludes shared SHARP cost from canonical Starknet rent until such evidence exists.
+- 2026-04-10: No new handoff note was added. The durable downstream caveat is already captured in `.orchestrator/handoff/H052_starknet_shared_sharp_rootcause_2026-04-10.md`, and the locked W0 contract files now provide the implementation target for `T052`.
+- 2026-04-10: Judge approved; review log: reports/status/reviews/T051_20260410T192822Z.json

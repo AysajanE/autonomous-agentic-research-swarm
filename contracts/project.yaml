@@ -51,8 +51,15 @@ scientific_contract:
     release_blockers:
       - "key-universe mismatch between canonical and vendor rollup-day panels without a W0-reviewed exception"
       - "unexplained matched-key divergence beyond the protocol tolerance after component-level audit"
+      - "Starknet canonical rent includes shared SHARP verifier-stack raw fees without a W0-reviewed allocation model"
     non_blocking_conditions:
       - "documented chain-specific methodology differences between vendor economics mapping semantics and canonical on-chain fee accounting"
+      - "documented Starknet benchmark divergence caused only by excluded shared SHARP cost under the locked direct-exclusive contract"
+    chain_specific_rules:
+      starknet:
+        canonical_rent_scope: "direct-exclusive Starknet settlement / DA surface only under the current contract"
+        excluded_shared_costs: "raw Ethereum tx fees on generic SHARP verifier-stack contracts stay outside canonical rent and canonical component totals unless a W0-reviewed allocation model is locked"
+        vendor_benchmark_interpretation: "growthepie Starknet rent benchmarks the direct-exclusive Starknet surface rather than excluded shared SHARP cost"
 
 artifact_dag:
   - stage_id: registry

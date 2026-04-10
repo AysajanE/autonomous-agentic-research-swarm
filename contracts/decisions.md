@@ -57,3 +57,25 @@ Policy:
     - `contracts/data_dictionary.md`
     - `contracts/project.yaml`
     - `.orchestrator/handoff/H048_t050_contract_resolution_blocker.md`
+
+- 2026-04-10 — Lock Starknet shared-settlement attribution contract (owner: @human)
+  - Decision:
+    - Canonical Starknet `daily_rollup_panel.rent_paid_eth` is the direct-exclusive Starknet settlement / DA surface only under the current contract.
+    - Full raw Ethereum tx fees on generic SHARP verifier-stack methods (`registerContinuousMemoryPage`, `registerContinuousPageBatch`, `verifyMerkle`, `verifyFRI`, `verifyProofAndRegister`) are excluded from canonical Starknet `rent_paid_eth` and from canonical Starknet component totals unless a future Workstream W0 task locks an evidence-backed historical allocation model for those shared costs.
+    - Under the current contract, Starknet's benchmark-compatible canonical surface is the `state_updates_eth` family rather than `state_updates_eth + batch_submissions_eth + proof_submissions_eth`.
+    - growthepie Starknet `rent_paid` is interpreted as a benchmark for the direct-exclusive Starknet surface. Starknet benchmark divergence caused solely by excluded shared SHARP cost is non-blocking once documented; silently charging Starknet the full raw shared SHARP fees is not allowed.
+  - Rationale:
+    - The `T049` component surface shows growthepie Starknet `rent_paid_eth` is effectively equal to canonical `state_updates_eth`, while the entire remaining canonical excess matches `batch_submissions_eth + proof_submissions_eth` to floating noise.
+    - The non-state-update Starknet tx families live on generic SHARP verifier-stack contracts rather than the Starknet Core `updateState*` path.
+    - Official Starknet protocol evidence describes SHARP proof verification as shared / amortized and charges Starknet only a relative share, which is incompatible with full raw-fee attribution from generic SHARP contracts.
+    - Available evidence is sufficient to reject naive full-fee SHARP attribution, but not sufficient to lock a reviewed historical allocation formula for shared SHARP cost.
+  - Expected impact:
+    - `T052` must remove naive full-fee SHARP attribution from canonical Starknet rent and component outputs.
+    - `T050` should interpret growthepie Starknet `rent_paid` as a benchmark for the direct-exclusive Starknet surface rather than as a test of excluded shared SHARP cost.
+    - Any future attempt to add allocated shared SHARP settlement back into canonical Starknet rent requires a new W0-reviewed contract task with official allocation evidence.
+  - Links/refs:
+    - `docs/protocol.md`
+    - `contracts/data_dictionary.md`
+    - `contracts/project.yaml`
+    - `.orchestrator/handoff/H052_starknet_shared_sharp_rootcause_2026-04-10.md`
+    - `.orchestrator/blocked/T050_validation_str_pipeline_checks.md`

@@ -14,6 +14,9 @@ This file is the canonical reference for tables/fields/units/keys used in the pr
   - Primary denominator (`l2_fees_eth`): growthepie (ETH-native series)
   - Authoritative numerator (`rent_paid_eth`): on-chain computed canonical series
   - Related vendor benchmark surfaces (`rent_paid_eth`, `profit_eth`): growthepie vendor panel and validation reports only; secondary cross-checks rather than the source of canonical `rent_paid_eth`
+- Chain-specific rule:
+  - For rollups with shared settlement infrastructure, `rent_paid_eth` includes only the direct-exclusive attributable surface unless a reviewed allocation model is locked.
+  - For Starknet specifically, canonical `rent_paid_eth` excludes raw generic SHARP verifier-stack fees and is benchmarked against the direct-exclusive state-update settlement surface under the current contract.
 
 #### Fields
 
@@ -22,7 +25,7 @@ This file is the canonical reference for tables/fields/units/keys used in the pr
 | `date_utc` | date | YYYY-MM-DD (UTC) | no | UTC date for daily aggregation |
 | `rollup_id` | string | slug | no | Stable rollup identifier (see `registry/rollup_registry_v1.csv`) |
 | `l2_fees_eth` | number | ETH | no | Total user fees paid on the rollup for `date_utc` (ETH-native) |
-| `rent_paid_eth` | number | ETH | no | Authoritative on-chain attributable Ethereum L1 fee accounting for settlement/DA/proofs for `date_utc` (ETH-native) |
+| `rent_paid_eth` | number | ETH | no | Authoritative on-chain attributable Ethereum L1 fee accounting for settlement/DA/proofs for `date_utc` (ETH-native); for shared-settlement rollups this is the direct-exclusive attributable surface unless a reviewed allocation model is locked |
 | `profit_eth` | number | ETH | yes | Optional vendor-derived benchmark field; used only for sanity checks when contract-compatible and not part of the canonical STR numerator |
 | `txcount` | integer | count | yes | Transaction count (if provided) |
 
@@ -35,6 +38,9 @@ This file is the canonical reference for tables/fields/units/keys used in the pr
 - Identity rule:
   - tx-family columns (`batch_submissions_eth`, `proof_submissions_eth`, `state_updates_eth`) must sum exactly to `rent_paid_eth`
   - fee-class columns (`blob_fee_burn_eth`, `execution_base_fee_burn_eth`, `execution_priority_fee_eth`) must separately sum exactly to `rent_paid_eth`
+- Chain-specific rule:
+  - This table contains only components that are inside canonical `rent_paid_eth`; excluded shared-cost diagnostics do not belong in the canonical component totals.
+  - For Starknet under the current contract, raw shared SHARP verifier-stack fees are excluded from the canonical component surface until a reviewed allocation model exists.
 
 #### Fields
 
@@ -42,9 +48,9 @@ This file is the canonical reference for tables/fields/units/keys used in the pr
 |---|---|---|---|---|
 | `date_utc` | date | YYYY-MM-DD (UTC) | no | UTC date for daily aggregation |
 | `rollup_id` | string | slug | no | Stable rollup identifier (see `registry/rollup_registry_v1.csv`) |
-| `batch_submissions_eth` | number | ETH | no | Canonical execution/blob fees attributed to batch-submission transactions for the rollup-day |
-| `proof_submissions_eth` | number | ETH | no | Canonical execution/blob fees attributed to proof or custom settlement submissions for the rollup-day |
-| `state_updates_eth` | number | ETH | no | Canonical execution/blob fees attributed to state-update transactions for the rollup-day |
+| `batch_submissions_eth` | number | ETH | no | Canonical execution/blob fees attributed to batch-submission transactions for the rollup-day; excludes shared-settlement raw fees that are outside canonical `rent_paid_eth` |
+| `proof_submissions_eth` | number | ETH | no | Canonical execution/blob fees attributed to proof or custom settlement submissions for the rollup-day; excludes shared-settlement raw fees that are outside canonical `rent_paid_eth` |
+| `state_updates_eth` | number | ETH | no | Canonical execution/blob fees attributed to state-update transactions for the rollup-day; for Starknet under the current contract this is the direct-exclusive benchmark-compatible settlement surface |
 | `blob_fee_burn_eth` | number | ETH | no | Canonical EIP-4844 blob fee burn attributed to the rollup-day |
 | `execution_base_fee_burn_eth` | number | ETH | no | Canonical EIP-1559 execution-layer base fee burn attributed to the rollup-day |
 | `execution_priority_fee_eth` | number | ETH | no | Canonical execution-layer priority fees attributed to the rollup-day |
