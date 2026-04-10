@@ -6359,10 +6359,11 @@ def main(argv: list[str]) -> int:
             )
 
     panel_rows: list[dict[str, str]] = []
-    component_rows: list[dict[str, str]] = []
+    vendor_keys: set[tuple[str, str]] = set()
     vendor_rows.sort(key=lambda row: (row["date_utc"], row["rollup_id"]))
     for row in vendor_rows:
         key = (row["date_utc"], row["rollup_id"])
+        vendor_keys.add(key)
         onchain = rollup_daily.get(key)
         if onchain is None:
             onchain = new_rollup_component_bucket()
@@ -6378,10 +6379,18 @@ def main(argv: list[str]) -> int:
                 "txcount": row.get("txcount", ""),
             }
         )
+    component_rows: list[dict[str, str]] = []
+    # The authoritative component surface must cover every canonical on-chain rent key while also
+    # preserving zero-rent panel rows that exist because the paired vendor fee denominator is present.
+    for day, rollup_id in sorted(set(rollup_daily) | vendor_keys):
+        onchain = rollup_daily.get((day, rollup_id))
+        if onchain is None:
+            onchain = new_rollup_component_bucket()
+        rent_paid_eth = to_decimal_eth(onchain["rent_paid_wei"])
         component_rows.append(
             {
-                "date_utc": row["date_utc"],
-                "rollup_id": row["rollup_id"],
+                "date_utc": day,
+                "rollup_id": rollup_id,
                 "batch_submissions_eth": format_decimal(to_decimal_eth(onchain["batch_submissions_wei"])),
                 "proof_submissions_eth": format_decimal(to_decimal_eth(onchain["proof_submissions_wei"])),
                 "state_updates_eth": format_decimal(to_decimal_eth(onchain["state_updates_wei"])),

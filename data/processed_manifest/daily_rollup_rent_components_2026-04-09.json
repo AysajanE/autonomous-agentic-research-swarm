@@ -7,9 +7,9 @@
   ],
   "outputs": [
     {
-      "bytes": 1606913,
+      "bytes": 1620496,
       "path": "data/processed/l1_rent/daily_rollup_rent_components.csv",
-      "sha256": "04ad4135cc5adb9fd1ddb43a1a8ea6817d0e1ea6127232e925d9e25db746da0c"
+      "sha256": "f323e2f5f124634f68ef683f96216981fc261614b0153212f1344503ceb5b29f"
     },
     {
       "bytes": 1335,
@@ -19,7 +19,7 @@
   ],
   "transform": {
     "command": "python src/etl/build_l1_rent_panel.py --run-date 2026-04-09 --resume-manifested-run",
-    "git_sha": "508f12a5058743e5750b1c3d8b0e7baf91fd44ff",
+    "git_sha": "3de7f8bd3ac428dfa8696a33dcd01cefabc81060",
     "script_path": "src/etl/build_l1_rent_panel.py"
   }
 }
