@@ -32,7 +32,9 @@ This file is the canonical reference for tables/fields/units/keys used in the pr
 - Primary key: (`date_utc`, `rollup_id`)
 - Grain: daily × rollup (UTC)
 - Source(s): on-chain computed canonical series (authoritative)
-- Identity rule: component columns must sum exactly to `rent_paid_eth`.
+- Identity rule:
+  - tx-family columns (`batch_submissions_eth`, `proof_submissions_eth`, `state_updates_eth`) must sum exactly to `rent_paid_eth`
+  - fee-class columns (`blob_fee_burn_eth`, `execution_base_fee_burn_eth`, `execution_priority_fee_eth`) must separately sum exactly to `rent_paid_eth`
 
 #### Fields
 
@@ -46,7 +48,7 @@ This file is the canonical reference for tables/fields/units/keys used in the pr
 | `blob_fee_burn_eth` | number | ETH | no | Canonical EIP-4844 blob fee burn attributed to the rollup-day |
 | `execution_base_fee_burn_eth` | number | ETH | no | Canonical EIP-1559 execution-layer base fee burn attributed to the rollup-day |
 | `execution_priority_fee_eth` | number | ETH | no | Canonical execution-layer priority fees attributed to the rollup-day |
-| `rent_paid_eth` | number | ETH | no | Canonical rollup-day total; must equal the sum of the component columns above |
+| `rent_paid_eth` | number | ETH | no | Canonical rollup-day total; must equal both the tx-family subtotal and the fee-class subtotal for the same row |
 
 ### daily_l1_rent_decomposition
 

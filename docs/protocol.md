@@ -58,6 +58,7 @@ Rules:
 - Validation treatment:
   - A canonical-vs-vendor key-universe mismatch is a release blocker unless a W0-reviewed exception is recorded in contracts/handoff.
   - Matched-key divergence above tolerance is release-blocking only when it remains unexplained after component-level audit of the canonical on-chain surface.
+  - Component-level audit for `daily_rollup_rent_components` uses two explicit parallel identities on each row: a tx-family identity and a fee-class identity. Both must reconcile independently to canonical `rent_paid_eth`.
   - Explained methodology differences must remain visible in validation artifacts and release caveats; they do not justify overwriting canonical `rent_paid_eth` to force vendor parity.
 
 ## Known regime dates
