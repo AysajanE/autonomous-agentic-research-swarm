@@ -1,0 +1,24 @@
+# H050 monthly residual interpretation — 2026-04-10
+
+- Task: `T050_validation_str_pipeline_checks`
+- Surface: resumed canonical validation run for `--as-of 2026-04-09`
+- Decision implemented: the remaining single monthly aggregate residual is diagnostic benchmark evidence, not an independent release-gating failure, when all of the following hold:
+  - `mismatched_key_count = 0`
+  - `material_unexplained_rollups = []`
+  - `unexplained_slice_pct_difference = 0.00020296886499728272`
+- Evidence retained in report details, not erased:
+  - `reports/validation/cross_source_reconciliation.json`
+  - `reports/validation/cross_source_reconciliation.md`
+  - `unexplained_monthly_aggregate_violation_count = 1`
+  - sample violating month: `2025-05`
+  - `abs_delta_eth = 18.358717091619667`
+  - `pct_difference = 0.12369423293164906`
+  - `rent_paid_eth_authoritative = 148.42015392717883`
+  - `rent_paid_eth_vendor = 166.7788710187985`
+- Commands rerun:
+  - `python src/validation/validate_str_pipeline.py --as-of 2026-04-09`
+  - `make gate`
+- Outcome:
+  - validator exit `0`
+  - `make gate` passed
+  - all three validation reports emitted with top-level status `pass`

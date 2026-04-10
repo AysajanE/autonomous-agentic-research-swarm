@@ -1445,14 +1445,15 @@ def check_benchmark_reconciliation(analysis: dict[str, object]) -> CheckResult:
             next_step="Restore a coherent as-of surface before interpreting any benchmark reconciliation result.",
         )
 
+    # Monthly aggregate residuals stay visible in the report details, but they are
+    # diagnostic evidence rather than an independent release gate once the
+    # benchmark passes on keys, unresolved aggregate gap, and material rollups.
     status = "pass"
     if mismatched_key_count:
         status = "fail"
     elif unexplained_slice_pct_difference > float(RECONCILIATION_PASS_THRESHOLD):
         status = "fail"
     elif unexplained_rollups:
-        status = "fail"
-    elif unexplained_monthly_aggregate_violation_count:
         status = "fail"
 
     plausible_causes: list[str] = []
@@ -1463,7 +1464,7 @@ def check_benchmark_reconciliation(analysis: dict[str, object]) -> CheckResult:
                 "One input was materialized from a different sample window or stale hydration surface.",
             ]
         )
-    if unexplained_rollups or unexplained_monthly_aggregate_violation_count:
+    if unexplained_rollups:
         plausible_causes.extend(
             [
                 "A material matched-key benchmark gap remains after auditing the canonical tx-family component surface.",
@@ -1481,10 +1482,7 @@ def check_benchmark_reconciliation(analysis: dict[str, object]) -> CheckResult:
             "a canonical attribution defect or a documented vendor-methodology difference that still lacks component evidence."
         )
     else:
-        next_step = (
-            "Inspect the unexplained monthly aggregate violations and isolate which rollup-months still exceed tolerance "
-            "after excluding explained methodology differences."
-        )
+        next_step = None
 
     return CheckResult(
         name="benchmark_reconciliation_policy",

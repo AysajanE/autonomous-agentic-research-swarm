@@ -1,0 +1,99 @@
+{
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "run_id": "T050_20260410T211117Z",
+  "generated_at_utc": "2026-04-10T21:11:17Z",
+  "task": {
+    "task_id": "T050",
+    "task_path": ".orchestrator/ready_for_review/T050_validation_str_pipeline_checks.md",
+    "title": "Validation: canonical STR integrity, coverage, and benchmark reconciliation",
+    "role": "Worker",
+    "workstream": "W5",
+    "task_kind": "validation",
+    "dependencies": [
+      "T030",
+      "T035",
+      "T040",
+      "T048",
+      "T049",
+      "T051",
+      "T052"
+    ],
+    "integration_ready_dependencies": [],
+    "state_before": "active",
+    "state_after": "ready_for_review"
+  },
+  "repo": {
+    "branch": "T050_validation_str_pipeline_checks_resumed",
+    "git_sha": "a3992225a456548114cbe0f95d6d71141c047f51",
+    "base_branch": "main",
+    "remote": "origin"
+  },
+  "executor": {
+    "role": "Worker",
+    "runner": "local_swarm",
+    "tool": "manual",
+    "model": "gpt-5.4",
+    "sandbox": "workspace-write",
+    "allow_network": false,
+    "repair_context": null,
+    "returncode": 0,
+    "error": "executor_recorded_by_operator_after_manual_worker_pass"
+  },
+  "commands": {
+    "executor": [
+      "codex",
+      "-a",
+      "never",
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "-C",
+      "/Users/aeziz-local/Research/wt-T050",
+      "manual worker execution pass for T050"
+    ],
+    "executor_log_path": null,
+    "gates": [
+      "python src/validation/validate_str_pipeline.py --as-of 2026-04-09",
+      "make gate"
+    ]
+  },
+  "gates": [
+    {
+      "command": "python src/validation/validate_str_pipeline.py --as-of 2026-04-09",
+      "returncode": 0,
+      "output_tail": ""
+    },
+    {
+      "command": "make gate",
+      "returncode": 0,
+      "output_tail": "[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 6, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 10, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 27, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 17, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n"
+    }
+  ],
+  "ownership": {
+    "ok": true,
+    "changed_paths": [
+      ".orchestrator/handoff/H050_monthly_residual_non_gating_2026-04-10.md",
+      ".orchestrator/ready_for_review/T050_validation_str_pipeline_checks.md",
+      "reports/status/swarm_runs/T050_20260410T211117Z.json",
+      "reports/validation/cross_source_reconciliation.json",
+      "reports/validation/cross_source_reconciliation.md",
+      "reports/validation/l1_rent_decomposition_validation.json",
+      "reports/validation/l1_rent_decomposition_validation.md",
+      "reports/validation/rollup_panel_validation.json",
+      "reports/validation/rollup_panel_validation.md",
+      "src/validation/validate_str_pipeline.py"
+    ],
+    "violations": []
+  },
+  "artifacts": {
+    "outputs_ok": true,
+    "missing_outputs": [],
+    "required_manifests_ok": true,
+    "missing_manifests": [],
+    "run_manifest_path": "reports/status/swarm_runs/T050_20260410T211117Z.json"
+  },
+  "result": {
+    "status": "ok",
+    "blocked_reasons": []
+  }
+}
