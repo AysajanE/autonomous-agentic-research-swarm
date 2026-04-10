@@ -42,7 +42,7 @@ class MetricsStrTest(unittest.TestCase):
         ].iloc[0]
 
         self.assertAlmostEqual(arbitrum_day_one, 0.878349487034478)
-        self.assertAlmostEqual(optimism_day_three, 0.010774615742257543)
+        self.assertAlmostEqual(optimism_day_three, 0.016435122014817855)
 
     def test_compute_ecosystem_str_matches_sample_panel_aggregates(self) -> None:
         panel = pd.read_csv(SAMPLE_PANEL_PATH)
@@ -55,7 +55,7 @@ class MetricsStrTest(unittest.TestCase):
         )
         self.assertSequenceAlmostEqual(
             result[RENT_PAID_COLUMN].tolist(),
-            [299.43626279818886, 85.60779238219516, 5.113408609948435],
+            [299.68625594797317, 85.83637010071874, 5.29198529136078],
         )
         self.assertSequenceAlmostEqual(
             result[L2_FEES_COLUMN].tolist(),
@@ -63,7 +63,7 @@ class MetricsStrTest(unittest.TestCase):
         )
         self.assertSequenceAlmostEqual(
             result[STR_COLUMN].tolist(),
-            [0.824803530448495, 0.4434513814834015, 0.04050329150023426],
+            [0.825492141876527, 0.44463542212076634, 0.041917796761620295],
         )
 
     def test_missing_metric_rows_are_omitted_from_rollup_and_ecosystem_outputs(

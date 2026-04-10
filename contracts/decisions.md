@@ -35,3 +35,47 @@ Policy:
     - Removes domain-specific assumptions from framework gates and prevents “hybrid = two parallel projects” by enforcing a defined boundary.
   - Expected impact:
     - `scripts/quality_gates.py` and `scripts/swarm.py` can be reused across empirical/modeling/hybrid projects with only config/contract changes.
+
+- 2026-04-10 — Lock canonical rent vs vendor benchmark policy (owner: @human)
+  - Decision:
+    - Canonical `daily_rollup_panel.rent_paid_eth` remains the release-truth numerator for STR and is defined by authoritative on-chain attributable Ethereum L1 fee accounting.
+    - growthepie `rent_paid` remains a secondary vendor benchmark used for reconciliation and triangulation, not a source that can silently redefine canonical `RentPaid`.
+    - A canonical-vs-vendor key-universe mismatch is a release blocker unless a W0-reviewed exception is recorded.
+    - Matched-key benchmark divergence above tolerance is release-blocking only when it remains unexplained after component-level audit of the canonical on-chain surface.
+    - The project now requires a rollup-day rent component audit surface so validation can distinguish integrity failures from benchmark-definition differences.
+    - The `daily_rollup_rent_components` audit surface carries two parallel decompositions of the same canonical total: tx-family components and fee-class components. Each decomposition must reconcile independently to `rent_paid_eth`; they are not meant to be summed together.
+  - Rationale:
+    - Post-repair `T050` evidence for `2026-04-09` eliminated the old key-universe mismatch (`mismatched_key_count = 0`) but still showed a matched-key aggregate gap concentrated in a few rollups, especially `starknet` and `taiko`.
+    - Vendor implementation evidence shows growthepie `rent_paid_eth` is assembled from a curated economics mapping and cost components that are not identical to literal canonical on-chain fee accounting for every chain.
+    - The first `T049` implementation pass exposed that a single additive identity over both component families would double-count canonical rent and make the audit surface internally inconsistent.
+  - Expected impact:
+    - Validation must separate schema/coverage failures from benchmark divergences.
+    - Canonical ETL work gains an explicit component-audit surface instead of relying on replay logs for root-cause diagnosis.
+    - Release gating no longer depends on forcing vendor parity when the benchmark difference is evidence-backed and methodologically explained.
+  - Links/refs:
+    - `docs/protocol.md`
+    - `contracts/data_dictionary.md`
+    - `contracts/project.yaml`
+    - `.orchestrator/handoff/H048_t050_contract_resolution_blocker.md`
+
+- 2026-04-10 — Lock Starknet shared-settlement attribution contract (owner: @human)
+  - Decision:
+    - Canonical Starknet `daily_rollup_panel.rent_paid_eth` is the direct-exclusive Starknet settlement / DA surface only under the current contract.
+    - Full raw Ethereum tx fees on generic SHARP verifier-stack methods (`registerContinuousMemoryPage`, `registerContinuousPageBatch`, `verifyMerkle`, `verifyFRI`, `verifyProofAndRegister`) are excluded from canonical Starknet `rent_paid_eth` and from canonical Starknet component totals unless a future Workstream W0 task locks an evidence-backed historical allocation model for those shared costs.
+    - Under the current contract, Starknet's benchmark-compatible canonical surface is the `state_updates_eth` family rather than `state_updates_eth + batch_submissions_eth + proof_submissions_eth`.
+    - growthepie Starknet `rent_paid` is interpreted as a benchmark for the direct-exclusive Starknet surface. Starknet benchmark divergence caused solely by excluded shared SHARP cost is non-blocking once documented; silently charging Starknet the full raw shared SHARP fees is not allowed.
+  - Rationale:
+    - The `T049` component surface shows growthepie Starknet `rent_paid_eth` is effectively equal to canonical `state_updates_eth`, while the entire remaining canonical excess matches `batch_submissions_eth + proof_submissions_eth` to floating noise.
+    - The non-state-update Starknet tx families live on generic SHARP verifier-stack contracts rather than the Starknet Core `updateState*` path.
+    - Official Starknet protocol evidence describes SHARP proof verification as shared / amortized and charges Starknet only a relative share, which is incompatible with full raw-fee attribution from generic SHARP contracts.
+    - Available evidence is sufficient to reject naive full-fee SHARP attribution, but not sufficient to lock a reviewed historical allocation formula for shared SHARP cost.
+  - Expected impact:
+    - `T052` must remove naive full-fee SHARP attribution from canonical Starknet rent and component outputs.
+    - `T050` should interpret growthepie Starknet `rent_paid` as a benchmark for the direct-exclusive Starknet surface rather than as a test of excluded shared SHARP cost.
+    - Any future attempt to add allocated shared SHARP settlement back into canonical Starknet rent requires a new W0-reviewed contract task with official allocation evidence.
+  - Links/refs:
+    - `docs/protocol.md`
+    - `contracts/data_dictionary.md`
+    - `contracts/project.yaml`
+    - `.orchestrator/handoff/H052_starknet_shared_sharp_rootcause_2026-04-10.md`
+    - `.orchestrator/blocked/T050_validation_str_pipeline_checks.md`

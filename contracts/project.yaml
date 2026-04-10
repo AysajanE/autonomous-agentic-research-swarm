@@ -45,6 +45,21 @@ scientific_contract:
   secondary_cross_checks:
     - "growthepie vendor rent/profit series"
     - "L2BEAT costs series when explicitly used for reconciliation"
+  benchmark_policy:
+    canonical_release_truth: "daily_rollup_panel.rent_paid_eth from authoritative on-chain fee accounting"
+    vendor_rent_benchmark_role: "secondary diagnostic benchmark"
+    release_blockers:
+      - "key-universe mismatch between canonical and vendor rollup-day panels without a W0-reviewed exception"
+      - "unexplained matched-key divergence beyond the protocol tolerance after component-level audit"
+      - "Starknet canonical rent includes shared SHARP verifier-stack raw fees without a W0-reviewed allocation model"
+    non_blocking_conditions:
+      - "documented chain-specific methodology differences between vendor economics mapping semantics and canonical on-chain fee accounting"
+      - "documented Starknet benchmark divergence caused only by excluded shared SHARP cost under the locked direct-exclusive contract"
+    chain_specific_rules:
+      starknet:
+        canonical_rent_scope: "direct-exclusive Starknet settlement / DA surface only under the current contract"
+        excluded_shared_costs: "raw Ethereum tx fees on generic SHARP verifier-stack contracts stay outside canonical rent and canonical component totals unless a W0-reviewed allocation model is locked"
+        vendor_benchmark_interpretation: "growthepie Starknet rent benchmarks the direct-exclusive Starknet surface rather than excluded shared SHARP cost"
 
 artifact_dag:
   - stage_id: registry
@@ -68,10 +83,12 @@ artifact_dag:
     producing_tasks:
       - "T030"
       - "T035"
+      - "T049"
     required_artifacts:
       - "data/processed_manifest/vendor_daily_rollup_panel_<YYYY-MM-DD>.json"
       - "data/processed_manifest/daily_l1_rent_decomposition_<YYYY-MM-DD>.json"
       - "data/processed_manifest/daily_rollup_panel_<YYYY-MM-DD>.json"
+      - "data/processed_manifest/daily_rollup_rent_components_<YYYY-MM-DD>.json"
   - stage_id: validation
     depends_on:
       - processed_datasets
@@ -132,6 +149,14 @@ battle_test_queue:
     workstream: W4
     summary: "Lock STR metric construction in code and tests."
     required_for_release: true
+  - task_id: "T048"
+    workstream: W0
+    summary: "Lock the canonical rent contract and vendor benchmark policy."
+    required_for_release: true
+  - task_id: "T049"
+    workstream: W2
+    summary: "Emit rollup-day rent components for auditability and benchmark attribution."
+    required_for_release: true
   - task_id: "T050"
     workstream: W5
     summary: "Validate canonical artifacts before any release analysis."
@@ -159,6 +184,7 @@ release_contract:
       - "data/processed_manifest/vendor_daily_rollup_panel_<YYYY-MM-DD>.json"
       - "data/processed_manifest/daily_l1_rent_decomposition_<YYYY-MM-DD>.json"
       - "data/processed_manifest/daily_rollup_panel_<YYYY-MM-DD>.json"
+      - "data/processed_manifest/daily_rollup_rent_components_<YYYY-MM-DD>.json"
     validation:
       - "reports/validation/rollup_panel_validation.json"
       - "reports/validation/rollup_panel_validation.md"
@@ -187,6 +213,7 @@ release_contract:
   release_blockers:
     - "registry/rollup_registry_v1.csv is still a stub or lacks evidence-backed active rows"
     - "canonical daily_rollup_panel lineage does not cite both growthepie and on-chain raw manifests"
+    - "cross-source benchmark divergence remains unexplained after component-level audit under the locked protocol policy"
     - "required validation artifacts are missing or failing"
     - "required release figures/tables are missing"
     - "reports/catalog.yaml is missing or not reproducible from successful run manifests"

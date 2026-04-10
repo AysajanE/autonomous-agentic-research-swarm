@@ -15,7 +15,7 @@ This file is the canonical definition set for this repo. If definitions conflict
 
 Definitions:
 - `L2Fees_{i,t}`: total fees paid by users on rollup *i* on day *t*.
-- `RentPaid_{i,t}`: total fees paid by rollup *i* to Ethereum L1 for settlement/DA/proofs on day *t*.
+- `RentPaid_{i,t}`: the authoritative canonical on-chain estimate of fees paid by rollup *i* to Ethereum L1 for settlement/DA/proofs on day *t*, computed from transaction-level fee accounting over the contract-locked attributable L1 transaction universe. If a rollup uses shared settlement infrastructure, only the direct-exclusive attributable surface enters `rent_paid_eth` unless a Workstream W0-reviewed allocation rule explicitly locks how shared costs are apportioned.
 - Aggregation: the sum is over the **in-scope rollup universe** for day *t*.
 - Denominator rule: if `Σ_i L2Fees_{i,t} == 0`, then `STR_t = NaN` (undefined; do not coerce to 0).
 - Missingness rule (panel rows): if either `L2Fees_{i,t}` or `RentPaid_{i,t}` is missing for a rollup-day, exclude that rollup-day from both numerator and denominator sums for ecosystem-level aggregates.
@@ -48,7 +48,26 @@ When sources disagree for the same concept, prefer (highest to lowest):
 
 Rules:
 - Prefer ETH-native series; convert to USD only using an explicit price series and document the source.
-- Changing source priority requires a Workstream W0 task and explicit review.
+- Canonical release truth for `RentPaid` is the on-chain computed `rent_paid_eth` in the canonical panel; vendor `rent_paid` never supersedes it without a Workstream W0 task and explicit review.
+- Changing source priority or benchmark policy requires a Workstream W0 task and explicit review.
+
+## Benchmark policy
+
+- growthepie `rent_paid` and `profit` are secondary vendor benchmark series used for triangulation and reconciliation, not the release-truth definition of `RentPaid`.
+- The vendor benchmark may diverge structurally from canonical on-chain rent because its economics pipeline uses chain-specific curated transaction mappings and may omit, separately account for, or explicitly filter specific settlement-like cost families.
+- Validation treatment:
+  - A canonical-vs-vendor key-universe mismatch is a release blocker unless a W0-reviewed exception is recorded in contracts/handoff.
+  - Matched-key divergence above tolerance is release-blocking only when it remains unexplained after component-level audit of the canonical on-chain surface.
+  - Component-level audit for `daily_rollup_rent_components` uses two explicit parallel identities on each row: a tx-family identity and a fee-class identity. Both must reconcile independently to canonical `rent_paid_eth`.
+  - Explained methodology differences must remain visible in validation artifacts and release caveats; they do not justify overwriting canonical `rent_paid_eth` to force vendor parity.
+
+## Chain-specific attribution rules
+
+- Starknet:
+  - Canonical `daily_rollup_panel.rent_paid_eth` is the direct-exclusive Starknet settlement / DA surface only.
+  - Under the current contract, that direct-exclusive Starknet surface corresponds to the `state_updates_eth` family rather than the full raw Ethereum tx fees paid on generic SHARP verifier-stack contracts.
+  - Raw fees on shared SHARP verifier-stack methods such as `registerContinuousMemoryPage`, `registerContinuousPageBatch`, `verifyMerkle`, `verifyFRI`, and `verifyProofAndRegister` are excluded from canonical Starknet `rent_paid_eth` unless a future Workstream W0 task locks an evidence-backed historical allocation model for those shared costs.
+  - growthepie Starknet `rent_paid` is interpreted as a benchmark for this direct-exclusive Starknet surface. Benchmark divergence caused solely by excluded shared SHARP cost is non-blocking once documented; silently charging Starknet the full raw shared SHARP fees is not allowed.
 
 ## Known regime dates
 
@@ -70,7 +89,7 @@ Unless overridden by a task:
 - Accounting identity (vendor series): `profit ≈ fees − rent_paid`
   - Tolerance (ETH): `abs(profit − (fees − rent_paid)) <= max(1e-9, 0.01 × max(abs(fees), abs(rent_paid), 1e-9))`
 - Cross-source reconciliation (monthly aggregates, top rollups):
-  - Target tolerance: 5–10%; otherwise explain and document the cause
+  - Target tolerance: 5–10% for unexplained matched-key benchmark divergence; otherwise explain and document the cause
 - Blob usage cross-check (sample month):
   - `blobGasUsed` tolerance: ≤1% between Blobscan and on-chain daily aggregation
 - Price inputs (monthly averages):

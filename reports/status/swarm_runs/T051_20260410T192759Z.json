@@ -1,0 +1,86 @@
+{
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "run_id": "T051_20260410T192759Z",
+  "generated_at_utc": "2026-04-10T19:27:59Z",
+  "task": {
+    "task_id": "T051",
+    "task_path": ".orchestrator/ready_for_review/T051_lock_starknet_shared_settlement_attribution_contract.md",
+    "title": "Lock Starknet shared-settlement attribution contract",
+    "role": "Worker",
+    "workstream": "W0",
+    "task_kind": "protocol",
+    "dependencies": [
+      "T048",
+      "T049"
+    ],
+    "integration_ready_dependencies": [],
+    "state_before": "backlog",
+    "state_after": "ready_for_review"
+  },
+  "repo": {
+    "branch": "T051_lock_starknet_shared_settlement_attribution_contract",
+    "git_sha": "83b4cfa152f2264431e3800a6f1f82a8441abf94",
+    "base_branch": "main",
+    "remote": "origin"
+  },
+  "executor": {
+    "role": "Worker",
+    "runner": "local_swarm",
+    "tool": "manual",
+    "model": "gpt-5.4",
+    "sandbox": "workspace-write",
+    "allow_network": false,
+    "repair_context": null,
+    "returncode": 0,
+    "error": "executor_recorded_by_operator_after_manual_worker_pass"
+  },
+  "commands": {
+    "executor": [
+      "codex",
+      "-a",
+      "never",
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "-C",
+      "/Users/aeziz-local/Research/wt-T051",
+      "manual worker execution pass for T051"
+    ],
+    "executor_log_path": null,
+    "gates": [
+      "make gate"
+    ]
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "returncode": 0,
+      "output_tail": "[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 6, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 10, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 25, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 15, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n"
+    }
+  ],
+  "ownership": {
+    "ok": true,
+    "changed_paths": [
+      ".orchestrator/ready_for_review/T051_lock_starknet_shared_settlement_attribution_contract.md",
+      "contracts/CHANGELOG.md",
+      "contracts/data_dictionary.md",
+      "contracts/decisions.md",
+      "contracts/project.yaml",
+      "docs/protocol.md",
+      "data/processed/l1_rent/daily_rollup_rent_components.csv",
+      "reports/status/swarm_runs/T051_20260410T192759Z.json"
+    ],
+    "violations": []
+  },
+  "artifacts": {
+    "outputs_ok": true,
+    "missing_outputs": [],
+    "required_manifests_ok": true,
+    "missing_manifests": [],
+    "run_manifest_path": "reports/status/swarm_runs/T051_20260410T192759Z.json"
+  },
+  "result": {
+    "status": "ok",
+    "blocked_reasons": []
+  }
+}

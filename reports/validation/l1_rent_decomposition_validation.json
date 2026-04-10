@@ -1,0 +1,143 @@
+{
+  "as_of_utc_date": "2026-04-09",
+  "checks": [
+    {
+      "details": {
+        "missing_columns": [],
+        "present_columns": [
+          "date_utc",
+          "l1_base_fee_burn_eth",
+          "l1_blob_fee_burn_eth",
+          "l1_priority_fee_eth",
+          "l1_total_rent_eth",
+          "l1_blob_gas_used",
+          "l1_calldata_gas_used",
+          "l1_blob_base_fee_gwei"
+        ],
+        "required_columns": [
+          "date_utc",
+          "l1_base_fee_burn_eth",
+          "l1_blob_fee_burn_eth",
+          "l1_priority_fee_eth",
+          "l1_total_rent_eth"
+        ]
+      },
+      "name": "l1_decomposition_schema",
+      "next_step": null,
+      "plausible_causes": [],
+      "status": "pass"
+    },
+    {
+      "details": {
+        "duplicate_row_count": 0,
+        "key_columns": [
+          "date_utc"
+        ],
+        "row_count": 1559,
+        "sample_duplicates": []
+      },
+      "name": "l1_decomposition_primary_key_uniqueness",
+      "next_step": null,
+      "plausible_causes": [],
+      "status": "pass"
+    },
+    {
+      "details": {
+        "null_counts": {
+          "date_utc": 0,
+          "l1_base_fee_burn_eth": 0,
+          "l1_blob_fee_burn_eth": 0,
+          "l1_priority_fee_eth": 0,
+          "l1_total_rent_eth": 0
+        },
+        "violating_columns": {}
+      },
+      "name": "l1_decomposition_required_non_null",
+      "next_step": null,
+      "plausible_causes": [],
+      "status": "pass"
+    },
+    {
+      "details": {
+        "max_abs_difference_eth": "0",
+        "row_count": 1559,
+        "violating_rows": []
+      },
+      "name": "l1_total_rent_identity",
+      "next_step": null,
+      "plausible_causes": [],
+      "status": "pass"
+    },
+    {
+      "details": {
+        "decomposition_date_count": 1559,
+        "missing_panel_dates": [],
+        "panel_date_count": 1559
+      },
+      "name": "decomposition_covers_panel_dates",
+      "next_step": null,
+      "plausible_causes": [],
+      "status": "pass"
+    },
+    {
+      "details": {
+        "component_date_count": 1559,
+        "identity_tolerance_eth": "1E-9",
+        "max_abs_difference_eth": "0",
+        "row_count": 1559,
+        "violating_rows": [],
+        "zero_component_date_count": 0
+      },
+      "name": "l1_total_rent_matches_rollup_components",
+      "next_step": null,
+      "plausible_causes": [],
+      "status": "pass"
+    }
+  ],
+  "mode": "canonical",
+  "provenance": {
+    "artifacts": [
+      {
+        "as_of_utc_date": "2026-04-09",
+        "dataset": "vendor_panel",
+        "manifest_path": "data/processed_manifest/vendor_daily_rollup_panel_2026-04-09.json",
+        "path": "data/processed/growthepie/vendor_daily_rollup_panel.csv"
+      },
+      {
+        "as_of_utc_date": "2026-04-09",
+        "dataset": "l1_decomposition",
+        "manifest_path": "data/processed_manifest/daily_l1_rent_decomposition_2026-04-09.json",
+        "path": "data/processed/l1_rent/daily_l1_rent_decomposition.csv"
+      },
+      {
+        "as_of_utc_date": "2026-04-09",
+        "dataset": "rent_components",
+        "manifest_path": "data/processed_manifest/daily_rollup_rent_components_2026-04-09.json",
+        "path": "data/processed/l1_rent/daily_rollup_rent_components.csv"
+      },
+      {
+        "as_of_utc_date": "2026-04-09",
+        "dataset": "authoritative_panel",
+        "manifest_path": "data/processed_manifest/daily_rollup_panel_2026-04-09.json",
+        "path": "data/processed/panels/daily_rollup_panel.csv"
+      }
+    ],
+    "command_hints": {
+      "canonical": "python src/validation/validate_str_pipeline.py --as-of YYYY-MM-DD",
+      "sample": "python src/validation/validate_str_pipeline.py --sample"
+    },
+    "mode": "canonical"
+  },
+  "report_id": "l1_rent_decomposition_validation",
+  "status": "pass",
+  "summary": {
+    "date_range": {
+      "max": "2026-04-08",
+      "min": "2022-01-01"
+    },
+    "panel_date_count": 1559,
+    "row_count": 1559,
+    "total_l1_rent_eth_sum": 132390.58859843502
+  },
+  "title": "L1 rent decomposition validation"
+}

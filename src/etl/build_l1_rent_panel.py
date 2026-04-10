@@ -12,7 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, getcontext
 from pathlib import Path
@@ -26,6 +26,10 @@ getcontext().prec = 50
 
 PROTOCOL_START = date(2022, 1, 1)
 DENCUN_DATE = date(2024, 3, 13)
+# Historical Blockscout txlist gasUsed is materially under-reported on pre-Dencun Optimism
+# batcher submissions. Use receipts to meter that calldata scope while leaving unaffected
+# calldata windows on the lighter txlist path.
+CALDATA_RECEIPT_METERING_ROLLUPS = frozenset({"optimism"})
 WEI_PER_ETH = Decimal("1000000000000000000")
 WEI_PER_GWEI = Decimal("1000000000")
 
@@ -79,7 +83,7 @@ LOOKUP_DB_SELECT_CHUNK_SIZE = 500
 BIGQUERY_RECEIPT_PROGRESS_LOG_INTERVAL = 5
 RECEIPT_FALLBACK_PROGRESS_LOG_INTERVAL = 1000
 PARTITION_CHECKPOINT_SCHEMA_VERSION = 1
-PARTITION_CHECKPOINT_COMPAT_VERSION = 1
+PARTITION_CHECKPOINT_COMPAT_VERSION = 4
 
 PANEL_HEADERS = [
     "date_utc",
@@ -99,12 +103,33 @@ DECOMP_HEADERS = [
     "l1_calldata_gas_used",
     "l1_blob_base_fee_gwei",
 ]
+COMPONENT_HEADERS = [
+    "date_utc",
+    "rollup_id",
+    "batch_submissions_eth",
+    "proof_submissions_eth",
+    "state_updates_eth",
+    "execution_base_fee_burn_eth",
+    "execution_priority_fee_eth",
+    "blob_fee_burn_eth",
+    "rent_paid_eth",
+]
 SAMPLE_ROLLUPS = ("arbitrum", "base", "optimism")
 SAMPLE_DATES = ("2024-03-13", "2024-03-14", "2024-03-15")
 ROLLUPS_WITHOUT_BATCHER_ADDRESSES = {"scroll"}
 BLOBSCAN_ROLLUP_ALIASES = {
     "world": "worldchain",
     "zksync": "zksync_era",
+}
+ROLLUP_SUBTYPE_TO_COMPONENT_FIELD = {
+    "batchSubmissions": "batch_submissions_wei",
+    "proofSubmissions": "proof_submissions_wei",
+    "stateUpdates": "state_updates_wei",
+}
+CANONICAL_EXCLUDED_SUBTYPES_BY_ROLLUP = {
+    # T051 locks Starknet canonical rent to the direct-exclusive state-update surface
+    # until a reviewed shared-SHARP allocation model exists.
+    "starknet": frozenset({"batchSubmissions", "proofSubmissions"}),
 }
 
 
@@ -121,6 +146,7 @@ class RegistryRollup:
 class BlockscoutTx:
     hash: str
     rollup_id: str
+    subtype: str
     address: str
     block_number: int
     timestamp_utc: datetime
@@ -136,6 +162,7 @@ class BlockscoutTx:
 class BlobscanTx:
     hash: str
     rollup_id: str
+    subtype: str
     block_number: int
     timestamp_utc: datetime
     from_address: str
@@ -175,6 +202,16 @@ class PartitionCheckpoint:
 
 
 @dataclass(frozen=True)
+class ExactBlobscanScopeCache:
+    rows: list[BlobscanTx]
+    page_count: int
+    page_size: int
+    last_page_row_count: int
+    max_positive_total_transactions: int | None
+    contiguous_pages: bool
+
+
+@dataclass(frozen=True)
 class TrackedFunctionCall:
     rollup_id: str
     subtype: str
@@ -183,6 +220,187 @@ class TrackedFunctionCall:
     signature: str
     since_timestamp: int
     until_timestamp: int | None
+
+
+TRACKED_TRANSACTION_SUBTYPES = ("batchSubmissions", "proofSubmissions", "stateUpdates")
+LEGACY_TRACKED_CALLS_BY_ROLLUP: dict[str, tuple[TrackedFunctionCall, ...]] = {
+    "arbitrum": (
+        TrackedFunctionCall(
+            rollup_id="arbitrum",
+            subtype="batchSubmissions",
+            # Arbitrum Classic posted sequencer batches to the legacy mainnet
+            # Sequencer Inbox before Nitro. The current L2BEAT feed only covers
+            # the Nitro-era SequencerInbox, so keep the evidence-backed classic
+            # hook here to cover the entire 2022-01-01..2022-08-30 interval.
+            address="0x4c6f947ae67f572afa4ae0730947de7c874f95ef",
+            selector="0x8a2df18d",
+            signature="function addSequencerL2BatchFromOriginWithGasRefunder(bytes transactions, uint256[] lengths, uint256[] sectionsMetadata, bytes32 afterAcc, address gasRefunder)",
+            since_timestamp=1640995780,
+            until_timestamp=1661903988,
+        ),
+        TrackedFunctionCall(
+            rollup_id="arbitrum",
+            subtype="batchSubmissions",
+            # Nitro launch used a short-lived SequencerInbox selector on the
+            # modern inbox contract before the long-lived 0x8f111f3c path took
+            # over on 2022-09-19. Keep the legacy selector explicit so the
+            # launch-era 2022-08-31..2022-09-19 rent is not silently dropped.
+            address="0x1c479675ad559dc151f6ec7ed3fbf8cee79582b6",
+            selector="0x6f12b0c9",
+            signature="legacy launch-era Nitro SequencerInbox batch submission selector 0x6f12b0c9",
+            since_timestamp=1661964203,
+            until_timestamp=1663615751,
+        ),
+    ),
+    "optimism": (
+        TrackedFunctionCall(
+            rollup_id="optimism",
+            subtype="stateUpdates",
+            # Legacy OP Mainnet state roots were posted to the State Commitment
+            # Chain before Bedrock. L2BEAT's current trackedTransactions feed no
+            # longer exposes this historical hook, so keep the evidence-backed
+            # selector here to avoid silently undercounting OP L1 rent.
+            address="0xbe5dab4a2e9cd0f27300db4ab94bee3a233aeb19",
+            selector="0x8ca5cbb9",
+            signature="function appendStateBatch(bytes32[] _batch, uint256 _shouldStartAtElement)",
+            since_timestamp=1636588800,
+            until_timestamp=1686095999,
+        ),
+    ),
+    "zksync_era": (
+        TrackedFunctionCall(
+            rollup_id="zksync_era",
+            subtype="batchSubmissions",
+            # The pre-Boojum Era main contract on 0x3db5... kept the legacy
+            # batch commit selector 0x0c4dd810 off the current L2BEAT tracked
+            # transaction feed. BigQuery shows it active from 2023-03-24
+            # through 2023-12-07 and it is a dominant missing cost family in
+            # the worst 2023 reconciliation months.
+            address="0x3db52ce065f728011ac6732222270b3f2360d919",
+            selector="0x0c4dd810",
+            signature="legacy Era main-contract batch submission selector 0x0c4dd810",
+            since_timestamp=1679654255,
+            until_timestamp=1701700367,
+        ),
+        TrackedFunctionCall(
+            rollup_id="zksync_era",
+            subtype="batchSubmissions",
+            # The shared-bridge commit selector kept posting on-chain well past
+            # the current L2BEAT until bound. Extend it to the observed last
+            # on-chain use instead of truncating live rent-bearing history.
+            address="0x5d8ba173dc6c3c90c8f7c04c9288bef5fdbad06e",
+            selector="0x6edd4f12",
+            signature="function commitBatchesSharedBridge(uint256 _chainId, (uint64 batchNumber, bytes32 batchHash, uint64 indexRepeatedStorageChanges, uint256 numberOfLayer1Txs, bytes32 priorityOperationsHash, bytes32 l2LogsTreeRoot, uint256 timestamp, bytes32 commitment), (uint64 batchNumber, uint64 timestamp, uint64 indexRepeatedStorageChanges, bytes32 newStateRoot, uint256 numberOfLayer1Txs, bytes32 priorityOperationsHash, bytes32 bootloaderHeapInitialContentsHash, bytes32 eventsQueueStateHash, bytes systemLogs, bytes pubdataCommitments)[] _newBatchesData)",
+            since_timestamp=1722410364,
+            until_timestamp=1743088391,
+        ),
+        TrackedFunctionCall(
+            rollup_id="zksync_era",
+            subtype="proofSubmissions",
+            address="0x5d8ba173dc6c3c90c8f7c04c9288bef5fdbad06e",
+            selector="0xc37533bb",
+            signature="function proveBatchesSharedBridge(uint256 _chainId, (uint64 batchNumber, bytes32 batchHash, uint64 indexRepeatedStorageChanges, uint256 numberOfLayer1Txs, bytes32 priorityOperationsHash, bytes32 l2LogsTreeRoot, uint256 timestamp, bytes32 commitment), (uint64 batchNumber, bytes32 batchHash, uint64 indexRepeatedStorageChanges, uint256 numberOfLayer1Txs, bytes32 priorityOperationsHash, bytes32 l2LogsTreeRoot, uint256 timestamp, bytes32 commitment)[], (uint256[] recursiveAggregationInput, uint256[] serializedProof))",
+            since_timestamp=1722410364,
+            until_timestamp=1743094943,
+        ),
+        TrackedFunctionCall(
+            rollup_id="zksync_era",
+            subtype="stateUpdates",
+            address="0x5d8ba173dc6c3c90c8f7c04c9288bef5fdbad06e",
+            selector="0x6f497ac6",
+            signature="function executeBatchesSharedBridge(uint256 _chainId, (uint64 batchNumber, bytes32 batchHash, uint64 indexRepeatedStorageChanges, uint256 numberOfLayer1Txs, bytes32 priorityOperationsHash, bytes32 l2LogsTreeRoot, uint256 timestamp, bytes32 commitment)[] _newBatchesData)",
+            since_timestamp=1722410364,
+            until_timestamp=1743088235,
+        ),
+    ),
+    "taiko": (
+        TrackedFunctionCall(
+            rollup_id="taiko",
+            subtype="stateUpdates",
+            # Taiko's historical proving traffic did not stay on TaikoL1/Inbox.
+            # Official Taiko docs and deployment logs identify 0x68d3... as the
+            # labprover / ProverSet proxy, and BigQuery shows the current
+            # L2BEAT tracked feed misses this older proving surface entirely.
+            # Keep the observed 2024-05-25..2024-11-07 proveBlock window
+            # explicit so canonical Taiko attribution covers the official
+            # operator path instead of only the later Inbox route.
+            address="0x68d30f47f19c07bccef4ac7fae2dc12fca3e0dc9",
+            selector="0x10d008bd",
+            signature="historical Taiko labprover proveBlock selector 0x10d008bd",
+            since_timestamp=1716625487,
+            until_timestamp=1730973167,
+        ),
+        TrackedFunctionCall(
+            rollup_id="taiko",
+            subtype="batchSubmissions",
+            # BigQuery shows the official labprover / ProverSet proxy on
+            # 0x68d3... also handled a large historical share of Taiko block
+            # proposals before the later Inbox-only surface. L2BEAT's current
+            # trackedTransactions feed only carries the 0x06a9... Inbox path, so
+            # preserve the observed 2024-06-08..2024-11-07 proposeBlock window
+            # here instead of silently dropping this contract regime.
+            address="0x68d30f47f19c07bccef4ac7fae2dc12fca3e0dc9",
+            selector="0xef16e845",
+            signature="historical Taiko labprover proposeBlock selector 0xef16e845",
+            since_timestamp=1717845743,
+            until_timestamp=1730973071,
+        ),
+        TrackedFunctionCall(
+            rollup_id="taiko",
+            subtype="batchSubmissions",
+            # After Ontake, the same historical labprover / ProverSet proxy kept
+            # handling Taiko proposal traffic via proposeBlocksV2 through the
+            # 2025-01 tail. Without this explicit supplement, canonical Taiko
+            # misses the dominant non-Inbox proposal surface in the remaining
+            # T050 gap months.
+            address="0x68d30f47f19c07bccef4ac7fae2dc12fca3e0dc9",
+            selector="0x0c8f4a10",
+            signature="historical Taiko labprover proposeBlocksV2 selector 0x0c8f4a10",
+            since_timestamp=1730973119,
+            until_timestamp=1738367975,
+        ),
+        TrackedFunctionCall(
+            rollup_id="taiko",
+            subtype="stateUpdates",
+            # The historical labprover / ProverSet proxy also carried Taiko's
+            # proveBlocks flow during the same 2024-11..2025-01 regime. Keep
+            # the observed window explicit so canonical attribution follows the
+            # real proving surface rather than assuming every proof hit Inbox.
+            address="0x68d30f47f19c07bccef4ac7fae2dc12fca3e0dc9",
+            selector="0x440b6e18",
+            signature="historical Taiko labprover proveBlocks selector 0x440b6e18",
+            since_timestamp=1730973227,
+            until_timestamp=1738367759,
+        ),
+        TrackedFunctionCall(
+            rollup_id="taiko",
+            subtype="stateUpdates",
+            # The short-lived verifyBlocks selector on Inbox disappeared from
+            # the current L2BEAT tracked feed, but it is still observable on
+            # chain during the 2024-07-27..2024-09-08 transition window.
+            address="0x06a9ab27c7e2255df1815e6cc0168d7755feb19a",
+            selector="0x8778209d",
+            signature="historical Taiko verifyBlocks selector 0x8778209d",
+            since_timestamp=1722088679,
+            until_timestamp=1725839183,
+        ),
+        TrackedFunctionCall(
+            rollup_id="taiko",
+            subtype="batchSubmissions",
+            # The current L2BEAT tracked transaction feed skips the short-lived
+            # proposer selector 0xe4882785 even though the local sender snapshot
+            # shows it posting continuously from 2025-03-18 through 2025-05-21.
+            # Keep the evidence-backed contract/selector window explicit so the
+            # transition between proposeBlocksV2 and later batch methods is not
+            # silently dropped from canonical rent.
+            address="0x68d30f47f19c07bccef4ac7fae2dc12fca3e0dc9",
+            selector="0xe4882785",
+            signature="Taiko proposer selector 0xe4882785 (proposeBlocksV2Conditionally)",
+            since_timestamp=1742294171,
+            until_timestamp=1747823663,
+        ),
+    ),
+}
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -207,6 +425,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=RPC_BATCH_SIZE,
         help="JSON-RPC requests per batch",
+    )
+    parser.add_argument(
+        "--resume-manifested-run",
+        action="store_true",
+        help="Reuse an existing raw snapshot/manifests for the same run date after a deterministic ETL repair",
     )
     return parser.parse_args(argv)
 
@@ -255,6 +478,8 @@ def command_string(args: argparse.Namespace) -> str:
         command.extend(["--blobscan-page-size", str(args.blobscan_page_size)])
     if args.rpc_batch_size != RPC_BATCH_SIZE:
         command.extend(["--rpc-batch-size", str(args.rpc_batch_size)])
+    if args.resume_manifested_run:
+        command.append("--resume-manifested-run")
     return " ".join(shlex.quote(token) for token in command)
 
 
@@ -280,7 +505,13 @@ def ensure_new_manifest(path: Path, *, label: str) -> None:
         )
 
 
-def parse_blockscout_tx_record(row: dict[str, Any], *, rollup_id: str, address: str) -> BlockscoutTx:
+def parse_blockscout_tx_record(
+    row: dict[str, Any],
+    *,
+    rollup_id: str,
+    address: str,
+    default_subtype: str = "batchSubmissions",
+) -> BlockscoutTx:
     raw_to = row.get("to_address")
     to_address = str(raw_to).strip().lower() if isinstance(raw_to, str) and raw_to.strip() else None
     raw_method_id = row.get("method_id")
@@ -289,6 +520,7 @@ def parse_blockscout_tx_record(row: dict[str, Any], *, rollup_id: str, address: 
         parsed = BlockscoutTx(
             hash=str(row["hash"]).strip().lower(),
             rollup_id=str(row["rollup_id"]).strip(),
+            subtype=str(row.get("subtype", default_subtype)).strip(),
             address=str(row["address"]).strip().lower(),
             block_number=int(row["block_number"]),
             timestamp_utc=parse_datetime(str(row["timestamp_utc"])),
@@ -307,10 +539,18 @@ def parse_blockscout_tx_record(row: dict[str, Any], *, rollup_id: str, address: 
             f"stored Blockscout tx record does not match requested resume scope "
             f"({rollup_id}/{address}): {row!r}"
         )
+    if parsed.subtype not in ROLLUP_SUBTYPE_TO_COMPONENT_FIELD:
+        raise SystemExit(f"stored Blockscout tx record has unknown subtype: {row!r}")
     return parsed
 
 
-def load_existing_blockscout_page(path: Path, *, rollup_id: str, address: str) -> tuple[list[BlockscoutTx], int, int]:
+def load_existing_blockscout_page(
+    path: Path,
+    *,
+    rollup_id: str,
+    address: str,
+    default_subtype: str = "batchSubmissions",
+) -> tuple[list[BlockscoutTx], int, int]:
     payload = read_json(path)
     rows = payload.get("transactions")
     if not isinstance(rows, list):
@@ -336,10 +576,37 @@ def load_existing_blockscout_page(path: Path, *, rollup_id: str, address: str) -
     if stored_result_count < 0:
         raise SystemExit(f"stored Blockscout page has negative result_count: {path}")
     return (
-        [parse_blockscout_tx_record(row, rollup_id=rollup_id, address=address) for row in rows if isinstance(row, dict)],
+        [
+            parse_blockscout_tx_record(
+                row,
+                rollup_id=rollup_id,
+                address=address,
+                default_subtype=default_subtype,
+            )
+            for row in rows
+            if isinstance(row, dict)
+        ],
         stored_page_size,
         stored_result_count,
     )
+
+
+def requires_calldata_receipt_metering(tx: BlockscoutTx) -> bool:
+    return tx.rollup_id in CALDATA_RECEIPT_METERING_ROLLUPS and tx.timestamp_utc.date() < DENCUN_DATE
+
+
+def receipt_hash_scope_selects(*, include_calldata: bool) -> list[str]:
+    selects: list[str] = []
+    if include_calldata:
+        rollup_literals = ", ".join(f"'{rollup_id}'" for rollup_id in sorted(CALDATA_RECEIPT_METERING_ROLLUPS))
+        selects.append(
+            "SELECT c.hash "
+            "FROM calldata_txs c "
+            f"WHERE c.rollup_id IN ({rollup_literals}) "
+            f"AND substr(c.timestamp_utc, 1, 10) < '{DENCUN_DATE.isoformat()}'"
+        )
+    selects.append("SELECT hash FROM blob_txs")
+    return selects
 
 
 def blockscout_page_dir(
@@ -396,6 +663,7 @@ def maybe_reuse_blockscout_window_from_overlapping_cache(
     address_role: str,
     method_selectors: tuple[str, ...] | None,
     scope_id: str | None,
+    subtype: str = "batchSubmissions",
 ) -> list[BlockscoutTx] | None:
     if not page_dir.exists():
         return None
@@ -444,6 +712,7 @@ def maybe_reuse_blockscout_window_from_overlapping_cache(
                 candidate_path,
                 rollup_id=rollup_id,
                 address=address,
+                default_subtype=subtype,
             )
             if stored_page_size is None:
                 stored_page_size = page_size
@@ -513,6 +782,7 @@ def backfill_blockscout_window_from_bigquery(
     method_selectors: tuple[str, ...] | None,
     path_prefix: str,
     scope_id: str | None,
+    subtype: str = "batchSubmissions",
 ) -> list[BlockscoutTx] | None:
     address_field = "from_address" if address_role == "from" else "to_address"
     selector_clause = ""
@@ -669,6 +939,7 @@ def backfill_blockscout_window_from_bigquery(
             parsed = BlockscoutTx(
                 hash=str(row["tx_hash"]).strip().lower(),
                 rollup_id=rollup_id,
+                subtype=subtype,
                 address=address,
                 block_number=int(row["block_number"]),
                 timestamp_utc=parse_datetime(str(row["block_timestamp"])),
@@ -777,13 +1048,19 @@ def backfill_blockscout_window_from_bigquery(
     return rows
 
 
-def parse_blobscan_tx_record(row: dict[str, Any], *, rollup_id: str) -> BlobscanTx:
+def parse_blobscan_tx_record(
+    row: dict[str, Any],
+    *,
+    rollup_id: str,
+    default_subtype: str = "batchSubmissions",
+) -> BlobscanTx:
     raw_to = row.get("to_address")
     to_address = str(raw_to).strip().lower() if isinstance(raw_to, str) and raw_to.strip() else None
     try:
         parsed = BlobscanTx(
             hash=str(row["hash"]).strip().lower(),
             rollup_id=str(row["rollup_id"]).strip().lower(),
+            subtype=str(row.get("subtype", default_subtype)).strip(),
             block_number=int(row["block_number"]),
             timestamp_utc=parse_datetime(str(row["timestamp_utc"])),
             from_address=str(row["from_address"]).strip().lower(),
@@ -797,10 +1074,17 @@ def parse_blobscan_tx_record(row: dict[str, Any], *, rollup_id: str) -> Blobscan
 
     if parsed.rollup_id != rollup_id:
         raise SystemExit(f"stored Blobscan tx record does not match requested rollup {rollup_id}: {row!r}")
+    if parsed.subtype not in ROLLUP_SUBTYPE_TO_COMPONENT_FIELD:
+        raise SystemExit(f"stored Blobscan tx record has unknown subtype: {row!r}")
     return parsed
 
 
-def load_existing_blobscan_page(path: Path, *, rollup_id: str) -> tuple[list[BlobscanTx], int | None, int]:
+def load_existing_blobscan_page(
+    path: Path,
+    *,
+    rollup_id: str,
+    default_subtype: str = "batchSubmissions",
+) -> tuple[list[BlobscanTx], int | None, int]:
     payload = read_json(path)
     rows = payload.get("transactions")
     if not isinstance(rows, list):
@@ -819,10 +1103,29 @@ def load_existing_blobscan_page(path: Path, *, rollup_id: str) -> tuple[list[Blo
     if stored_page_size <= 0:
         raise SystemExit(f"stored Blobscan page has non-positive page_size: {path}")
     return (
-        [parse_blobscan_tx_record(row, rollup_id=rollup_id) for row in rows if isinstance(row, dict)],
+        [
+            parse_blobscan_tx_record(row, rollup_id=rollup_id, default_subtype=default_subtype)
+            for row in rows
+            if isinstance(row, dict)
+        ],
         total_transactions,
         stored_page_size,
     )
+
+
+def normalize_blobscan_total_transactions(
+    *,
+    rollup_id: str,
+    source_dir: str,
+    total_transactions: int | None,
+    row_count: int,
+    page_size: int,
+) -> int | None:
+    # Blobscan count-derived totals have proven unstable on both cached and live page
+    # responses. Resume safety therefore depends on exact page termination, not on any
+    # stored or live total hint.
+    _ = (rollup_id, source_dir, total_transactions, row_count, page_size)
+    return None
 
 
 def blobscan_completion_marker_path(
@@ -835,6 +1138,29 @@ def blobscan_completion_marker_path(
 ) -> Path:
     window_id = blockscout_window_id(window_start_dt, window_end_exclusive_dt)
     return snapshot_dir / "blobscan" / rollup_id / source_dir / f"{window_id}_complete.json"
+
+
+def clear_exact_blobscan_scope_cache(
+    *,
+    snapshot_dir: Path,
+    rollup_id: str,
+    source_dir: str,
+    window_start_dt: datetime,
+    window_end_exclusive_dt: datetime,
+) -> None:
+    source_path = snapshot_dir / "blobscan" / rollup_id / source_dir
+    window_id = blockscout_window_id(window_start_dt, window_end_exclusive_dt)
+    for page_path in source_path.glob(f"{window_id}_page-*.json"):
+        page_path.unlink()
+    marker_path = blobscan_completion_marker_path(
+        snapshot_dir=snapshot_dir,
+        rollup_id=rollup_id,
+        source_dir=source_dir,
+        window_start_dt=window_start_dt,
+        window_end_exclusive_dt=window_end_exclusive_dt,
+    )
+    if marker_path.exists():
+        marker_path.unlink()
 
 
 def parse_blobscan_window_bounds(path: Path) -> tuple[datetime, datetime] | None:
@@ -946,6 +1272,90 @@ def cached_blobscan_expected_total_transactions(
     return max(totals) if totals else None
 
 
+def load_exact_blobscan_scope_cache(
+    *,
+    snapshot_dir: Path,
+    rollup_id: str,
+    source_dir: str,
+    window_start_dt: datetime,
+    window_end_exclusive_dt: datetime,
+) -> ExactBlobscanScopeCache | None:
+    source_path = snapshot_dir / "blobscan" / rollup_id / source_dir
+    if not source_path.exists():
+        return None
+
+    window_id = blockscout_window_id(window_start_dt, window_end_exclusive_dt)
+    page_paths = sorted(source_path.glob(f"{window_id}_page-*.json"))
+    if not page_paths:
+        return None
+
+    page_numbers: list[int] = []
+    page_size: int | None = None
+    max_positive_total_transactions: int | None = None
+    last_page_row_count = 0
+    page_sources: set[str] = set()
+    rows_by_hash: dict[str, BlobscanTx] = {}
+    for path in page_paths:
+        stem = path.stem
+        if "_page-" not in stem:
+            raise SystemExit(f"stored Blobscan page has malformed name: {path}")
+        try:
+            page_number = int(stem.rsplit("_page-", 1)[1])
+        except ValueError as exc:
+            raise SystemExit(f"stored Blobscan page has malformed page number: {path}") from exc
+        page_numbers.append(page_number)
+
+        payload = read_json(path)
+        page_source = payload.get("source")
+        if isinstance(page_source, str) and page_source:
+            page_sources.add(page_source)
+        page_rows, total_transactions, stored_page_size = load_existing_blobscan_page(path, rollup_id=rollup_id)
+        if page_size is None:
+            page_size = stored_page_size
+        elif page_size != stored_page_size:
+            raise SystemExit(
+                f"stored Blobscan exact-scope pages have inconsistent page sizes for {rollup_id}/{source_dir} "
+                f"within {window_start_dt.isoformat()}..{window_end_exclusive_dt.isoformat()}: "
+                f"{page_size} vs {stored_page_size}"
+            )
+        if total_transactions is not None and total_transactions > 0:
+            max_positive_total_transactions = max(max_positive_total_transactions or 0, total_transactions)
+        last_page_row_count = len(page_rows)
+        for row in page_rows:
+            if row.timestamp_utc < window_start_dt or row.timestamp_utc >= window_end_exclusive_dt:
+                raise SystemExit(
+                    f"stored Blobscan exact-scope page contains out-of-window row for {rollup_id}/{source_dir}: {path}"
+                )
+            if row.hash in rows_by_hash:
+                raise SystemExit(
+                    f"stored Blobscan exact-scope pages contain duplicate tx hashes for {rollup_id}/{source_dir}: "
+                    f"{row.hash}"
+                )
+            rows_by_hash[row.hash] = row
+
+    if page_size is None:
+        return None
+    if len(page_sources) > 1:
+        raise SystemExit(
+            f"stored Blobscan exact-scope pages mix multiple sources for {rollup_id}/{source_dir} "
+            f"within {window_start_dt.isoformat()}..{window_end_exclusive_dt.isoformat()}: {sorted(page_sources)}"
+        )
+
+    contiguous_pages = page_numbers == list(range(1, len(page_numbers) + 1))
+    return ExactBlobscanScopeCache(
+        rows=sorted(
+            rows_by_hash.values(),
+            key=lambda row: (row.timestamp_utc, row.block_number, row.hash),
+            reverse=True,
+        ),
+        page_count=len(page_paths),
+        page_size=page_size,
+        last_page_row_count=last_page_row_count,
+        max_positive_total_transactions=max_positive_total_transactions,
+        contiguous_pages=contiguous_pages,
+    )
+
+
 def blobscan_scope_has_cached_state(
     *,
     snapshot_dir: Path,
@@ -1031,6 +1441,13 @@ def prove_cached_blobscan_scope_complete(
     retries: int,
     timeout_seconds: float,
 ) -> list[BlobscanTx] | None:
+    exact_scope_cache = load_exact_blobscan_scope_cache(
+        snapshot_dir=snapshot_dir,
+        rollup_id=rollup_id,
+        source_dir=source_dir,
+        window_start_dt=window_start_dt,
+        window_end_exclusive_dt=window_end_exclusive_dt,
+    )
     marker_path = blobscan_completion_marker_path(
         snapshot_dir=snapshot_dir,
         rollup_id=rollup_id,
@@ -1038,43 +1455,11 @@ def prove_cached_blobscan_scope_complete(
         window_start_dt=window_start_dt,
         window_end_exclusive_dt=window_end_exclusive_dt,
     )
-    cached_rows = load_overlapping_blobscan_rows(
-        snapshot_dir=snapshot_dir,
-        rollup_id=rollup_id,
-        source_dir=source_dir,
-        window_start_dt=window_start_dt,
-        window_end_exclusive_dt=window_end_exclusive_dt,
-    )
-    if not cached_rows:
-        return None
-
-    if marker_path.exists():
-        payload = read_json(marker_path)
-        try:
-            expected_total_transactions = int(payload["expected_total_transactions"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise SystemExit(f"stored Blobscan completion marker is malformed: {marker_path}") from exc
-        if len(cached_rows) >= expected_total_transactions:
-            logging.info(
-                "Reusing cached Blobscan coverage for %s/%s within %s..%s via completion marker "
-                "(cached unique rows=%s, expected total=%s)",
-                rollup_id,
-                source_dir,
-                window_start_dt.isoformat(),
-                window_end_exclusive_dt.isoformat(),
-                len(cached_rows),
-                expected_total_transactions,
-            )
-            return cached_rows
-
-    cached_expected_total_transactions = cached_blobscan_expected_total_transactions(
-        snapshot_dir=snapshot_dir,
-        rollup_id=rollup_id,
-        source_dir=source_dir,
-        window_start_dt=window_start_dt,
-        window_end_exclusive_dt=window_end_exclusive_dt,
-    )
-    if cached_expected_total_transactions is not None and len(cached_rows) >= cached_expected_total_transactions:
+    if (
+        exact_scope_cache is not None
+        and exact_scope_cache.contiguous_pages
+        and exact_scope_cache.last_page_row_count < exact_scope_cache.page_size
+    ):
         write_json(
             marker_path,
             {
@@ -1083,65 +1468,41 @@ def prove_cached_blobscan_scope_complete(
                 "source_dir": source_dir,
                 "window_start_utc": window_start_dt.isoformat(),
                 "window_end_exclusive_utc": window_end_exclusive_dt.isoformat(),
-                "expected_total_transactions": cached_expected_total_transactions,
-                "cached_unique_transactions": len(cached_rows),
+                "expected_total_transactions": len(exact_scope_cache.rows),
+                "cached_unique_transactions": len(exact_scope_cache.rows),
                 "fetched_at_utc": None,
                 "count_url": None,
-                "provenance": "cached_exact_scope_total_transactions",
+                "provenance": "cached_exact_scope_terminal_page",
+                "page_count": exact_scope_cache.page_count,
+                "page_size": exact_scope_cache.page_size,
+                "last_page_row_count": exact_scope_cache.last_page_row_count,
             },
         )
         logging.info(
-            "Reusing cached Blobscan coverage for %s/%s within %s..%s after proving cached unique rows (%s) "
-            "meet cached exact-scope total (%s)",
+            "Reusing cached Blobscan coverage for %s/%s within %s..%s after proving exact cached pages are contiguous "
+            "and terminate on a short final page (%s pages, last page rows=%s, page size=%s)",
             rollup_id,
             source_dir,
             window_start_dt.isoformat(),
             window_end_exclusive_dt.isoformat(),
-            len(cached_rows),
-            cached_expected_total_transactions,
+            exact_scope_cache.page_count,
+            exact_scope_cache.last_page_row_count,
+            exact_scope_cache.page_size,
         )
-        return cached_rows
+        return exact_scope_cache.rows
 
-    try:
-        expected_total_transactions, fetched_at_utc, url = fetch_blobscan_total_transactions(
-            rollup_id=rollup_id,
-            from_address=from_address,
-            rollup_filter=rollup_filter,
-            window_start_dt=window_start_dt,
-            window_end_exclusive_dt=window_end_exclusive_dt,
-            retries=max(1, min(retries, 2)),
-            timeout_seconds=min(timeout_seconds, 15.0),
+    if exact_scope_cache is not None and exact_scope_cache.contiguous_pages:
+        logging.info(
+            "Cached Blobscan scope for %s/%s within %s..%s still ends on a full final page (%s rows of page size %s); "
+            "resuming live pagination instead of trusting count-derived totals",
+            rollup_id,
+            source_dir,
+            window_start_dt.isoformat(),
+            window_end_exclusive_dt.isoformat(),
+            exact_scope_cache.last_page_row_count,
+            exact_scope_cache.page_size,
         )
-    except SystemExit:
-        return None
-    if len(cached_rows) < expected_total_transactions:
-        return None
-
-    write_json(
-        marker_path,
-        {
-            "source": "blobscan_completion_marker",
-            "rollup_id": rollup_id,
-            "source_dir": source_dir,
-            "window_start_utc": window_start_dt.isoformat(),
-            "window_end_exclusive_utc": window_end_exclusive_dt.isoformat(),
-            "expected_total_transactions": expected_total_transactions,
-            "cached_unique_transactions": len(cached_rows),
-            "fetched_at_utc": fetched_at_utc,
-            "count_url": url,
-        },
-    )
-    logging.info(
-        "Reusing cached Blobscan coverage for %s/%s within %s..%s after proving cached unique rows (%s) "
-        "meet the live Blobscan total (%s)",
-        rollup_id,
-        source_dir,
-        window_start_dt.isoformat(),
-        window_end_exclusive_dt.isoformat(),
-        len(cached_rows),
-        expected_total_transactions,
-    )
-    return cached_rows
+    return None
 
 
 def maybe_reuse_completed_blobscan_scope(
@@ -1163,7 +1524,7 @@ def maybe_reuse_completed_blobscan_scope(
         window_start_dt=window_start_dt,
         window_end_exclusive_dt=window_end_exclusive_dt,
     )
-    if not marker_path.exists() and not has_nonexact_overlapping_blobscan_pages(
+    if not blobscan_scope_has_cached_state(
         snapshot_dir=snapshot_dir,
         rollup_id=rollup_id,
         source_dir=source_dir,
@@ -1182,6 +1543,332 @@ def maybe_reuse_completed_blobscan_scope(
         retries=retries,
         timeout_seconds=timeout_seconds,
     )
+
+
+def maybe_reuse_cached_blobscan_rollup_scope_for_sender(
+    *,
+    snapshot_dir: Path,
+    rollup_id: str,
+    from_address: str | None,
+    window_start_dt: datetime,
+    window_end_exclusive_dt: datetime,
+    retries: int,
+    timeout_seconds: float,
+) -> list[BlobscanTx] | None:
+    if from_address is None:
+        return None
+
+    rollup_rows = maybe_reuse_completed_blobscan_scope(
+        snapshot_dir=snapshot_dir,
+        rollup_id=rollup_id,
+        source_dir=f"rollup_{rollup_id}",
+        from_address=None,
+        rollup_filter=rollup_id,
+        window_start_dt=window_start_dt,
+        window_end_exclusive_dt=window_end_exclusive_dt,
+        retries=retries,
+        timeout_seconds=timeout_seconds,
+    )
+    if rollup_rows is None:
+        return None
+
+    filtered_rows = [row for row in rollup_rows if row.from_address == from_address]
+    logging.info(
+        "Reusing cached Blobscan coverage for %s/%s within %s..%s by filtering the proven-complete cached rollup scope "
+        "(rollup rows=%s, sender rows=%s)",
+        rollup_id,
+        from_address,
+        window_start_dt.isoformat(),
+        window_end_exclusive_dt.isoformat(),
+        len(rollup_rows),
+        len(filtered_rows),
+    )
+    return filtered_rows
+
+
+def backfill_blobscan_window_from_blockscout_receipts(
+    *,
+    snapshot_dir: Path,
+    rollup_id: str,
+    from_address: str | None,
+    rollup_filter: str | None,
+    window_start_dt: datetime,
+    window_end_exclusive_dt: datetime,
+    page_size: int,
+    retries: int,
+    timeout_seconds: float,
+    request_log: list[dict[str, Any]],
+) -> list[BlobscanTx] | None:
+    source_dir = from_address or f"rollup_{rollup_filter}"
+    fallback_queries: list[dict[str, Any]]
+    if from_address is not None:
+        fallback_queries = [
+            {
+                "address": from_address,
+                "address_role": "from",
+                "method_selectors": None,
+                "path_prefix": "txlist",
+                "scope_id": None,
+            }
+        ]
+    elif rollup_filter is not None:
+        registry_path = repo_root() / "registry" / "rollup_registry_v1.csv"
+        registry_rollups = {row.rollup_id: row for row in load_registry(registry_path)}
+        registry_rollup = registry_rollups.get(rollup_id)
+        if registry_rollup is None:
+            return None
+        if registry_rollup.batcher_addresses:
+            fallback_queries = [
+                {
+                    "address": address,
+                    "address_role": "from",
+                    "method_selectors": None,
+                    "path_prefix": "txlist",
+                    "scope_id": None,
+                    "subtype": "batchSubmissions",
+                }
+                for address in registry_rollup.batcher_addresses
+            ]
+        elif rollup_id in ROLLUPS_WITHOUT_BATCHER_ADDRESSES:
+            tracked_transactions = fetch_l2beat_tracked_transactions(
+                snapshot_dir=snapshot_dir,
+                rollup=registry_rollup,
+                retries=retries,
+                timeout_seconds=timeout_seconds,
+                request_log=request_log,
+            )
+            tracked_calls = relevant_calldata_tracked_calls(
+                rollup=registry_rollup,
+                tracked_transactions=tracked_transactions,
+                active_start=window_start_dt.date(),
+                active_end=(window_end_exclusive_dt - timedelta(seconds=1)).date(),
+            )
+            if not tracked_calls:
+                return None
+            selectors_by_address_and_subtype: dict[tuple[str, str], set[str]] = {}
+            for tracked_call in tracked_calls:
+                selectors_by_address_and_subtype.setdefault(
+                    (tracked_call.address, tracked_call.subtype),
+                    set(),
+                ).add(tracked_call.selector)
+            fallback_queries = [
+                {
+                    "address": contract_address,
+                    "address_role": "to",
+                    "method_selectors": tuple(sorted(selectors)),
+                    "path_prefix": "txlist_to",
+                    "scope_id": "__".join(sorted(selectors)),
+                    "subtype": subtype,
+                }
+                for (contract_address, subtype), selectors in sorted(selectors_by_address_and_subtype.items())
+            ]
+        else:
+            return None
+    else:
+        return None
+
+    logging.warning(
+        "Blobscan remained unavailable for %s/%s within %s..%s; backfilling the exact scope via Blockscout txlist "
+        "plus receipt enrichment across %s address hooks",
+        rollup_id,
+        source_dir,
+        window_start_dt.isoformat(),
+        window_end_exclusive_dt.isoformat(),
+        len(fallback_queries),
+    )
+
+    blockscout_rows_by_hash: dict[str, BlockscoutTx] = {}
+    for query in fallback_queries:
+        try:
+            blockscout_rows = fetch_blockscout_tx_window(
+                snapshot_dir=snapshot_dir,
+                rollup_id=rollup_id,
+                address=query["address"],
+                start_day=window_start_dt.date(),
+                end_day_exclusive=window_end_exclusive_dt.date(),
+                page_size=max(page_size, BLOCKSCOUT_MIN_PAGE_SIZE),
+                retries=retries,
+                timeout_seconds=timeout_seconds,
+                request_log=request_log,
+                start_timestamp_utc=window_start_dt,
+                end_timestamp_exclusive_utc=window_end_exclusive_dt,
+                address_role=query["address_role"],
+                method_selectors=query["method_selectors"],
+                path_prefix=query["path_prefix"],
+                scope_id=query["scope_id"],
+                subtype=query["subtype"],
+            )
+        except SystemExit as exc:
+            logging.warning(
+                "Blockscout exact-window fallback also failed for %s/%s via %s within %s..%s: %s",
+                rollup_id,
+                source_dir,
+                query["address"],
+                window_start_dt.isoformat(),
+                window_end_exclusive_dt.isoformat(),
+                exc,
+            )
+            return None
+        for tx in blockscout_rows:
+            blockscout_rows_by_hash.setdefault(tx.hash, tx)
+
+    blockscout_rows = sorted(
+        blockscout_rows_by_hash.values(),
+        key=lambda row: (row.timestamp_utc, row.block_number, row.hash),
+    )
+
+    receipts = fetch_receipts(
+        snapshot_dir=snapshot_dir,
+        tx_hashes=[tx.hash for tx in blockscout_rows],
+        retries=retries,
+        timeout_seconds=timeout_seconds,
+        batch_size=RPC_BATCH_SIZE,
+        request_log=request_log,
+        refresh_hashes=[tx.hash for tx in blockscout_rows],
+    )
+
+    blob_rows: list[BlobscanTx] = []
+    for tx in blockscout_rows:
+        receipt = receipts.get(tx.hash)
+        if receipt is None:
+            raise SystemExit(
+                f"receipt enrichment is missing exact-window Blockscout fallback tx {tx.hash} for {rollup_id}/{source_dir}"
+            )
+        if receipt.blob_gas_used <= 0:
+            continue
+        blob_rows.append(
+            BlobscanTx(
+                hash=tx.hash,
+                rollup_id=rollup_id,
+                subtype=tx.subtype,
+                block_number=tx.block_number,
+                timestamp_utc=tx.timestamp_utc,
+                from_address=tx.address,
+                to_address=receipt.to_address or tx.to_address,
+                blob_gas_used=receipt.blob_gas_used,
+                blob_gas_price_wei=receipt.blob_gas_price_wei,
+                # Blockscout+receipt fallback reconstructs the rent-bearing blob fields
+                # but does not expose Blobscan's calldata-equivalent proxy column.
+                blob_as_calldata_gas_used=0,
+            )
+        )
+
+    blob_rows = sorted(
+        blob_rows,
+        key=lambda row: (row.timestamp_utc, row.block_number, row.hash),
+        reverse=True,
+    )
+    page_chunks = [blob_rows[index : index + page_size] for index in range(0, len(blob_rows), page_size)] or [[]]
+    window_id = blockscout_window_id(window_start_dt, window_end_exclusive_dt)
+    page_dir = snapshot_dir / "blobscan" / rollup_id / source_dir
+    fetched_at_utc = datetime.now(timezone.utc).isoformat()
+    clear_exact_blobscan_scope_cache(
+        snapshot_dir=snapshot_dir,
+        rollup_id=rollup_id,
+        source_dir=source_dir,
+        window_start_dt=window_start_dt,
+        window_end_exclusive_dt=window_end_exclusive_dt,
+    )
+    for page_index, page_rows in enumerate(page_chunks, start=1):
+        page_path = page_dir / f"{window_id}_page-{page_index:04d}.json"
+        write_json(
+            page_path,
+            {
+                "source": "blobscan_blockscout_receipts_backfill",
+                "backfilled_via": "blockscout_txlist_plus_receipts",
+                "rollup_id": rollup_id,
+                "from_address": from_address,
+                "rollup_filter": rollup_filter,
+                "window_start_utc": window_start_dt.isoformat(),
+                "window_end_exclusive_utc": window_end_exclusive_dt.isoformat(),
+                "page": page_index,
+                "page_size": page_size,
+                "total_transactions": None,
+                "fetched_at_utc": fetched_at_utc,
+                "transactions": [blobscan_tx_record(row) for row in page_rows],
+            },
+        )
+        request_log.append(
+            {
+                "source": "blobscan_blockscout_receipts_backfill",
+                "rollup_id": rollup_id,
+                "from_address": from_address,
+                "rollup_filter": rollup_filter,
+                "window_start_utc": window_start_dt.isoformat(),
+                "window_end_exclusive_utc": window_end_exclusive_dt.isoformat(),
+                "page": page_index,
+                "page_size": page_size,
+                "relative_path": str(page_path.relative_to(repo_root())),
+                "fetched_at_utc": fetched_at_utc,
+            }
+        )
+
+    if blob_rows and len(blob_rows) % page_size == 0:
+        terminal_page_index = len(page_chunks) + 1
+        terminal_page_path = page_dir / f"{window_id}_page-{terminal_page_index:04d}.json"
+        write_json(
+            terminal_page_path,
+            {
+                "source": "blobscan_blockscout_receipts_backfill",
+                "backfilled_via": "blockscout_txlist_plus_receipts",
+                "rollup_id": rollup_id,
+                "from_address": from_address,
+                "rollup_filter": rollup_filter,
+                "window_start_utc": window_start_dt.isoformat(),
+                "window_end_exclusive_utc": window_end_exclusive_dt.isoformat(),
+                "page": terminal_page_index,
+                "page_size": page_size,
+                "total_transactions": None,
+                "fetched_at_utc": fetched_at_utc,
+                "transactions": [],
+            },
+        )
+        request_log.append(
+            {
+                "source": "blobscan_blockscout_receipts_backfill",
+                "rollup_id": rollup_id,
+                "from_address": from_address,
+                "rollup_filter": rollup_filter,
+                "window_start_utc": window_start_dt.isoformat(),
+                "window_end_exclusive_utc": window_end_exclusive_dt.isoformat(),
+                "page": terminal_page_index,
+                "page_size": page_size,
+                "relative_path": str(terminal_page_path.relative_to(repo_root())),
+                "fetched_at_utc": fetched_at_utc,
+            }
+        )
+
+    marker_path = blobscan_completion_marker_path(
+        snapshot_dir=snapshot_dir,
+        rollup_id=rollup_id,
+        source_dir=source_dir,
+        window_start_dt=window_start_dt,
+        window_end_exclusive_dt=window_end_exclusive_dt,
+    )
+    write_json(
+        marker_path,
+        {
+            "source": "blobscan_completion_marker",
+            "rollup_id": rollup_id,
+            "source_dir": source_dir,
+            "window_start_utc": window_start_dt.isoformat(),
+            "window_end_exclusive_utc": window_end_exclusive_dt.isoformat(),
+            "expected_total_transactions": len(blob_rows),
+            "cached_unique_transactions": len(blob_rows),
+            "fetched_at_utc": fetched_at_utc,
+            "count_url": None,
+            "provenance": "blockscout_txlist_receipts_exact_scope",
+        },
+    )
+    logging.info(
+        "Backfilled Blobscan-exact window for %s/%s within %s..%s via Blockscout txlist plus receipts (%s blob txs)",
+        rollup_id,
+        source_dir,
+        window_start_dt.isoformat(),
+        window_end_exclusive_dt.isoformat(),
+        len(blob_rows),
+    )
+    return blob_rows
 
 
 def parse_receipt_record(row: dict[str, Any]) -> ReceiptFields:
@@ -1293,6 +1980,7 @@ def ensure_partition_checkpoint_schema(connection: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS calldata_txs ("
         "hash TEXT PRIMARY KEY, "
         "rollup_id TEXT NOT NULL, "
+        "subtype TEXT NOT NULL, "
         "block_number INTEGER NOT NULL, "
         "timestamp_utc TEXT NOT NULL, "
         "gas_price_wei TEXT NOT NULL, "
@@ -1304,8 +1992,11 @@ def ensure_partition_checkpoint_schema(connection: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS blob_txs ("
         "hash TEXT PRIMARY KEY, "
         "rollup_id TEXT NOT NULL, "
+        "subtype TEXT NOT NULL, "
         "block_number INTEGER NOT NULL, "
         "timestamp_utc TEXT NOT NULL, "
+        "blob_gas_used INTEGER NOT NULL, "
+        "blob_gas_price_wei TEXT NOT NULL, "
         "blob_as_calldata_gas_used INTEGER NOT NULL"
         ")"
     )
@@ -1353,12 +2044,13 @@ def write_partition_checkpoint(
         ensure_partition_checkpoint_schema(connection)
         connection.executemany("INSERT INTO metadata(key, value) VALUES(?, ?)", metadata_rows)
         connection.executemany(
-            "INSERT INTO calldata_txs(hash, rollup_id, block_number, timestamp_utc, gas_price_wei, gas_used, value_wei) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO calldata_txs(hash, rollup_id, subtype, block_number, timestamp_utc, gas_price_wei, gas_used, value_wei) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 (
                     tx.hash,
                     tx.rollup_id,
+                    tx.subtype,
                     tx.block_number,
                     tx.timestamp_utc.isoformat(),
                     str(tx.gas_price_wei),
@@ -1369,14 +2061,18 @@ def write_partition_checkpoint(
             ),
         )
         connection.executemany(
-            "INSERT INTO blob_txs(hash, rollup_id, block_number, timestamp_utc, blob_as_calldata_gas_used) "
-            "VALUES(?, ?, ?, ?, ?)",
+            "INSERT INTO blob_txs(hash, rollup_id, subtype, block_number, timestamp_utc, blob_gas_used, "
+            "blob_gas_price_wei, blob_as_calldata_gas_used) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 (
                     tx.hash,
                     tx.rollup_id,
+                    tx.subtype,
                     tx.block_number,
                     tx.timestamp_utc.isoformat(),
+                    tx.blob_gas_used,
+                    str(tx.blob_gas_price_wei),
                     tx.blob_as_calldata_gas_used,
                 )
                 for tx in blob_txs.values()
@@ -1459,6 +2155,13 @@ def load_partition_checkpoint_if_valid(
         if current_registry_sha256 != registry_sha256:
             logging.info(
                 "Ignoring partition checkpoint at %s because registry attribution inputs changed",
+                checkpoint_path,
+            )
+            return None
+        current_script_sha256 = sha256_file(Path(__file__).resolve())
+        if current_script_sha256 != script_sha256:
+            logging.info(
+                "Ignoring partition checkpoint at %s because the ETL script changed",
                 checkpoint_path,
             )
             return None
@@ -2275,7 +2978,7 @@ def load_existing_l2beat_tracked_transactions(path: Path, *, rollup_id: str, evi
         raise SystemExit(f"stored L2BEAT tracked transaction snapshot is malformed: {path}")
 
     parsed: dict[str, list[TrackedFunctionCall]] = {}
-    for subtype in ("batchSubmissions", "proofSubmissions", "stateUpdates"):
+    for subtype in TRACKED_TRANSACTION_SUBTYPES:
         rows = raw_tracked.get(subtype, [])
         if not isinstance(rows, list):
             raise SystemExit(f"stored L2BEAT tracked transaction subtype is malformed: {path}")
@@ -2301,10 +3004,361 @@ def load_existing_l2beat_tracked_transactions(path: Path, *, rollup_id: str, evi
     return parsed
 
 
+def supplement_tracked_transactions(
+    *,
+    rollup_id: str,
+    tracked_transactions: dict[str, list[TrackedFunctionCall]],
+) -> dict[str, list[TrackedFunctionCall]]:
+    supplemented = {
+        subtype: list(tracked_transactions.get(subtype, []))
+        for subtype in TRACKED_TRANSACTION_SUBTYPES
+    }
+    for tracked_call in LEGACY_TRACKED_CALLS_BY_ROLLUP.get(rollup_id, ()):
+        rows = supplemented.setdefault(tracked_call.subtype, [])
+        if tracked_call not in rows:
+            rows.append(tracked_call)
+    for subtype in TRACKED_TRANSACTION_SUBTYPES:
+        supplemented[subtype] = sorted(
+            supplemented.get(subtype, []),
+            key=lambda row: (
+                row.address,
+                row.selector,
+                row.since_timestamp,
+                row.until_timestamp if row.until_timestamp is not None else 2**63 - 1,
+            ),
+        )
+    return supplemented
+
+
+def tracked_call_pairs(
+    tracked_transactions: dict[str, list[TrackedFunctionCall]],
+) -> list[tuple[str, str]]:
+    return sorted(
+        {
+            (row.address.lower(), row.selector.lower())
+            for subtype in TRACKED_TRANSACTION_SUBTYPES
+            for row in tracked_transactions.get(subtype, [])
+        }
+    )
+
+
+def load_existing_bigquery_tracked_call_observations(
+    path: Path,
+    *,
+    rollup_id: str,
+    observed_end: date,
+    expected_pairs: list[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[int, int, int]]:
+    payload = read_json(path)
+    if not isinstance(payload, dict):
+        raise SystemExit(f"stored tracked-call observation cache is malformed: {path}")
+    if payload.get("rollup_id") != rollup_id:
+        raise SystemExit(f"stored tracked-call observation cache has wrong rollup_id: {path}")
+    if payload.get("observed_end_utc") != observed_end.isoformat():
+        raise SystemExit(f"stored tracked-call observation cache has wrong observed_end_utc: {path}")
+
+    raw_requested_pairs = payload.get("requested_pairs")
+    if not isinstance(raw_requested_pairs, list):
+        raise SystemExit(f"stored tracked-call observation cache is malformed: {path}")
+    cached_pairs: list[tuple[str, str]] = []
+    for row in raw_requested_pairs:
+        if not isinstance(row, dict):
+            raise SystemExit(f"stored tracked-call observation cache is malformed: {path}")
+        address = str(row.get("address", "")).strip().lower()
+        selector = str(row.get("selector", "")).strip().lower()
+        if not address or not selector:
+            raise SystemExit(f"stored tracked-call observation cache has malformed requested_pairs: {path}")
+        cached_pairs.append((address, selector))
+    if sorted(cached_pairs) != expected_pairs:
+        raise SystemExit(
+            f"stored tracked-call observation cache does not match the current selector set for {rollup_id}: {path}"
+        )
+
+    raw_observed_pairs = payload.get("observed_pairs")
+    if not isinstance(raw_observed_pairs, list):
+        raise SystemExit(f"stored tracked-call observation cache is malformed: {path}")
+
+    observed_pairs: dict[tuple[str, str], tuple[int, int, int]] = {}
+    for row in raw_observed_pairs:
+        if not isinstance(row, dict):
+            raise SystemExit(f"stored tracked-call observation cache is malformed: {path}")
+        try:
+            address = str(row["address"]).strip().lower()
+            selector = str(row["selector"]).strip().lower()
+            first_seen_timestamp = int(row["first_seen_timestamp"])
+            last_seen_timestamp = int(row["last_seen_timestamp"])
+            tx_count = int(row["tx_count"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SystemExit(f"stored tracked-call observation cache is malformed: {path}") from exc
+        observed_pairs[(address, selector)] = (first_seen_timestamp, last_seen_timestamp, tx_count)
+    return observed_pairs
+
+
+def fetch_bigquery_tracked_call_observations(
+    *,
+    snapshot_dir: Path,
+    rollup_id: str,
+    tracked_transactions: dict[str, list[TrackedFunctionCall]],
+    observed_end: date,
+    request_log: list[dict[str, Any]],
+) -> dict[tuple[str, str], tuple[int, int, int]] | None:
+    requested_pairs = tracked_call_pairs(tracked_transactions)
+    if not requested_pairs:
+        return {}
+
+    path = snapshot_dir / "bigquery" / "tracked_call_observations" / rollup_id / "observed_windows.json"
+    if path.exists():
+        try:
+            observed_pairs = load_existing_bigquery_tracked_call_observations(
+                path,
+                rollup_id=rollup_id,
+                observed_end=observed_end,
+                expected_pairs=requested_pairs,
+            )
+        except SystemExit as exc:
+            logging.warning(
+                "Discarding stale tracked-call observation cache for %s because it no longer matches the "
+                "current selector universe: %s",
+                rollup_id,
+                exc,
+            )
+        else:
+            request_log.append(
+                {
+                    "source": "bigquery_tracked_call_observations",
+                    "rollup_id": rollup_id,
+                    "relative_path": str(path.relative_to(repo_root())),
+                    "observed_end_utc": observed_end.isoformat(),
+                    "fetched_at_utc": None,
+                    "reused_existing": True,
+                }
+            )
+            return observed_pairs
+
+    selectors_by_address: dict[str, set[str]] = {}
+    for address, selector in requested_pairs:
+        selectors_by_address.setdefault(address, set()).add(selector)
+
+    clauses: list[str] = []
+    for address, selectors in sorted(selectors_by_address.items()):
+        selector_literals = ", ".join(f"'{selector}'" for selector in sorted(selectors))
+        clauses.append(
+            f"(LOWER(to_address) = '{address}' AND LOWER(SUBSTR(input, 1, 10)) IN ({selector_literals}))"
+        )
+
+    observed_end_exclusive_dt = datetime_utc_start(observed_end + timedelta(days=1))
+    query = (
+        "SELECT\n"
+        "  LOWER(to_address) AS address,\n"
+        "  LOWER(SUBSTR(input, 1, 10)) AS selector,\n"
+        "  MIN(UNIX_SECONDS(block_timestamp)) AS first_seen_timestamp,\n"
+        "  MAX(UNIX_SECONDS(block_timestamp)) AS last_seen_timestamp,\n"
+        "  COUNT(*) AS tx_count\n"
+        f"FROM `{BIGQUERY_PUBLIC_ETHEREUM_TRANSACTIONS_TABLE}`\n"
+        f"WHERE block_timestamp < TIMESTAMP('{observed_end_exclusive_dt.isoformat()}')\n"
+        "  AND (\n    "
+        + "\n    OR ".join(clauses)
+        + "\n  )\n"
+        "GROUP BY address, selector\n"
+        "ORDER BY address, selector\n"
+    )
+
+    try:
+        result = subprocess.run(
+            [
+                "bq",
+                "query",
+                f"--project_id={BIGQUERY_PROJECT_ID}",
+                "--use_legacy_sql=false",
+                "--format=json",
+                f"--max_rows={max(len(requested_pairs), 1)}",
+            ],
+            input=query,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except FileNotFoundError:
+        logging.warning(
+            "Skipping BigQuery tracked-call observation query because the bq CLI is unavailable; leaving %s tracked-call windows unbounded",
+            rollup_id,
+        )
+        return None
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        logging.warning(
+            "BigQuery tracked-call observation query failed for %s via project %s: %s; leaving tracked-call windows unbounded",
+            rollup_id,
+            BIGQUERY_PROJECT_ID,
+            stderr[:400] if stderr else exc,
+        )
+        return None
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        logging.warning(
+            "BigQuery tracked-call observation query returned malformed JSON for %s: %s; leaving tracked-call windows unbounded",
+            rollup_id,
+            exc,
+        )
+        return None
+    if not isinstance(payload, list):
+        logging.warning(
+            "BigQuery tracked-call observation query returned malformed payload for %s: %r; leaving tracked-call windows unbounded",
+            rollup_id,
+            payload,
+        )
+        return None
+
+    observed_pairs: dict[tuple[str, str], tuple[int, int, int]] = {}
+    observed_rows: list[dict[str, Any]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            logging.warning(
+                "BigQuery tracked-call observation query returned malformed row for %s: %r; leaving tracked-call windows unbounded",
+                rollup_id,
+                row,
+            )
+            return None
+        try:
+            address = str(row["address"]).strip().lower()
+            selector = str(row["selector"]).strip().lower()
+            first_seen_timestamp = int(row["first_seen_timestamp"])
+            last_seen_timestamp = int(row["last_seen_timestamp"])
+            tx_count = int(row["tx_count"])
+        except (KeyError, TypeError, ValueError) as exc:
+            logging.warning(
+                "BigQuery tracked-call observation query returned malformed values for %s: %s; leaving tracked-call windows unbounded",
+                rollup_id,
+                exc,
+            )
+            return None
+        observed_pairs[(address, selector)] = (first_seen_timestamp, last_seen_timestamp, tx_count)
+        observed_rows.append(
+            {
+                "address": address,
+                "selector": selector,
+                "first_seen_timestamp": first_seen_timestamp,
+                "last_seen_timestamp": last_seen_timestamp,
+                "tx_count": tx_count,
+            }
+        )
+
+    fetched_at_utc = datetime.now(timezone.utc).isoformat()
+    write_json(
+        path,
+        {
+            "source": "bigquery_tracked_call_observations",
+            "rollup_id": rollup_id,
+            "observed_end_utc": observed_end.isoformat(),
+            "table": BIGQUERY_PUBLIC_ETHEREUM_TRANSACTIONS_TABLE,
+            "fetched_at_utc": fetched_at_utc,
+            "requested_pairs": [
+                {"address": address, "selector": selector}
+                for address, selector in requested_pairs
+            ],
+            "observed_pairs": observed_rows,
+        },
+    )
+    request_log.append(
+        {
+            "source": "bigquery_tracked_call_observations",
+            "rollup_id": rollup_id,
+            "relative_path": str(path.relative_to(repo_root())),
+            "observed_end_utc": observed_end.isoformat(),
+            "fetched_at_utc": fetched_at_utc,
+        }
+    )
+    return observed_pairs
+
+
+def bound_tracked_transactions_to_observed_history(
+    *,
+    snapshot_dir: Path,
+    rollup_id: str,
+    tracked_transactions: dict[str, list[TrackedFunctionCall]],
+    observed_end: date,
+    request_log: list[dict[str, Any]],
+) -> dict[str, list[TrackedFunctionCall]]:
+    observed_pairs = fetch_bigquery_tracked_call_observations(
+        snapshot_dir=snapshot_dir,
+        rollup_id=rollup_id,
+        tracked_transactions=tracked_transactions,
+        observed_end=observed_end,
+        request_log=request_log,
+    )
+    if observed_pairs is None:
+        return tracked_transactions
+
+    bounded: dict[str, list[TrackedFunctionCall]] = {subtype: [] for subtype in TRACKED_TRANSACTION_SUBTYPES}
+    dropped_descriptions: list[str] = []
+    clamped_count = 0
+    for subtype in TRACKED_TRANSACTION_SUBTYPES:
+        for row in tracked_transactions.get(subtype, []):
+            observed = observed_pairs.get((row.address, row.selector))
+            if observed is None:
+                dropped_descriptions.append(f"{subtype}:{row.address}/{row.selector}")
+                continue
+            first_seen_timestamp, last_seen_timestamp, _tx_count = observed
+            bounded_since_timestamp = max(row.since_timestamp, first_seen_timestamp)
+            bounded_until_timestamp = last_seen_timestamp
+            if row.until_timestamp is not None:
+                bounded_until_timestamp = min(bounded_until_timestamp, row.until_timestamp)
+            if bounded_until_timestamp < bounded_since_timestamp:
+                dropped_descriptions.append(f"{subtype}:{row.address}/{row.selector}")
+                continue
+            if (
+                bounded_since_timestamp != row.since_timestamp
+                or bounded_until_timestamp != row.until_timestamp
+            ):
+                clamped_count += 1
+            bounded[subtype].append(
+                TrackedFunctionCall(
+                    rollup_id=row.rollup_id,
+                    subtype=row.subtype,
+                    address=row.address,
+                    selector=row.selector,
+                    signature=row.signature,
+                    since_timestamp=bounded_since_timestamp,
+                    until_timestamp=bounded_until_timestamp,
+                )
+            )
+
+    for subtype in TRACKED_TRANSACTION_SUBTYPES:
+        bounded[subtype] = sorted(
+            bounded.get(subtype, []),
+            key=lambda row: (
+                row.address,
+                row.selector,
+                row.since_timestamp,
+                row.until_timestamp if row.until_timestamp is not None else 2**63 - 1,
+            ),
+        )
+
+    if clamped_count:
+        logging.info(
+            "Clamped %s tracked-call windows for %s to observed on-chain first/last use through %s",
+            clamped_count,
+            rollup_id,
+            observed_end.isoformat(),
+        )
+    if dropped_descriptions:
+        logging.info(
+            "Dropped %s tracked-call selectors with no observed on-chain usage for %s through %s: %s",
+            len(dropped_descriptions),
+            rollup_id,
+            observed_end.isoformat(),
+            ", ".join(dropped_descriptions[:12]),
+        )
+    return bounded
+
+
 def fetch_l2beat_tracked_transactions(
     *,
     snapshot_dir: Path,
     rollup: RegistryRollup,
+    observed_end: date,
     retries: int,
     timeout_seconds: float,
     request_log: list[dict[str, Any]],
@@ -2313,10 +3367,13 @@ def fetch_l2beat_tracked_transactions(
         raise SystemExit(f"required registry evidence_url is missing for {rollup.rollup_id}")
     path = snapshot_dir / "l2beat" / rollup.rollup_id / "tracked_transactions.json"
     if path.exists():
-        tracked_transactions = load_existing_l2beat_tracked_transactions(
+        tracked_transactions = supplement_tracked_transactions(
+            rollup_id=rollup.rollup_id,
+            tracked_transactions=load_existing_l2beat_tracked_transactions(
             path,
             rollup_id=rollup.rollup_id,
             evidence_url=rollup.evidence_url,
+            ),
         )
         request_log.append(
             {
@@ -2328,7 +3385,13 @@ def fetch_l2beat_tracked_transactions(
                 "reused_existing": True,
             }
         )
-        return tracked_transactions
+        return bound_tracked_transactions_to_observed_history(
+            snapshot_dir=snapshot_dir,
+            rollup_id=rollup.rollup_id,
+            tracked_transactions=tracked_transactions,
+            observed_end=observed_end,
+            request_log=request_log,
+        )
 
     result = fetch_text(
         rollup.evidence_url,
@@ -2364,7 +3427,16 @@ def fetch_l2beat_tracked_transactions(
             "fetched_at_utc": result.fetched_at_utc,
         }
     )
-    return tracked_transactions
+    return bound_tracked_transactions_to_observed_history(
+        snapshot_dir=snapshot_dir,
+        rollup_id=rollup.rollup_id,
+        tracked_transactions=supplement_tracked_transactions(
+            rollup_id=rollup.rollup_id,
+            tracked_transactions=tracked_transactions,
+        ),
+        observed_end=observed_end,
+        request_log=request_log,
+    )
 
 
 def relevant_calldata_tracked_calls(
@@ -2378,7 +3450,7 @@ def relevant_calldata_tracked_calls(
         return []
 
     relevant: list[TrackedFunctionCall] = []
-    for subtype in ("batchSubmissions", "stateUpdates"):
+    for subtype in ("batchSubmissions", "proofSubmissions", "stateUpdates"):
         for row in tracked_transactions.get(subtype, []):
             since_date = timestamp_to_utc_date(row.since_timestamp)
             until_date = timestamp_to_utc_date(row.until_timestamp) if row.until_timestamp is not None else None
@@ -2495,6 +3567,7 @@ def normalize_blockscout_tx(
     *,
     rollup_id: str,
     address: str,
+    subtype: str = "batchSubmissions",
     address_role: str = "from",
     method_selectors: tuple[str, ...] | None = None,
 ) -> BlockscoutTx | None:
@@ -2520,6 +3593,7 @@ def normalize_blockscout_tx(
         return BlockscoutTx(
             hash=str(row["hash"]).strip().lower(),
             rollup_id=rollup_id,
+            subtype=subtype,
             address=address,
             block_number=int(str(row["blockNumber"])),
             timestamp_utc=datetime.fromtimestamp(int(str(row["timeStamp"])), tz=timezone.utc),
@@ -2538,6 +3612,7 @@ def blockscout_tx_record(tx: BlockscoutTx) -> dict[str, Any]:
     return {
         "hash": tx.hash,
         "rollup_id": tx.rollup_id,
+        "subtype": tx.subtype,
         "address": tx.address,
         "block_number": tx.block_number,
         "timestamp_utc": tx.timestamp_utc.isoformat(),
@@ -2567,6 +3642,7 @@ def fetch_blockscout_tx_window(
     method_selectors: tuple[str, ...] | None = None,
     path_prefix: str = "txlist",
     scope_id: str | None = None,
+    subtype: str = "batchSubmissions",
 ) -> list[BlockscoutTx]:
     window_start_dt = start_timestamp_utc or datetime_utc_start(start_day)
     window_end_exclusive_dt = end_timestamp_exclusive_utc or datetime_utc_start(end_day_exclusive)
@@ -2594,6 +3670,7 @@ def fetch_blockscout_tx_window(
                 page_path,
                 rollup_id=rollup_id,
                 address=address,
+                default_subtype=subtype,
             )
             cached_page_size = stored_page_size
             request_log.append(
@@ -2637,6 +3714,7 @@ def fetch_blockscout_tx_window(
                 address_role=address_role,
                 method_selectors=method_selectors,
                 scope_id=scope_id,
+                subtype=subtype,
             )
             if reused_rows is not None:
                 return reused_rows
@@ -2660,6 +3738,7 @@ def fetch_blockscout_tx_window(
                 method_selectors=method_selectors,
                 path_prefix=path_prefix,
                 scope_id=scope_id,
+                subtype=subtype,
             )
             if bigquery_rows is not None:
                 return bigquery_rows
@@ -2684,6 +3763,7 @@ def fetch_blockscout_tx_window(
                 method_selectors=method_selectors,
                 path_prefix=path_prefix,
                 scope_id=scope_id,
+                subtype=subtype,
             )
             if bigquery_rows is not None:
                 return bigquery_rows
@@ -2723,6 +3803,7 @@ def fetch_blockscout_tx_window(
                 method_selectors=method_selectors,
                 path_prefix=path_prefix,
                 scope_id=scope_id,
+                subtype=subtype,
             )
             seen_hashes = {row.hash for row in all_rows}
             for row in continuation_rows:
@@ -2769,6 +3850,7 @@ def fetch_blockscout_tx_window(
                 method_selectors=method_selectors,
                 path_prefix=path_prefix,
                 scope_id=scope_id,
+                subtype=subtype,
             )
             seen_hashes = {row.hash for row in all_rows}
             for row in continuation_rows:
@@ -2827,6 +3909,7 @@ def fetch_blockscout_tx_window(
                     method_selectors=method_selectors,
                     path_prefix=path_prefix,
                     scope_id=scope_id,
+                    subtype=subtype,
                 )
                 merged_rows = list(all_rows)
                 seen_hashes = {row.hash for row in merged_rows}
@@ -2869,6 +3952,7 @@ def fetch_blockscout_tx_window(
                     method_selectors=method_selectors,
                     path_prefix=path_prefix,
                     scope_id=scope_id,
+                    subtype=subtype,
                 )
                 right_rows = fetch_blockscout_tx_window(
                     snapshot_dir=snapshot_dir,
@@ -2886,6 +3970,7 @@ def fetch_blockscout_tx_window(
                     method_selectors=method_selectors,
                     path_prefix=path_prefix,
                     scope_id=scope_id,
+                    subtype=subtype,
                 )
                 seen_hashes = {row.hash for row in merged_rows}
                 for row in left_rows + right_rows:
@@ -2905,6 +3990,7 @@ def fetch_blockscout_tx_window(
                 row,
                 rollup_id=rollup_id,
                 address=address,
+                subtype=subtype,
                 address_role=address_role,
                 method_selectors=method_selectors,
             )
@@ -2955,7 +4041,12 @@ def fetch_blockscout_tx_window(
     return all_rows
 
 
-def normalize_blobscan_tx(tx: dict[str, Any], *, default_rollup_id: str | None = None) -> BlobscanTx:
+def normalize_blobscan_tx(
+    tx: dict[str, Any],
+    *,
+    default_rollup_id: str | None = None,
+    subtype: str = "batchSubmissions",
+) -> BlobscanTx:
     raw_rollup = tx.get("rollup")
     rollup_id = (
         canonicalize_blobscan_rollup_id(str(raw_rollup))
@@ -2972,6 +4063,7 @@ def normalize_blobscan_tx(tx: dict[str, Any], *, default_rollup_id: str | None =
         return BlobscanTx(
             hash=str(tx["hash"]).strip().lower(),
             rollup_id=rollup_id,
+            subtype=subtype,
             block_number=int(tx["blockNumber"]),
             timestamp_utc=parse_datetime(str(tx["blockTimestamp"])),
             from_address=str(tx["from"]).strip().lower(),
@@ -2988,6 +4080,7 @@ def blobscan_tx_record(tx: BlobscanTx) -> dict[str, Any]:
     return {
         "hash": tx.hash,
         "rollup_id": tx.rollup_id,
+        "subtype": tx.subtype,
         "block_number": tx.block_number,
         "timestamp_utc": tx.timestamp_utc.isoformat(),
         "from_address": tx.from_address,
@@ -3028,6 +4121,7 @@ def fetch_blobscan_window(
     instability_retries_remaining: int = BLOBSCAN_INSTABILITY_RETRY_ROUNDS,
     terminal_window_retries_remaining: int = BLOBSCAN_TERMINAL_WINDOW_RETRY_ROUNDS,
     allow_rollup_discovery_fallback: bool = True,
+    subtype: str = "batchSubmissions",
 ) -> list[BlobscanTx]:
     if not from_address and not rollup_filter:
         raise ValueError("blobscan fetch requires from_address or rollup_filter")
@@ -3058,11 +4152,44 @@ def fetch_blobscan_window(
     )
     if completed_rows is not None:
         return completed_rows
+    if from_address is not None and rollup_filter is None:
+        rollup_scope_rows = maybe_reuse_cached_blobscan_rollup_scope_for_sender(
+            snapshot_dir=snapshot_dir,
+            rollup_id=rollup_id,
+            from_address=from_address,
+            window_start_dt=window_start_dt,
+            window_end_exclusive_dt=window_end_exclusive_dt,
+            retries=retries,
+            timeout_seconds=timeout_seconds,
+        )
+        if rollup_scope_rows is not None:
+            request_log.append(
+                {
+                    "source": "blobscan_rollup_scope_filter",
+                    "rollup_id": rollup_id,
+                    "from_address": from_address,
+                    "window_start_utc": window_start_dt.isoformat(),
+                    "window_end_exclusive_utc": window_end_exclusive_dt.isoformat(),
+                    "reused_existing": True,
+                }
+            )
+            return rollup_scope_rows
 
     while True:
         page_path = snapshot_dir / "blobscan" / rollup_id / source_dir / f"{window_id}_page-{page:04d}.json"
         if page_path.exists():
-            normalized_rows, existing_total, stored_page_size = load_existing_blobscan_page(page_path, rollup_id=rollup_id)
+            normalized_rows, existing_total, stored_page_size = load_existing_blobscan_page(
+                page_path,
+                rollup_id=rollup_id,
+                default_subtype=subtype,
+            )
+            existing_total = normalize_blobscan_total_transactions(
+                rollup_id=rollup_id,
+                source_dir=source_dir,
+                total_transactions=existing_total,
+                row_count=len(normalized_rows),
+                page_size=stored_page_size,
+            )
             if cached_page_size is None:
                 cached_page_size = stored_page_size
             elif cached_page_size != stored_page_size:
@@ -3104,6 +4231,7 @@ def fetch_blobscan_window(
                     start_timestamp_utc=window_start_dt,
                     end_timestamp_exclusive_utc=window_end_exclusive_dt,
                     allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
+                    subtype=subtype,
                 )
             request_log.append(
                 {
@@ -3123,8 +4251,6 @@ def fetch_blobscan_window(
             )
             total_rows.extend(normalized_rows)
             if len(normalized_rows) < stored_page_size:
-                break
-            if total_transactions is not None and page * stored_page_size >= total_transactions:
                 break
             page += 1
             continue
@@ -3159,6 +4285,7 @@ def fetch_blobscan_window(
                 start_timestamp_utc=window_start_dt,
                 end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
                 allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
+                subtype=subtype,
             )
             merged_rows = list(total_rows)
             seen_hashes = {row.hash for row in merged_rows}
@@ -3193,12 +4320,37 @@ def fetch_blobscan_window(
                 merged_rows.append(row)
             return merged_rows
 
+        if total_rows and cached_page_size == page_size and page_size >= BLOBSCAN_TX_PAGE_SIZE:
+            logging.info(
+                "Skipping another live Blobscan page fetch for %s/%s within %s..%s because the exact cached scope "
+                "already ends on a full final page at page size %s; rebuilding the exact scope via Blockscout "
+                "txlist plus receipts instead",
+                rollup_id,
+                source_dir,
+                window_start_dt.isoformat(),
+                remaining_end_exclusive_dt.isoformat(),
+                page_size,
+            )
+            fallback_rows = backfill_blobscan_window_from_blockscout_receipts(
+                snapshot_dir=snapshot_dir,
+                rollup_id=rollup_id,
+                from_address=from_address,
+                rollup_filter=rollup_filter,
+                window_start_dt=window_start_dt,
+                window_end_exclusive_dt=remaining_end_exclusive_dt,
+                page_size=page_size,
+                retries=retries,
+                timeout_seconds=timeout_seconds,
+                request_log=request_log,
+            )
+            if fallback_rows is not None:
+                return fallback_rows
+
         params: dict[str, str] = {
             "startDate": iso_utc_datetime(window_start_dt),
             "endDate": iso_utc_datetime(window_end_inclusive_dt),
             "ps": str(page_size),
             "p": str(page),
-            "count": "true",
         }
         if from_address:
             params["from"] = from_address
@@ -3238,18 +4390,53 @@ def fetch_blobscan_window(
                     seen_hashes.add(row.hash)
                     merged_rows.append(row)
                 return merged_rows
-            if not total_rows and page == 1 and instability_retries_remaining > 0:
-                logging.info(
-                    "Cooling down Blobscan window for %s/%s at page size %s after repeated page 1 instability "
-                    "within %s..%s; retrying the same window in %.1fs (%s retries remaining after this)",
-                    rollup_id,
-                    source_dir,
-                    page_size,
-                    window_start_dt.isoformat(),
-                    remaining_end_exclusive_dt.isoformat(),
-                    BLOBSCAN_INSTABILITY_RETRY_DELAY_SECONDS,
-                    instability_retries_remaining - 1,
-                )
+            fallback_rows = backfill_blobscan_window_from_blockscout_receipts(
+                snapshot_dir=snapshot_dir,
+                rollup_id=rollup_id,
+                from_address=from_address,
+                rollup_filter=rollup_filter,
+                window_start_dt=window_start_dt,
+                window_end_exclusive_dt=remaining_end_exclusive_dt,
+                page_size=page_size,
+                retries=retries,
+                timeout_seconds=timeout_seconds,
+                request_log=request_log,
+            )
+            if fallback_rows is not None:
+                merged_rows = list(total_rows)
+                seen_hashes = {row.hash for row in merged_rows}
+                for row in fallback_rows:
+                    if row.hash in seen_hashes:
+                        continue
+                    seen_hashes.add(row.hash)
+                    merged_rows.append(row)
+                return merged_rows
+            if instability_retries_remaining > 0:
+                if not total_rows and page == 1:
+                    logging.info(
+                        "Cooling down Blobscan window for %s/%s at page size %s after repeated page 1 instability "
+                        "within %s..%s; retrying the same window in %.1fs (%s retries remaining after this)",
+                        rollup_id,
+                        source_dir,
+                        page_size,
+                        window_start_dt.isoformat(),
+                        remaining_end_exclusive_dt.isoformat(),
+                        BLOBSCAN_INSTABILITY_RETRY_DELAY_SECONDS,
+                        instability_retries_remaining - 1,
+                    )
+                else:
+                    logging.info(
+                        "Cooling down Blobscan window for %s/%s after repeated page %s instability at page size %s "
+                        "within %s..%s; retrying the same partially-cached window in %.1fs (%s retries remaining after this)",
+                        rollup_id,
+                        source_dir,
+                        page,
+                        page_size,
+                        window_start_dt.isoformat(),
+                        remaining_end_exclusive_dt.isoformat(),
+                        BLOBSCAN_INSTABILITY_RETRY_DELAY_SECONDS,
+                        instability_retries_remaining - 1,
+                    )
                 time.sleep(BLOBSCAN_INSTABILITY_RETRY_DELAY_SECONDS)
                 return fetch_blobscan_window(
                     snapshot_dir=snapshot_dir,
@@ -3266,6 +4453,7 @@ def fetch_blobscan_window(
                     end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
                     instability_retries_remaining=instability_retries_remaining - 1,
                     allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
+                    subtype=subtype,
                 )
             if (
                 not total_rows
@@ -3300,6 +4488,7 @@ def fetch_blobscan_window(
                     instability_retries_remaining=BLOBSCAN_INSTABILITY_RETRY_ROUNDS,
                     terminal_window_retries_remaining=terminal_window_retries_remaining - 1,
                     allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
+                    subtype=subtype,
                 )
             fallback_page_size = max(BLOBSCAN_MIN_PAGE_SIZE, page_size // 2)
             if fallback_page_size < page_size:
@@ -3328,6 +4517,7 @@ def fetch_blobscan_window(
                     end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
                     terminal_window_retries_remaining=terminal_window_retries_remaining,
                     allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
+                    subtype=subtype,
                 )
                 merged_rows = list(total_rows)
                 seen_hashes = {row.hash for row in merged_rows}
@@ -3368,6 +4558,7 @@ def fetch_blobscan_window(
                     end_timestamp_exclusive_utc=split_dt,
                     terminal_window_retries_remaining=terminal_window_retries_remaining,
                     allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
+                    subtype=subtype,
                 )
                 newer_rows = fetch_blobscan_window(
                     snapshot_dir=snapshot_dir,
@@ -3384,6 +4575,7 @@ def fetch_blobscan_window(
                     end_timestamp_exclusive_utc=remaining_end_exclusive_dt,
                     terminal_window_retries_remaining=terminal_window_retries_remaining,
                     allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
+                    subtype=subtype,
                 )
                 merged_rows = list(total_rows)
                 seen_hashes = {row.hash for row in merged_rows}
@@ -3398,17 +4590,18 @@ def fetch_blobscan_window(
         rows = payload.get("transactions")
         if not isinstance(rows, list):
             raise SystemExit(f"Blobscan payload is malformed for {rollup_id}: {payload!r}")
-        if total_transactions is None and payload.get("totalTransactions") is not None:
-            try:
-                total_transactions = int(payload["totalTransactions"])
-            except (TypeError, ValueError) as exc:
-                raise SystemExit(f"Blobscan totalTransactions is malformed for {rollup_id}: {payload!r}") from exc
-
         normalized_rows = [
-            normalize_blobscan_tx(row, default_rollup_id=rollup_id)
+            normalize_blobscan_tx(row, default_rollup_id=rollup_id, subtype=subtype)
             for row in rows
             if isinstance(row, dict)
         ]
+        total_transactions = normalize_blobscan_total_transactions(
+            rollup_id=rollup_id,
+            source_dir=source_dir,
+            total_transactions=total_transactions,
+            row_count=len(normalized_rows),
+            page_size=page_size,
+        )
         if (
             page == 1
             and not total_rows
@@ -3441,6 +4634,7 @@ def fetch_blobscan_window(
                 start_timestamp_utc=window_start_dt,
                 end_timestamp_exclusive_utc=window_end_exclusive_dt,
                 allow_rollup_discovery_fallback=allow_rollup_discovery_fallback,
+                subtype=subtype,
             )
         for row in normalized_rows:
             if row.rollup_id != rollup_id:
@@ -3480,8 +4674,6 @@ def fetch_blobscan_window(
         total_rows.extend(normalized_rows)
         if len(rows) < page_size:
             break
-        if total_transactions is not None and page * page_size >= total_transactions:
-            break
         page += 1
 
     return total_rows
@@ -3496,6 +4688,31 @@ def chunked(values: Iterable[int | str], size: int) -> Iterable[list[int | str]]
             chunk = []
     if chunk:
         yield chunk
+
+
+def chunk_cache_token(values: Iterable[int | str]) -> str:
+    payload = "\n".join(str(value) for value in values).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def block_base_fee_batch_path(
+    *,
+    snapshot_dir: Path,
+    batch_index: int,
+    block_chunk: list[int | str],
+) -> Path:
+    token = chunk_cache_token(block_chunk)
+    return snapshot_dir / "blockscout" / "block_base_fees" / f"batch-{batch_index:04d}__{token}.json"
+
+
+def receipt_batch_path(
+    *,
+    snapshot_dir: Path,
+    batch_index: int,
+    hash_chunk: list[int | str],
+) -> Path:
+    token = chunk_cache_token(hash_chunk)
+    return snapshot_dir / "blockscout" / "receipts" / f"batch-{batch_index:04d}__{token}.json"
 
 
 def fetch_block_base_fees(
@@ -3544,7 +4761,11 @@ def fetch_block_base_fees(
 
     batch_index = 1
     for block_chunk in chunked(requested_block_numbers, batch_size):
-        path = snapshot_dir / "blockscout" / "block_base_fees" / f"batch-{batch_index:04d}.json"
+        path = block_base_fee_batch_path(
+            snapshot_dir=snapshot_dir,
+            batch_index=batch_index,
+            block_chunk=block_chunk,
+        )
         if all(block_number in known for block_number in block_chunk):
             batch_index += 1
             continue
@@ -3696,6 +4917,7 @@ def fetch_block_base_fees(
                 "source": "eth_getBlockByNumber",
                 "provider_labels": provider_labels,
                 "fetched_at_utc": result.fetched_at_utc,
+                "requested_block_numbers": [int(block_number) for block_number in block_chunk],
                 "blocks": batch_rows,
             },
         )
@@ -3725,14 +4947,25 @@ def fetch_receipts(
     timeout_seconds: float,
     batch_size: int,
     request_log: list[dict[str, Any]],
+    refresh_hashes: Iterable[str] | None = None,
 ) -> dict[str, ReceiptFields]:
     requested_hashes = [str(tx_hash).strip().lower() for tx_hash in sorted(set(tx_hashes))]
+    refresh_hash_set = {
+        str(tx_hash).strip().lower()
+        for tx_hash in (refresh_hashes or [])
+        if str(tx_hash).strip().lower() in requested_hashes
+    }
     lookup_db = receipt_lookup_db_path(snapshot_dir=snapshot_dir)
     receipts: dict[str, ReceiptFields] = {}
     if lookup_db.exists():
-        receipts = load_receipts_from_lookup_db(db_path=lookup_db, tx_hashes=requested_hashes)
+        lookup_receipts = load_receipts_from_lookup_db(db_path=lookup_db, tx_hashes=requested_hashes)
+        receipts = {
+            tx_hash: receipt
+            for tx_hash, receipt in lookup_receipts.items()
+            if tx_hash not in refresh_hash_set
+        }
         missing_hashes = [tx_hash for tx_hash in requested_hashes if tx_hash not in receipts]
-        if not missing_hashes:
+        if not missing_hashes and not refresh_hash_set:
             logging.info(
                 "Reusing receipt enrichment for %s tx hashes from %s",
                 len(requested_hashes),
@@ -3749,6 +4982,13 @@ def fetch_receipts(
                 }
             )
             return receipts
+        if refresh_hash_set:
+            logging.info(
+                "Refreshing %s/%s requested receipt hashes via BigQuery or live RPC instead of trusting lookup cache %s",
+                len(refresh_hash_set),
+                len(requested_hashes),
+                lookup_db.relative_to(repo_root()),
+            )
         logging.warning(
             "Receipt lookup %s is missing %s/%s requested tx hashes; attempting BigQuery backfill before legacy batch cache",
             lookup_db,
@@ -3786,7 +5026,11 @@ def fetch_receipts(
     batch_index = 1
     total_batches = (len(requested_hashes) + batch_size - 1) // batch_size
     for hash_chunk in chunked(requested_hashes, batch_size):
-        path = snapshot_dir / "blockscout" / "receipts" / f"batch-{batch_index:04d}.json"
+        path = receipt_batch_path(
+            snapshot_dir=snapshot_dir,
+            batch_index=batch_index,
+            hash_chunk=hash_chunk,
+        )
         if path.exists():
             for row in load_existing_receipt_batch(path):
                 receipts[row.hash] = row
@@ -3949,6 +5193,7 @@ def fetch_receipts(
                 "source": "eth_getTransactionReceipt",
                 "provider_labels": provider_labels,
                 "fetched_at_utc": result.fetched_at_utc,
+                "requested_hashes": list(hash_chunk),
                 "receipts": compact_rows,
             },
         )
@@ -3970,26 +5215,55 @@ def fetch_receipts(
     return receipts
 
 
-def missing_blob_receipt_hashes_from_checkpoint(
+def missing_receipt_hashes_from_checkpoint(
     *,
     checkpoint_path: Path,
     lookup_db: Path,
+    include_calldata: bool = False,
 ) -> list[str]:
     connection = sqlite3.connect(f"file:{checkpoint_path}?mode=ro", uri=True)
     try:
         connection.row_factory = sqlite3.Row
+        requested_hashes_cte = " UNION ".join(receipt_hash_scope_selects(include_calldata=include_calldata))
         if lookup_db.exists():
             connection.execute("ATTACH DATABASE ? AS receipts_db", (str(lookup_db),))
             query = (
-                "SELECT b.hash "
-                "FROM blob_txs b "
-                "LEFT JOIN receipts_db.receipts r ON r.hash = b.hash "
+                "WITH requested_hashes AS ("
+                f"  {requested_hashes_cte}"
+                ") "
+                "SELECT h.hash "
+                "FROM requested_hashes h "
+                "LEFT JOIN receipts_db.receipts r ON r.hash = h.hash "
                 "WHERE r.hash IS NULL "
-                "ORDER BY b.hash"
+                "ORDER BY h.hash"
             )
         else:
-            query = "SELECT hash FROM blob_txs ORDER BY hash"
+            query = (
+                "WITH requested_hashes AS ("
+                f"  {requested_hashes_cte}"
+                ") "
+                "SELECT hash FROM requested_hashes ORDER BY hash"
+            )
         return [str(row["hash"]).strip().lower() for row in connection.execute(query)]
+    finally:
+        connection.close()
+
+
+def count_receipt_hashes_from_checkpoint(
+    *,
+    checkpoint_path: Path,
+    include_calldata: bool = False,
+) -> int:
+    connection = sqlite3.connect(f"file:{checkpoint_path}?mode=ro", uri=True)
+    try:
+        requested_hashes_cte = " UNION ".join(receipt_hash_scope_selects(include_calldata=include_calldata))
+        query = (
+            "WITH requested_hashes AS ("
+            f"  {requested_hashes_cte}"
+            ") "
+            "SELECT COUNT(*) FROM requested_hashes"
+        )
+        return int(connection.execute(query).fetchone()[0])
     finally:
         connection.close()
 
@@ -4037,24 +5311,19 @@ def aggregate_daily_from_checkpoint_streaming(
     checkpoint_path: Path,
     receipt_lookup_db: Path,
     block_base_fee_lookup_db: Path,
-) -> tuple[dict[tuple[str, str], dict[str, Decimal | int]], dict[str, dict[str, Decimal | int]], int]:
+) -> tuple[dict[tuple[str, str], dict[str, int]], dict[str, dict[str, int]], int]:
     if not receipt_lookup_db.exists():
         raise SystemExit(f"required receipt lookup DB is missing for checkpoint aggregation: {receipt_lookup_db}")
     if not block_base_fee_lookup_db.exists():
         raise SystemExit(f"required block base-fee lookup DB is missing for checkpoint aggregation: {block_base_fee_lookup_db}")
 
-    rollup_daily: dict[tuple[str, str], dict[str, Decimal | int]] = {}
-    ecosystem_daily: dict[str, dict[str, Decimal | int]] = {}
+    rollup_daily: dict[tuple[str, str], dict[str, int]] = {}
+    ecosystem_daily: dict[str, dict[str, int]] = {}
 
-    def ensure_rollup_bucket(day: str, rollup_id: str) -> dict[str, Decimal | int]:
-        return rollup_daily.setdefault(
-            (day, rollup_id),
-            {
-                "rent_paid_wei": 0,
-            },
-        )
+    def ensure_rollup_bucket(day: str, rollup_id: str) -> dict[str, int]:
+        return rollup_daily.setdefault((day, rollup_id), new_rollup_component_bucket())
 
-    def ensure_ecosystem_bucket(day: str) -> dict[str, Decimal | int]:
+    def ensure_ecosystem_bucket(day: str) -> dict[str, int]:
         return ecosystem_daily.setdefault(
             day,
             {
@@ -4074,46 +5343,69 @@ def aggregate_daily_from_checkpoint_streaming(
 
         dropped_funding_like_txs = int(
             connection.execute(
-                "SELECT COUNT(*) FROM calldata_txs WHERE value_wei != '0' AND gas_used = 21000"
+                "SELECT COUNT(*) "
+                "FROM calldata_txs c "
+                "LEFT JOIN receipts_db.receipts r ON r.hash = c.hash "
+                "WHERE c.value_wei != '0' AND COALESCE(r.gas_used, c.gas_used) = 21000"
             ).fetchone()[0]
         )
 
         calldata_query = (
             "SELECT substr(c.timestamp_utc, 1, 10) AS day, "
             "c.rollup_id AS rollup_id, "
-            "c.gas_used AS gas_used, "
-            "c.gas_price_wei AS gas_price_wei, "
+            "c.subtype AS subtype, "
+            "COALESCE(r.gas_used, c.gas_used) AS gas_used, "
+            "COALESCE(r.effective_gas_price_wei, c.gas_price_wei) AS effective_gas_price_wei, "
+            "COALESCE(r.blob_gas_used, 0) AS blob_gas_used, "
+            "COALESCE(r.blob_gas_price_wei, 0) AS blob_gas_price_wei, "
             "f.base_fee_per_gas_wei AS base_fee_per_gas_wei "
             "FROM calldata_txs c "
+            "LEFT JOIN receipts_db.receipts r ON r.hash = c.hash "
             "JOIN fees_db.block_base_fees f ON f.block_number = c.block_number "
-            "WHERE NOT (c.value_wei != '0' AND c.gas_used = 21000)"
+            "WHERE NOT (c.value_wei != '0' AND COALESCE(r.gas_used, c.gas_used) = 21000)"
         )
         for row in connection.execute(calldata_query):
             gas_used = int(row["gas_used"])
             base_fee_wei = int(str(row["base_fee_per_gas_wei"]))
-            effective_gas_price_wei = int(str(row["gas_price_wei"]))
+            effective_gas_price_wei = int(str(row["effective_gas_price_wei"]))
+            blob_gas_used = int(row["blob_gas_used"])
+            blob_gas_price_wei = int(str(row["blob_gas_price_wei"]))
             priority_fee_wei = gas_used * max(effective_gas_price_wei - base_fee_wei, 0)
             base_burn_wei = gas_used * base_fee_wei
-            total_rent_wei = base_burn_wei + priority_fee_wei
+            blob_fee_wei = blob_gas_used * blob_gas_price_wei if blob_gas_used > 0 else 0
             day = str(row["day"])
             rollup_id = str(row["rollup_id"])
+            subtype = str(row["subtype"])
+
+            if not is_canonical_rollup_subtype_in_scope(rollup_id=rollup_id, subtype=subtype):
+                continue
 
             rollup_bucket = ensure_rollup_bucket(day, rollup_id)
-            rollup_bucket["rent_paid_wei"] = coerce_int(str(rollup_bucket["rent_paid_wei"])) + total_rent_wei
+            add_rollup_fee_components(
+                rollup_bucket,
+                subtype=subtype,
+                base_burn_wei=base_burn_wei,
+                priority_fee_wei=priority_fee_wei,
+                blob_fee_wei=blob_fee_wei,
+            )
 
             ecosystem_bucket = ensure_ecosystem_bucket(day)
-            ecosystem_bucket["base_fee_burn_wei"] = coerce_int(str(ecosystem_bucket["base_fee_burn_wei"])) + base_burn_wei
-            ecosystem_bucket["priority_fee_wei"] = coerce_int(str(ecosystem_bucket["priority_fee_wei"])) + priority_fee_wei
-            ecosystem_bucket["calldata_gas_proxy"] = coerce_int(str(ecosystem_bucket["calldata_gas_proxy"])) + gas_used
+            ecosystem_bucket["base_fee_burn_wei"] += base_burn_wei
+            ecosystem_bucket["priority_fee_wei"] += priority_fee_wei
+            ecosystem_bucket["calldata_gas_proxy"] += gas_used
+            if blob_gas_used > 0:
+                ecosystem_bucket["blob_fee_burn_wei"] += blob_fee_wei
+                ecosystem_bucket["blob_gas_used"] += blob_gas_used
 
         blob_query = (
             "SELECT substr(b.timestamp_utc, 1, 10) AS day, "
             "b.rollup_id AS rollup_id, "
+            "b.subtype AS subtype, "
+            "b.blob_gas_used AS blob_gas_used, "
+            "b.blob_gas_price_wei AS blob_gas_price_wei, "
             "b.blob_as_calldata_gas_used AS blob_as_calldata_gas_used, "
             "r.gas_used AS gas_used, "
             "r.effective_gas_price_wei AS effective_gas_price_wei, "
-            "r.blob_gas_used AS blob_gas_used, "
-            "r.blob_gas_price_wei AS blob_gas_price_wei, "
             "f.base_fee_per_gas_wei AS base_fee_per_gas_wei "
             "FROM blob_txs b "
             "JOIN receipts_db.receipts r ON r.hash = b.hash "
@@ -4129,21 +5421,28 @@ def aggregate_daily_from_checkpoint_streaming(
             priority_fee_wei = gas_used * max(effective_gas_price_wei - base_fee_wei, 0)
             base_burn_wei = gas_used * base_fee_wei
             blob_fee_wei = blob_gas_used * blob_gas_price_wei
-            total_rent_wei = base_burn_wei + priority_fee_wei + blob_fee_wei
             day = str(row["day"])
             rollup_id = str(row["rollup_id"])
+            subtype = str(row["subtype"])
+
+            if not is_canonical_rollup_subtype_in_scope(rollup_id=rollup_id, subtype=subtype):
+                continue
 
             rollup_bucket = ensure_rollup_bucket(day, rollup_id)
-            rollup_bucket["rent_paid_wei"] = coerce_int(str(rollup_bucket["rent_paid_wei"])) + total_rent_wei
+            add_rollup_fee_components(
+                rollup_bucket,
+                subtype=subtype,
+                base_burn_wei=base_burn_wei,
+                priority_fee_wei=priority_fee_wei,
+                blob_fee_wei=blob_fee_wei,
+            )
 
             ecosystem_bucket = ensure_ecosystem_bucket(day)
-            ecosystem_bucket["base_fee_burn_wei"] = coerce_int(str(ecosystem_bucket["base_fee_burn_wei"])) + base_burn_wei
-            ecosystem_bucket["blob_fee_burn_wei"] = coerce_int(str(ecosystem_bucket["blob_fee_burn_wei"])) + blob_fee_wei
-            ecosystem_bucket["priority_fee_wei"] = coerce_int(str(ecosystem_bucket["priority_fee_wei"])) + priority_fee_wei
-            ecosystem_bucket["blob_gas_used"] = coerce_int(str(ecosystem_bucket["blob_gas_used"])) + blob_gas_used
-            ecosystem_bucket["calldata_gas_proxy"] = (
-                coerce_int(str(ecosystem_bucket["calldata_gas_proxy"])) + blob_as_calldata_gas_used
-            )
+            ecosystem_bucket["base_fee_burn_wei"] += base_burn_wei
+            ecosystem_bucket["blob_fee_burn_wei"] += blob_fee_wei
+            ecosystem_bucket["priority_fee_wei"] += priority_fee_wei
+            ecosystem_bucket["blob_gas_used"] += blob_gas_used
+            ecosystem_bucket["calldata_gas_proxy"] += blob_as_calldata_gas_used
     finally:
         connection.close()
 
@@ -4308,6 +5607,15 @@ def sample_rows_or_die(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return sample
 
 
+def sample_component_rows_or_die(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    sample = [row for row in rows if row["date_utc"] in SAMPLE_DATES]
+    present_dates = {row["date_utc"] for row in sample}
+    missing_dates = [day for day in SAMPLE_DATES if day not in present_dates]
+    if missing_dates:
+        raise SystemExit(f"sample selection missing required component dates: {missing_dates}")
+    return sample
+
+
 def sample_decomp_rows_or_die(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     by_day = {row["date_utc"]: row for row in rows}
     sample: list[dict[str, str]] = []
@@ -4361,6 +5669,43 @@ def normalize_slug(value: str) -> str:
     return value.strip().lower().replace("-", "_")
 
 
+def new_rollup_component_bucket() -> dict[str, int]:
+    return {
+        "rent_paid_wei": 0,
+        "batch_submissions_wei": 0,
+        "proof_submissions_wei": 0,
+        "state_updates_wei": 0,
+        "execution_base_fee_burn_wei": 0,
+        "execution_priority_fee_wei": 0,
+        "blob_fee_burn_wei": 0,
+    }
+
+
+def add_rollup_fee_components(
+    bucket: dict[str, int],
+    *,
+    subtype: str,
+    base_burn_wei: int,
+    priority_fee_wei: int,
+    blob_fee_wei: int = 0,
+) -> None:
+    subtype_field = ROLLUP_SUBTYPE_TO_COMPONENT_FIELD.get(subtype)
+    if subtype_field is None:
+        raise SystemExit(f"unknown tracked transaction subtype for rollup rent decomposition: {subtype}")
+
+    total_rent_wei = base_burn_wei + priority_fee_wei + blob_fee_wei
+    bucket["rent_paid_wei"] += total_rent_wei
+    bucket[subtype_field] += total_rent_wei
+    bucket["execution_base_fee_burn_wei"] += base_burn_wei
+    bucket["execution_priority_fee_wei"] += priority_fee_wei
+    bucket["blob_fee_burn_wei"] += blob_fee_wei
+
+
+def is_canonical_rollup_subtype_in_scope(*, rollup_id: str, subtype: str) -> bool:
+    excluded_subtypes = CANONICAL_EXCLUDED_SUBTYPES_BY_ROLLUP.get(rollup_id)
+    return excluded_subtypes is None or subtype not in excluded_subtypes
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -4384,11 +5729,16 @@ def main(argv: list[str]) -> int:
     snapshot_dir = root / "data" / "raw" / "l1_rent" / run_date.isoformat()
     raw_manifest_path = root / "data" / "raw_manifest" / f"l1_rent_{run_date.isoformat()}.json"
     decomp_path = root / "data" / "processed" / "l1_rent" / "daily_l1_rent_decomposition.csv"
+    component_path = root / "data" / "processed" / "l1_rent" / "daily_rollup_rent_components.csv"
     panel_path = root / "data" / "processed" / "panels" / "daily_rollup_panel.csv"
     decomp_sample_path = root / "data" / "samples" / "l1_rent" / "daily_l1_rent_decomposition_sample.csv"
+    component_sample_path = root / "data" / "samples" / "l1_rent" / "daily_rollup_rent_components_sample.csv"
     panel_sample_path = root / "data" / "samples" / "panels" / "daily_rollup_panel_sample.csv"
     decomp_manifest_path = (
         root / "data" / "processed_manifest" / f"daily_l1_rent_decomposition_{run_date.isoformat()}.json"
+    )
+    component_manifest_path = (
+        root / "data" / "processed_manifest" / f"daily_rollup_rent_components_{run_date.isoformat()}.json"
     )
     panel_manifest_path = root / "data" / "processed_manifest" / f"daily_rollup_panel_{run_date.isoformat()}.json"
 
@@ -4398,10 +5748,31 @@ def main(argv: list[str]) -> int:
         raise SystemExit(f"required growthepie raw manifest is missing: {growthepie_raw_manifest_path}")
     vendor_panel_path = root / "data" / "processed" / "growthepie" / "vendor_daily_rollup_panel.csv"
 
-    prepare_snapshot_dir(snapshot_dir, raw_manifest_path=raw_manifest_path)
-    ensure_new_manifest(raw_manifest_path, label="raw manifest")
-    ensure_new_manifest(decomp_manifest_path, label="processed decomposition manifest")
-    ensure_new_manifest(panel_manifest_path, label="processed panel manifest")
+    if args.resume_manifested_run:
+        if not snapshot_dir.exists():
+            raise SystemExit(
+                f"--resume-manifested-run requires an existing raw snapshot for this run date: {snapshot_dir}"
+            )
+        if not raw_manifest_path.exists():
+            raise SystemExit(
+                f"--resume-manifested-run requires an existing raw manifest for this run date: {raw_manifest_path}"
+            )
+        if not decomp_manifest_path.exists() or not panel_manifest_path.exists():
+            raise SystemExit(
+                "--resume-manifested-run requires existing processed manifests so the replay is explicitly "
+                "repairing a prior manifested run"
+            )
+        logging.warning(
+            "Reusing manifested run-date %s for a deterministic ETL repair; raw/processed manifests will be refreshed "
+            "in place after reusing the existing raw snapshot",
+            run_date.isoformat(),
+        )
+    else:
+        prepare_snapshot_dir(snapshot_dir, raw_manifest_path=raw_manifest_path)
+        ensure_new_manifest(raw_manifest_path, label="raw manifest")
+        ensure_new_manifest(decomp_manifest_path, label="processed decomposition manifest")
+        ensure_new_manifest(component_manifest_path, label="processed rollup rent component manifest")
+        ensure_new_manifest(panel_manifest_path, label="processed panel manifest")
 
     vendor_rows = load_vendor_panel(vendor_panel_path)
     request_log: list[dict[str, Any]] = []
@@ -4423,15 +5794,35 @@ def main(argv: list[str]) -> int:
         for rollup in rollups:
             active_start = max(PROTOCOL_START, rollup.start_date_utc)
             active_end = observed_end if rollup.end_date_utc is None else min(observed_end, rollup.end_date_utc)
-            if active_end < active_start or rollup.batcher_addresses:
+            if active_end < active_start:
                 continue
-            tracked_transactions_by_rollup[rollup.rollup_id] = fetch_l2beat_tracked_transactions(
-                snapshot_dir=snapshot_dir,
-                rollup=rollup,
-                retries=args.retries,
-                timeout_seconds=args.timeout_seconds,
-                request_log=request_log,
-            )
+            try:
+                tracked_transactions_by_rollup[rollup.rollup_id] = fetch_l2beat_tracked_transactions(
+                    snapshot_dir=snapshot_dir,
+                    rollup=rollup,
+                    observed_end=active_end,
+                    retries=args.retries,
+                    timeout_seconds=args.timeout_seconds,
+                    request_log=request_log,
+                )
+            except SystemExit as exc:
+                if not rollup.batcher_addresses:
+                    raise
+                logging.warning(
+                    "Supplemental L2BEAT tracked transactions are unavailable for %s; continuing with batcher-address attribution plus legacy supplements only: %s",
+                    rollup.rollup_id,
+                    exc,
+                )
+                tracked_transactions_by_rollup[rollup.rollup_id] = bound_tracked_transactions_to_observed_history(
+                    snapshot_dir=snapshot_dir,
+                    rollup_id=rollup.rollup_id,
+                    tracked_transactions=supplement_tracked_transactions(
+                        rollup_id=rollup.rollup_id,
+                        tracked_transactions={},
+                    ),
+                    observed_end=active_end,
+                    request_log=request_log,
+                )
 
         validate_registry_attribution_inputs(
             rollups=rollups,
@@ -4448,6 +5839,12 @@ def main(argv: list[str]) -> int:
             active_end = observed_end if rollup.end_date_utc is None else min(observed_end, rollup.end_date_utc)
             if active_end < active_start:
                 continue
+            tracked_calls = relevant_calldata_tracked_calls(
+                rollup=rollup,
+                tracked_transactions=tracked_transactions_by_rollup.get(rollup.rollup_id, {}),
+                active_start=active_start,
+                active_end=active_end,
+            )
 
             if rollup.batcher_addresses:
                 for address in rollup.batcher_addresses:
@@ -4462,6 +5859,7 @@ def main(argv: list[str]) -> int:
                             retries=args.retries,
                             timeout_seconds=args.timeout_seconds,
                             request_log=request_log,
+                            subtype="batchSubmissions",
                         )
                         for row in rows:
                             existing = calldata_candidate_txs.get(row.hash)
@@ -4471,28 +5869,25 @@ def main(argv: list[str]) -> int:
                                     f"for {existing.rollup_id} and {rollup.rollup_id}"
                                 )
                             calldata_candidate_txs[row.hash] = row
-            else:
-                tracked_calls = relevant_calldata_tracked_calls(
-                    rollup=rollup,
-                    tracked_transactions=tracked_transactions_by_rollup.get(rollup.rollup_id, {}),
-                    active_start=active_start,
-                    active_end=active_end,
+            if not rollup.batcher_addresses and not tracked_calls:
+                raise SystemExit(
+                    "required registry attribution inputs are missing for calldata-attributed rollups: "
+                    f"{rollup.rollup_id}[active={active_start.isoformat()}..{active_end.isoformat()}]"
                 )
-                if not tracked_calls:
-                    raise SystemExit(
-                        "required registry attribution inputs are missing for calldata-attributed rollups: "
-                        f"{rollup.rollup_id}[active={active_start.isoformat()}..{active_end.isoformat()}]"
-                    )
-                selectors_by_address: dict[str, set[str]] = {}
+            if tracked_calls:
                 for tracked_call in tracked_calls:
-                    selectors_by_address.setdefault(tracked_call.address, set()).add(tracked_call.selector)
-                for contract_address, selectors in sorted(selectors_by_address.items()):
-                    selector_scope = "__".join(sorted(selectors))
-                    for window_start, window_end_exclusive in month_windows(active_start, active_end):
+                    tracked_start = max(active_start, timestamp_to_utc_date(tracked_call.since_timestamp))
+                    tracked_end = active_end
+                    if tracked_call.until_timestamp is not None:
+                        tracked_end = min(tracked_end, timestamp_to_utc_date(tracked_call.until_timestamp))
+                    if tracked_end < tracked_start:
+                        continue
+                    selector_scope = tracked_call.selector
+                    for window_start, window_end_exclusive in month_windows(tracked_start, tracked_end):
                         rows = fetch_blockscout_tx_window(
                             snapshot_dir=snapshot_dir,
                             rollup_id=rollup.rollup_id,
-                            address=contract_address,
+                            address=tracked_call.address,
                             start_day=window_start,
                             end_day_exclusive=window_end_exclusive,
                             page_size=args.blockscout_page_size,
@@ -4500,9 +5895,10 @@ def main(argv: list[str]) -> int:
                             timeout_seconds=args.timeout_seconds,
                             request_log=request_log,
                             address_role="to",
-                            method_selectors=tuple(sorted(selectors)),
+                            method_selectors=(tracked_call.selector,),
                             path_prefix="txlist_to",
                             scope_id=selector_scope,
+                            subtype=tracked_call.subtype,
                         )
                         for row in rows:
                             existing = calldata_candidate_txs.get(row.hash)
@@ -4538,6 +5934,7 @@ def main(argv: list[str]) -> int:
                             timeout_seconds=args.timeout_seconds,
                             request_log=request_log,
                             rollup_filter=rollup.rollup_id,
+                            subtype="batchSubmissions",
                         )
                         for row in rows:
                             existing = post_dencun_blob_txs.get(row.hash)
@@ -4563,6 +5960,7 @@ def main(argv: list[str]) -> int:
                             # When every sender-scoped query is empty, the caller retries the
                             # whole window once via rollup filter after the loop.
                             allow_rollup_discovery_fallback=False,
+                            subtype="batchSubmissions",
                         )
                         window_blob_rows.extend(rows)
                         for row in rows:
@@ -4574,47 +5972,33 @@ def main(argv: list[str]) -> int:
                                 )
                             post_dencun_blob_txs[row.hash] = row
                     if not window_blob_rows:
-                        try:
-                            rollup_total_transactions, _, _ = fetch_blobscan_total_transactions(
-                                rollup_id=rollup.rollup_id,
-                                from_address=None,
-                                rollup_filter=rollup.rollup_id,
-                                window_start_dt=datetime_utc_start(window_start),
-                                window_end_exclusive_dt=datetime_utc_start(window_end_exclusive),
-                                retries=max(1, min(args.retries, 2)),
-                                timeout_seconds=min(args.timeout_seconds, 15.0),
-                            )
-                        except SystemExit:
-                            rollup_total_transactions = 0
-                        if rollup_total_transactions > 0:
-                            logging.warning(
-                                "Blobscan address-scoped coverage is empty for %s within %s..%s, but rollups=%s "
-                                "reports %s rows; retrying the same window via rollup filter to discover live senders",
-                                rollup.rollup_id,
-                                window_start.isoformat(),
-                                window_end_exclusive.isoformat(),
-                                blobscan_rollup_filter_value(rollup.rollup_id),
-                                rollup_total_transactions,
-                            )
-                            rows = fetch_blobscan_window(
-                                snapshot_dir=snapshot_dir,
-                                rollup_id=rollup.rollup_id,
-                                start_day=window_start,
-                                end_day_exclusive=window_end_exclusive,
-                                page_size=args.blobscan_page_size,
-                                retries=args.retries,
-                                timeout_seconds=args.timeout_seconds,
-                                request_log=request_log,
-                                rollup_filter=rollup.rollup_id,
-                            )
-                            for row in rows:
-                                existing = post_dencun_blob_txs.get(row.hash)
-                                if existing is not None and existing.rollup_id != row.rollup_id:
-                                    raise SystemExit(
-                                        f"on-chain attribution is ambiguous: duplicate Blobscan tx hash {row.hash} "
-                                        f"for {existing.rollup_id} and {row.rollup_id}"
-                                    )
-                                post_dencun_blob_txs[row.hash] = row
+                        logging.warning(
+                            "Blobscan address-scoped coverage is empty for %s within %s..%s; retrying the same "
+                            "window via rollup filter instead of gating on unstable count-derived totals",
+                            rollup.rollup_id,
+                            window_start.isoformat(),
+                            window_end_exclusive.isoformat(),
+                        )
+                        rows = fetch_blobscan_window(
+                            snapshot_dir=snapshot_dir,
+                            rollup_id=rollup.rollup_id,
+                            start_day=window_start,
+                            end_day_exclusive=window_end_exclusive,
+                            page_size=args.blobscan_page_size,
+                            retries=args.retries,
+                            timeout_seconds=args.timeout_seconds,
+                            request_log=request_log,
+                            rollup_filter=rollup.rollup_id,
+                            subtype="batchSubmissions",
+                        )
+                        for row in rows:
+                            existing = post_dencun_blob_txs.get(row.hash)
+                            if existing is not None and existing.rollup_id != row.rollup_id:
+                                raise SystemExit(
+                                    f"on-chain attribution is ambiguous: duplicate Blobscan tx hash {row.hash} "
+                                    f"for {existing.rollup_id} and {row.rollup_id}"
+                                )
+                            post_dencun_blob_txs[row.hash] = row
                 elif rollup.rollup_id in ROLLUPS_WITHOUT_BATCHER_ADDRESSES:
                     rows = fetch_blobscan_window(
                         snapshot_dir=snapshot_dir,
@@ -4626,6 +6010,7 @@ def main(argv: list[str]) -> int:
                         timeout_seconds=args.timeout_seconds,
                         request_log=request_log,
                         rollup_filter=rollup.rollup_id,
+                        subtype="batchSubmissions",
                     )
                     for row in rows:
                         existing = post_dencun_blob_txs.get(row.hash)
@@ -4687,6 +6072,7 @@ def main(argv: list[str]) -> int:
                         retries=args.retries,
                         timeout_seconds=args.timeout_seconds,
                         request_log=request_log,
+                        subtype="batchSubmissions",
                     )
                     for row in rows:
                         existing = calldata_candidate_txs.get(row.hash)
@@ -4709,6 +6095,7 @@ def main(argv: list[str]) -> int:
                     f"on-chain attribution is ambiguous: tx hash {tx_hash} maps to calldata candidate "
                     f"{tx.rollup_id} and Blobscan rollup {blob_tx.rollup_id}"
                 )
+            post_dencun_blob_txs[tx_hash] = replace(blob_tx, subtype=tx.subtype)
             excluded_blob_overlap_txs += 1
 
         calldata_candidate_txs_count = len(calldata_candidate_txs)
@@ -4739,15 +6126,20 @@ def main(argv: list[str]) -> int:
     # cutover guesses.
     if checkpoint_path is not None:
         receipt_lookup_db = receipt_lookup_db_path(snapshot_dir=snapshot_dir)
-        missing_receipt_hashes = missing_blob_receipt_hashes_from_checkpoint(
+        total_receipt_hashes = count_receipt_hashes_from_checkpoint(
+            checkpoint_path=checkpoint_path,
+            include_calldata=True,
+        )
+        missing_receipt_hashes = missing_receipt_hashes_from_checkpoint(
             checkpoint_path=checkpoint_path,
             lookup_db=receipt_lookup_db,
+            include_calldata=True,
         )
         if missing_receipt_hashes:
             logging.warning(
-                "Checkpoint resume is missing %s/%s blob receipts; backfilling only the missing hashes",
+                "Checkpoint resume is missing %s/%s tx receipts; backfilling only the missing hashes",
                 len(missing_receipt_hashes),
-                blob_txs_count,
+                total_receipt_hashes,
             )
             fetch_receipts(
                 snapshot_dir=snapshot_dir,
@@ -4757,25 +6149,26 @@ def main(argv: list[str]) -> int:
                 batch_size=args.rpc_batch_size,
                 request_log=request_log,
             )
-            remaining_missing_receipt_hashes = missing_blob_receipt_hashes_from_checkpoint(
+            remaining_missing_receipt_hashes = missing_receipt_hashes_from_checkpoint(
                 checkpoint_path=checkpoint_path,
                 lookup_db=receipt_lookup_db,
+                include_calldata=True,
             )
             if remaining_missing_receipt_hashes:
                 raise SystemExit(
-                    f"missing receipt enrichment for {len(remaining_missing_receipt_hashes)} Blobscan tx hashes "
+                    f"missing receipt enrichment for {len(remaining_missing_receipt_hashes)} checkpoint tx hashes "
                     "after checkpoint resume backfill"
                 )
         else:
             logging.info(
-                "Reusing receipt enrichment for %s checkpoint blob tx hashes from %s",
-                blob_txs_count,
+                "Reusing receipt enrichment for %s checkpoint tx hashes from %s",
+                total_receipt_hashes,
                 receipt_lookup_db.relative_to(repo_root()),
             )
             request_log.append(
                 {
                     "source": "eth_getTransactionReceipt",
-                    "count": blob_txs_count,
+                    "count": total_receipt_hashes,
                     "relative_path": str(receipt_lookup_db.relative_to(repo_root())),
                     "fetched_at_utc": None,
                     "reused_existing": True,
@@ -4832,14 +6225,24 @@ def main(argv: list[str]) -> int:
             block_base_fee_lookup_db=block_base_fee_lookup_db,
         )
     else:
+        tx_receipt_hashes = [
+            tx_hash for tx_hash, tx in calldata_txs.items() if requires_calldata_receipt_metering(tx)
+        ] + list(post_dencun_blob_txs.keys())
         receipt_fields = fetch_receipts(
             snapshot_dir=snapshot_dir,
-            tx_hashes=post_dencun_blob_txs.keys(),
+            tx_hashes=tx_receipt_hashes,
             retries=args.retries,
             timeout_seconds=args.timeout_seconds,
             batch_size=args.rpc_batch_size,
             request_log=request_log,
         )
+
+        for tx_hash, tx in calldata_txs.items():
+            receipt = receipt_fields.get(tx_hash)
+            if receipt is None:
+                continue
+            if receipt.block_number != tx.block_number:
+                raise SystemExit(f"receipt block mismatch for tx {tx_hash}")
 
         for tx_hash, blob_tx in post_dencun_blob_txs.items():
             receipt = receipt_fields.get(tx_hash)
@@ -4861,15 +6264,10 @@ def main(argv: list[str]) -> int:
         ecosystem_daily = {}
         dropped_funding_like_txs = 0
 
-        def ensure_rollup_bucket(day: str, rollup_id: str) -> dict[str, Decimal | int]:
-            return rollup_daily.setdefault(
-                (day, rollup_id),
-                {
-                    "rent_paid_wei": 0,
-                },
-            )
+        def ensure_rollup_bucket(day: str, rollup_id: str) -> dict[str, int]:
+            return rollup_daily.setdefault((day, rollup_id), new_rollup_component_bucket())
 
-        def ensure_ecosystem_bucket(day: str) -> dict[str, Decimal | int]:
+        def ensure_ecosystem_bucket(day: str) -> dict[str, int]:
             return ecosystem_daily.setdefault(
                 day,
                 {
@@ -4882,25 +6280,41 @@ def main(argv: list[str]) -> int:
             )
 
         for tx in calldata_txs.values():
-            if tx.value_wei > 0 and tx.gas_used == 21000:
+            receipt = receipt_fields.get(tx.hash)
+            gas_used = receipt.gas_used if receipt is not None else tx.gas_used
+            if tx.value_wei > 0 and gas_used == 21000:
                 dropped_funding_like_txs += 1
                 continue
             base_fee_wei = block_base_fees.get(tx.block_number)
             if base_fee_wei is None:
                 raise SystemExit(f"missing base fee enrichment for block {tx.block_number}")
-            effective_gas_price_wei = tx.gas_price_wei
-            priority_fee_wei = tx.gas_used * max(effective_gas_price_wei - base_fee_wei, 0)
-            base_burn_wei = tx.gas_used * base_fee_wei
-            total_rent_wei = base_burn_wei + priority_fee_wei
+            effective_gas_price_wei = receipt.effective_gas_price_wei if receipt is not None else tx.gas_price_wei
+            blob_gas_used = receipt.blob_gas_used if receipt is not None else 0
+            blob_gas_price_wei = receipt.blob_gas_price_wei if receipt is not None else 0
+            priority_fee_wei = gas_used * max(effective_gas_price_wei - base_fee_wei, 0)
+            base_burn_wei = gas_used * base_fee_wei
+            blob_fee_wei = blob_gas_used * blob_gas_price_wei if blob_gas_used > 0 else 0
             day = tx.timestamp_utc.date().isoformat()
 
+            if not is_canonical_rollup_subtype_in_scope(rollup_id=tx.rollup_id, subtype=tx.subtype):
+                continue
+
             rollup_bucket = ensure_rollup_bucket(day, tx.rollup_id)
-            rollup_bucket["rent_paid_wei"] = coerce_int(str(rollup_bucket["rent_paid_wei"])) + total_rent_wei
+            add_rollup_fee_components(
+                rollup_bucket,
+                subtype=tx.subtype,
+                base_burn_wei=base_burn_wei,
+                priority_fee_wei=priority_fee_wei,
+                blob_fee_wei=blob_fee_wei,
+            )
 
             ecosystem_bucket = ensure_ecosystem_bucket(day)
-            ecosystem_bucket["base_fee_burn_wei"] = coerce_int(str(ecosystem_bucket["base_fee_burn_wei"])) + base_burn_wei
-            ecosystem_bucket["priority_fee_wei"] = coerce_int(str(ecosystem_bucket["priority_fee_wei"])) + priority_fee_wei
-            ecosystem_bucket["calldata_gas_proxy"] = coerce_int(str(ecosystem_bucket["calldata_gas_proxy"])) + tx.gas_used
+            ecosystem_bucket["base_fee_burn_wei"] += base_burn_wei
+            ecosystem_bucket["priority_fee_wei"] += priority_fee_wei
+            ecosystem_bucket["calldata_gas_proxy"] += gas_used
+            if blob_gas_used > 0:
+                ecosystem_bucket["blob_fee_burn_wei"] += blob_fee_wei
+                ecosystem_bucket["blob_gas_used"] += blob_gas_used
 
         for tx_hash, blob_tx in post_dencun_blob_txs.items():
             receipt = receipt_fields[tx_hash]
@@ -4909,30 +6323,60 @@ def main(argv: list[str]) -> int:
                 raise SystemExit(f"missing base fee enrichment for block {blob_tx.block_number}")
             priority_fee_wei = receipt.gas_used * max(receipt.effective_gas_price_wei - base_fee_wei, 0)
             base_burn_wei = receipt.gas_used * base_fee_wei
-            blob_fee_wei = receipt.blob_gas_used * receipt.blob_gas_price_wei
-            total_rent_wei = base_burn_wei + priority_fee_wei + blob_fee_wei
+            # Blobscan is the raw source of truth for blob fee fields; legacy receipt caches can
+            # legitimately retain zeroed blob fields even when the Blobscan transaction is correct.
+            blob_fee_wei = blob_tx.blob_gas_used * blob_tx.blob_gas_price_wei
             day = blob_tx.timestamp_utc.date().isoformat()
 
+            if not is_canonical_rollup_subtype_in_scope(rollup_id=blob_tx.rollup_id, subtype=blob_tx.subtype):
+                continue
+
             rollup_bucket = ensure_rollup_bucket(day, blob_tx.rollup_id)
-            rollup_bucket["rent_paid_wei"] = coerce_int(str(rollup_bucket["rent_paid_wei"])) + total_rent_wei
+            add_rollup_fee_components(
+                rollup_bucket,
+                subtype=blob_tx.subtype,
+                base_burn_wei=base_burn_wei,
+                priority_fee_wei=priority_fee_wei,
+                blob_fee_wei=blob_fee_wei,
+            )
 
             ecosystem_bucket = ensure_ecosystem_bucket(day)
-            ecosystem_bucket["base_fee_burn_wei"] = coerce_int(str(ecosystem_bucket["base_fee_burn_wei"])) + base_burn_wei
-            ecosystem_bucket["blob_fee_burn_wei"] = coerce_int(str(ecosystem_bucket["blob_fee_burn_wei"])) + blob_fee_wei
-            ecosystem_bucket["priority_fee_wei"] = coerce_int(str(ecosystem_bucket["priority_fee_wei"])) + priority_fee_wei
-            ecosystem_bucket["blob_gas_used"] = coerce_int(str(ecosystem_bucket["blob_gas_used"])) + receipt.blob_gas_used
-            ecosystem_bucket["calldata_gas_proxy"] = (
-                coerce_int(str(ecosystem_bucket["calldata_gas_proxy"])) + blob_tx.blob_as_calldata_gas_used
+            ecosystem_bucket["base_fee_burn_wei"] += base_burn_wei
+            ecosystem_bucket["blob_fee_burn_wei"] += blob_fee_wei
+            ecosystem_bucket["priority_fee_wei"] += priority_fee_wei
+            ecosystem_bucket["blob_gas_used"] += blob_tx.blob_gas_used
+            ecosystem_bucket["calldata_gas_proxy"] += blob_tx.blob_as_calldata_gas_used
+
+    for (day, rollup_id), bucket in sorted(rollup_daily.items()):
+        tx_family_total = (
+            bucket["batch_submissions_wei"] + bucket["proof_submissions_wei"] + bucket["state_updates_wei"]
+        )
+        fee_family_total = (
+            bucket["execution_base_fee_burn_wei"]
+            + bucket["execution_priority_fee_wei"]
+            + bucket["blob_fee_burn_wei"]
+        )
+        if tx_family_total != bucket["rent_paid_wei"]:
+            raise SystemExit(
+                f"rollup rent component tx-family identity failed for {(day, rollup_id)}: "
+                f"{tx_family_total} != {bucket['rent_paid_wei']}"
+            )
+        if fee_family_total != bucket["rent_paid_wei"]:
+            raise SystemExit(
+                f"rollup rent component fee-family identity failed for {(day, rollup_id)}: "
+                f"{fee_family_total} != {bucket['rent_paid_wei']}"
             )
 
     panel_rows: list[dict[str, str]] = []
+    vendor_keys: set[tuple[str, str]] = set()
     vendor_rows.sort(key=lambda row: (row["date_utc"], row["rollup_id"]))
     for row in vendor_rows:
         key = (row["date_utc"], row["rollup_id"])
+        vendor_keys.add(key)
         onchain = rollup_daily.get(key)
         if onchain is None:
-            continue
-        rent_paid_eth = to_decimal_eth(coerce_int(str(onchain["rent_paid_wei"])))
+            onchain = new_rollup_component_bucket()
+        rent_paid_eth = to_decimal_eth(onchain["rent_paid_wei"])
         panel_rows.append(
             {
                 "date_utc": row["date_utc"],
@@ -4942,6 +6386,31 @@ def main(argv: list[str]) -> int:
                 # Profit is vendor-derived and no longer coherent after replacing vendor rent.
                 "profit_eth": "",
                 "txcount": row.get("txcount", ""),
+            }
+        )
+    component_rows: list[dict[str, str]] = []
+    # The authoritative component surface must cover every canonical on-chain rent key while also
+    # preserving zero-rent panel rows that exist because the paired vendor fee denominator is present.
+    for day, rollup_id in sorted(set(rollup_daily) | vendor_keys):
+        onchain = rollup_daily.get((day, rollup_id))
+        if onchain is None:
+            onchain = new_rollup_component_bucket()
+        rent_paid_eth = to_decimal_eth(onchain["rent_paid_wei"])
+        component_rows.append(
+            {
+                "date_utc": day,
+                "rollup_id": rollup_id,
+                "batch_submissions_eth": format_decimal(to_decimal_eth(onchain["batch_submissions_wei"])),
+                "proof_submissions_eth": format_decimal(to_decimal_eth(onchain["proof_submissions_wei"])),
+                "state_updates_eth": format_decimal(to_decimal_eth(onchain["state_updates_wei"])),
+                "execution_base_fee_burn_eth": format_decimal(
+                    to_decimal_eth(onchain["execution_base_fee_burn_wei"])
+                ),
+                "execution_priority_fee_eth": format_decimal(
+                    to_decimal_eth(onchain["execution_priority_fee_wei"])
+                ),
+                "blob_fee_burn_eth": format_decimal(to_decimal_eth(onchain["blob_fee_burn_wei"])),
+                "rent_paid_eth": format_decimal(rent_paid_eth),
             }
         )
 
@@ -4970,10 +6439,13 @@ def main(argv: list[str]) -> int:
         decomp_rows.append(row)
 
     panel_sample_rows = sample_rows_or_die(panel_rows)
+    component_sample_rows = sample_component_rows_or_die(component_rows)
     decomp_sample_rows = sample_decomp_rows_or_die(decomp_rows)
 
     write_csv(panel_path, panel_rows, headers=PANEL_HEADERS)
     write_csv(panel_sample_path, panel_sample_rows, headers=PANEL_HEADERS)
+    write_csv(component_path, component_rows, headers=COMPONENT_HEADERS)
+    write_csv(component_sample_path, component_sample_rows, headers=COMPONENT_HEADERS)
     write_csv(decomp_path, decomp_rows, headers=DECOMP_HEADERS)
     write_csv(decomp_sample_path, decomp_sample_rows, headers=DECOMP_HEADERS)
 
@@ -5015,6 +6487,20 @@ def main(argv: list[str]) -> int:
     )
     write_json(decomp_manifest_path, decomp_manifest)
 
+    component_manifest = build_processed_manifest(
+        root=root,
+        run_date=run_date,
+        inputs=[
+            str(growthepie_raw_manifest_path.relative_to(root)),
+            str(raw_manifest_path.relative_to(root)),
+            "data/processed/growthepie/vendor_daily_rollup_panel.csv",
+        ],
+        script_path="src/etl/build_l1_rent_panel.py",
+        command=command_string(args),
+        output_paths=[component_path, component_sample_path],
+    )
+    write_json(component_manifest_path, component_manifest)
+
     panel_manifest = build_processed_manifest(
         root=root,
         run_date=run_date,
@@ -5032,10 +6518,17 @@ def main(argv: list[str]) -> int:
     print(f"Wrote raw snapshot to {snapshot_dir.relative_to(root)}")
     print(f"Wrote raw manifest to {raw_manifest_path.relative_to(root)}")
     print(f"Wrote decomposition CSV with {len(decomp_rows)} rows to {decomp_path.relative_to(root)}")
+    print(f"Wrote rollup rent component CSV with {len(component_rows)} rows to {component_path.relative_to(root)}")
     print(f"Wrote canonical panel CSV with {len(panel_rows)} rows to {panel_path.relative_to(root)}")
     print(f"Wrote decomposition sample to {decomp_sample_path.relative_to(root)}")
+    print(f"Wrote rollup rent component sample to {component_sample_path.relative_to(root)}")
     print(f"Wrote panel sample to {panel_sample_path.relative_to(root)}")
-    print(f"Wrote processed manifests to {decomp_manifest_path.relative_to(root)} and {panel_manifest_path.relative_to(root)}")
+    print(
+        "Wrote processed manifests to "
+        f"{decomp_manifest_path.relative_to(root)}, "
+        f"{component_manifest_path.relative_to(root)}, and "
+        f"{panel_manifest_path.relative_to(root)}"
+    )
     return 0
 
 
