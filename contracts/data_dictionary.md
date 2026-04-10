@@ -12,7 +12,8 @@ This file is the canonical reference for tables/fields/units/keys used in the pr
 - Row inclusion rule: rows exist **iff** both `l2_fees_eth` and `rent_paid_eth` are present (missingness is represented by omitting the row, not by nulls).
 - Source(s):
   - Primary denominator (`l2_fees_eth`): growthepie (ETH-native series)
-  - Vendor series (`rent_paid_eth`, `profit_eth`): growthepie (secondary; on-chain may supersede)
+  - Authoritative numerator (`rent_paid_eth`): on-chain computed canonical series
+  - Related vendor benchmark surfaces (`rent_paid_eth`, `profit_eth`): growthepie vendor panel and validation reports only; secondary cross-checks rather than the source of canonical `rent_paid_eth`
 
 #### Fields
 
@@ -21,9 +22,31 @@ This file is the canonical reference for tables/fields/units/keys used in the pr
 | `date_utc` | date | YYYY-MM-DD (UTC) | no | UTC date for daily aggregation |
 | `rollup_id` | string | slug | no | Stable rollup identifier (see `registry/rollup_registry_v1.csv`) |
 | `l2_fees_eth` | number | ETH | no | Total user fees paid on the rollup for `date_utc` (ETH-native) |
-| `rent_paid_eth` | number | ETH | no | Total fees paid by the rollup to Ethereum L1 for settlement/DA/proofs for `date_utc` (ETH-native) |
-| `profit_eth` | number | ETH | yes | Vendor-provided profit series; used only for sanity checks (`profit ≈ fees − rent`) |
+| `rent_paid_eth` | number | ETH | no | Authoritative on-chain attributable Ethereum L1 fee accounting for settlement/DA/proofs for `date_utc` (ETH-native) |
+| `profit_eth` | number | ETH | yes | Optional vendor-derived benchmark field; used only for sanity checks when contract-compatible and not part of the canonical STR numerator |
 | `txcount` | integer | count | yes | Transaction count (if provided) |
+
+### daily_rollup_rent_components
+
+- Purpose: Rollup-day audit surface that decomposes canonical `rent_paid_eth` into component families for validation, reconciliation, and benchmark attribution.
+- Primary key: (`date_utc`, `rollup_id`)
+- Grain: daily × rollup (UTC)
+- Source(s): on-chain computed canonical series (authoritative)
+- Identity rule: component columns must sum exactly to `rent_paid_eth`.
+
+#### Fields
+
+| Field | Type | Units | Nullable | Description |
+|---|---|---|---|---|
+| `date_utc` | date | YYYY-MM-DD (UTC) | no | UTC date for daily aggregation |
+| `rollup_id` | string | slug | no | Stable rollup identifier (see `registry/rollup_registry_v1.csv`) |
+| `batch_submissions_eth` | number | ETH | no | Canonical execution/blob fees attributed to batch-submission transactions for the rollup-day |
+| `proof_submissions_eth` | number | ETH | no | Canonical execution/blob fees attributed to proof or custom settlement submissions for the rollup-day |
+| `state_updates_eth` | number | ETH | no | Canonical execution/blob fees attributed to state-update transactions for the rollup-day |
+| `blob_fee_burn_eth` | number | ETH | no | Canonical EIP-4844 blob fee burn attributed to the rollup-day |
+| `execution_base_fee_burn_eth` | number | ETH | no | Canonical EIP-1559 execution-layer base fee burn attributed to the rollup-day |
+| `execution_priority_fee_eth` | number | ETH | no | Canonical execution-layer priority fees attributed to the rollup-day |
+| `rent_paid_eth` | number | ETH | no | Canonical rollup-day total; must equal the sum of the component columns above |
 
 ### daily_l1_rent_decomposition
 

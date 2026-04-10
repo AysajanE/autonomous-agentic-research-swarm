@@ -35,3 +35,23 @@ Policy:
     - Removes domain-specific assumptions from framework gates and prevents “hybrid = two parallel projects” by enforcing a defined boundary.
   - Expected impact:
     - `scripts/quality_gates.py` and `scripts/swarm.py` can be reused across empirical/modeling/hybrid projects with only config/contract changes.
+
+- 2026-04-10 — Lock canonical rent vs vendor benchmark policy (owner: @human)
+  - Decision:
+    - Canonical `daily_rollup_panel.rent_paid_eth` remains the release-truth numerator for STR and is defined by authoritative on-chain attributable Ethereum L1 fee accounting.
+    - growthepie `rent_paid` remains a secondary vendor benchmark used for reconciliation and triangulation, not a source that can silently redefine canonical `RentPaid`.
+    - A canonical-vs-vendor key-universe mismatch is a release blocker unless a W0-reviewed exception is recorded.
+    - Matched-key benchmark divergence above tolerance is release-blocking only when it remains unexplained after component-level audit of the canonical on-chain surface.
+    - The project now requires a rollup-day rent component audit surface so validation can distinguish integrity failures from benchmark-definition differences.
+  - Rationale:
+    - Post-repair `T050` evidence for `2026-04-09` eliminated the old key-universe mismatch (`mismatched_key_count = 0`) but still showed a matched-key aggregate gap concentrated in a few rollups, especially `starknet` and `taiko`.
+    - Vendor implementation evidence shows growthepie `rent_paid_eth` is assembled from a curated economics mapping and cost components that are not identical to literal canonical on-chain fee accounting for every chain.
+  - Expected impact:
+    - Validation must separate schema/coverage failures from benchmark divergences.
+    - Canonical ETL work gains an explicit component-audit surface instead of relying on replay logs for root-cause diagnosis.
+    - Release gating no longer depends on forcing vendor parity when the benchmark difference is evidence-backed and methodologically explained.
+  - Links/refs:
+    - `docs/protocol.md`
+    - `contracts/data_dictionary.md`
+    - `contracts/project.yaml`
+    - `.orchestrator/handoff/H048_t050_contract_resolution_blocker.md`
