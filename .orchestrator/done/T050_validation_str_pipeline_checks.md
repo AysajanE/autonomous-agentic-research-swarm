@@ -142,3 +142,7 @@ Post-`2026-04-09` evidence shows that the old vendor-only/day-universe mismatch 
   - outcomes: validator exit `0`; `make gate` passed; all three validation reports now have top-level status `pass`
   - preserved caveat: `cross_source_reconciliation` still records `unexplained_monthly_aggregate_violation_count = 1` for `2025-05` with `abs_delta_eth = 18.358717091619667`, `pct_difference = 0.12369423293164906`, and `rent_paid_eth_authoritative = 148.42015392717883`; this is retained as diagnostic evidence on a small-base month rather than treated as a contract-breaking fail
 - 2026-04-10: Judge approved; review log: reports/status/reviews/T050_20260410T211201Z.json
+- 2026-04-10: Post-repair clean-pass replay on branch `T050_component_surface_validation_repair` after cherry-picking the dedicated `T040` fixture refresh (`tests/test_metrics_str.py`) from `T040_refresh_str_sample_expectations`.
+  - reproduction commands: `make test`; `make gate`; `python src/validation/validate_str_pipeline.py --sample`; `python src/validation/validate_str_pipeline.py --as-of 2026-04-09`
+  - outcomes: all commands exited `0`; `make test` ran `35` tests with `OK`; the sample validator passed; the canonical validator passed; all three validation reports remained `pass`
+  - scope note: this replay did not change protocol, contracts, ETL logic, or validator policy; it closed the remaining stale STR sample-expectation drift so the live `wt-T050` surface is fully green end to end
