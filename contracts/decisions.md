@@ -43,9 +43,11 @@ Policy:
     - A canonical-vs-vendor key-universe mismatch is a release blocker unless a W0-reviewed exception is recorded.
     - Matched-key benchmark divergence above tolerance is release-blocking only when it remains unexplained after component-level audit of the canonical on-chain surface.
     - The project now requires a rollup-day rent component audit surface so validation can distinguish integrity failures from benchmark-definition differences.
+    - The `daily_rollup_rent_components` audit surface carries two parallel decompositions of the same canonical total: tx-family components and fee-class components. Each decomposition must reconcile independently to `rent_paid_eth`; they are not meant to be summed together.
   - Rationale:
     - Post-repair `T050` evidence for `2026-04-09` eliminated the old key-universe mismatch (`mismatched_key_count = 0`) but still showed a matched-key aggregate gap concentrated in a few rollups, especially `starknet` and `taiko`.
     - Vendor implementation evidence shows growthepie `rent_paid_eth` is assembled from a curated economics mapping and cost components that are not identical to literal canonical on-chain fee accounting for every chain.
+    - The first `T049` implementation pass exposed that a single additive identity over both component families would double-count canonical rent and make the audit surface internally inconsistent.
   - Expected impact:
     - Validation must separate schema/coverage failures from benchmark divergences.
     - Canonical ETL work gains an explicit component-audit surface instead of relying on replay logs for root-cause diagnosis.
