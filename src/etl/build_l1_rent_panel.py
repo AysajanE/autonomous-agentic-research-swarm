@@ -126,6 +126,11 @@ ROLLUP_SUBTYPE_TO_COMPONENT_FIELD = {
     "proofSubmissions": "proof_submissions_wei",
     "stateUpdates": "state_updates_wei",
 }
+CANONICAL_EXCLUDED_SUBTYPES_BY_ROLLUP = {
+    # T051 locks Starknet canonical rent to the direct-exclusive state-update surface
+    # until a reviewed shared-SHARP allocation model exists.
+    "starknet": frozenset({"batchSubmissions", "proofSubmissions"}),
+}
 
 
 @dataclass(frozen=True)
@@ -5372,6 +5377,9 @@ def aggregate_daily_from_checkpoint_streaming(
             rollup_id = str(row["rollup_id"])
             subtype = str(row["subtype"])
 
+            if not is_canonical_rollup_subtype_in_scope(rollup_id=rollup_id, subtype=subtype):
+                continue
+
             rollup_bucket = ensure_rollup_bucket(day, rollup_id)
             add_rollup_fee_components(
                 rollup_bucket,
@@ -5416,6 +5424,9 @@ def aggregate_daily_from_checkpoint_streaming(
             day = str(row["day"])
             rollup_id = str(row["rollup_id"])
             subtype = str(row["subtype"])
+
+            if not is_canonical_rollup_subtype_in_scope(rollup_id=rollup_id, subtype=subtype):
+                continue
 
             rollup_bucket = ensure_rollup_bucket(day, rollup_id)
             add_rollup_fee_components(
@@ -5679,6 +5690,11 @@ def add_rollup_fee_components(
     bucket["execution_base_fee_burn_wei"] += base_burn_wei
     bucket["execution_priority_fee_wei"] += priority_fee_wei
     bucket["blob_fee_burn_wei"] += blob_fee_wei
+
+
+def is_canonical_rollup_subtype_in_scope(*, rollup_id: str, subtype: str) -> bool:
+    excluded_subtypes = CANONICAL_EXCLUDED_SUBTYPES_BY_ROLLUP.get(rollup_id)
+    return excluded_subtypes is None or subtype not in excluded_subtypes
 
 
 def main(argv: list[str]) -> int:
@@ -6271,6 +6287,9 @@ def main(argv: list[str]) -> int:
             blob_fee_wei = blob_gas_used * blob_gas_price_wei if blob_gas_used > 0 else 0
             day = tx.timestamp_utc.date().isoformat()
 
+            if not is_canonical_rollup_subtype_in_scope(rollup_id=tx.rollup_id, subtype=tx.subtype):
+                continue
+
             rollup_bucket = ensure_rollup_bucket(day, tx.rollup_id)
             add_rollup_fee_components(
                 rollup_bucket,
@@ -6299,6 +6318,9 @@ def main(argv: list[str]) -> int:
             # legitimately retain zeroed blob fields even when the Blobscan transaction is correct.
             blob_fee_wei = blob_tx.blob_gas_used * blob_tx.blob_gas_price_wei
             day = blob_tx.timestamp_utc.date().isoformat()
+
+            if not is_canonical_rollup_subtype_in_scope(rollup_id=blob_tx.rollup_id, subtype=blob_tx.subtype):
+                continue
 
             rollup_bucket = ensure_rollup_bucket(day, blob_tx.rollup_id)
             add_rollup_fee_components(

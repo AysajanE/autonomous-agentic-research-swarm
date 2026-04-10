@@ -5,19 +5,19 @@
   ],
   "outputs": [
     {
-      "bytes": 201738,
+      "bytes": 201602,
       "path": "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
-      "sha256": "c702601720581d9202e8fb35350b67c476eeb15ee778d94770dd4f707abf44c9"
+      "sha256": "69efbb310daff0dfbaddfc7a96d47030cfb08ec4f178f6618eda2d124448139f"
     },
     {
       "bytes": 551,
       "path": "data/samples/l1_rent/daily_l1_rent_decomposition_sample.csv",
-      "sha256": "9ba543fe257ad08c000714c35fceedd1c7e8eff14db443caf2d19daae7d24bbe"
+      "sha256": "7e740f384a3baf56bcf4d4a6be65797d6e4a55d304c87d55301455363379f7d5"
     }
   ],
   "transform": {
     "command": "python src/etl/build_l1_rent_panel.py --run-date 2026-04-09 --resume-manifested-run",
-    "git_sha": "57e37c5d07b2b04b253d05c48069094d81594d89",
+    "git_sha": "508f12a5058743e5750b1c3d8b0e7baf91fd44ff",
     "script_path": "src/etl/build_l1_rent_panel.py"
   }
 }

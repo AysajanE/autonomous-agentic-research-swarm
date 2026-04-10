@@ -6,7 +6,7 @@
     "python_implementation": "CPython",
     "python_version": "3.13.5"
   },
-  "fetched_at_utc": "2026-04-10T15:41:23.194668+00:00",
+  "fetched_at_utc": "2026-04-10T19:39:58.144960+00:00",
   "files": [
     {
       "bytes": 2649,
@@ -246124,9 +246124,9 @@
       "sha256": "2d66f51cd593c2abadb6e36d517bd5b36577667522c29fb4be13a97840dccb34"
     },
     {
-      "bytes": 10503440,
+      "bytes": 10503429,
       "path": "data/raw/l1_rent/2026-04-09/fetch_manifest.json",
-      "sha256": "8a58adf0659f262473236d14f2ccf82497058f5168939afb6660cf17dc814709"
+      "sha256": "55c385cf93b687a3439db7680cbc31be390b6858088436cf8d2d752db371de2a"
     },
     {
       "bytes": 4591,

@@ -102,11 +102,21 @@ This task repairs the ETL under the T051 contract so the canonical Starknet surf
 - `make gate`
 
 ## Status
-
-- State: backlog
+- State: done
 - Last updated: 2026-04-10
-
 ## Notes / Decisions
 
 - 2026-04-10: Created after the Starknet deep-dive established that the remaining `T050` blocker is a canonical over-attribution of shared SHARP settlement costs, not a missing Starknet contract window.
 - 2026-04-10: This task must not proceed before `T051` locks the Starknet shared-settlement contract explicitly.
+- 2026-04-10: Repaired `src/etl/build_l1_rent_panel.py` by adding an explicit canonical-attribution scope hook for rollup/subtype pairs and excluding Starknet `batchSubmissions` + `proofSubmissions` from canonical aggregation under the locked T051 contract. Starknet `stateUpdates` remains in scope, so canonical Starknet `rent_paid_eth` now equals the direct-exclusive `state_updates_eth` family.
+- 2026-04-10: Rebuilt the authoritative `2026-04-09` raw/processed surfaces with `python src/etl/build_l1_rent_panel.py --run-date 2026-04-09 --resume-manifested-run`. This worktree initially lacked `data/raw/l1_rent/2026-04-09`, so the raw snapshot was hydrated from sibling worktree `wt-T049` before replay. The replay then reused the copied post-partition checkpoint plus cached receipt/base-fee lookup DBs.
+- 2026-04-10: Output outcome after rebuild:
+  - Starknet aggregate canonical rent moved from `15848.109651251500773179 ETH` to `2221.294567790417570022 ETH`.
+  - Starknet aggregate `batch_submissions_eth` and `proof_submissions_eth` are now both `0`, while `state_updates_eth` remains `2221.294567790417570022 ETH`.
+  - The authoritative artifacts refreshed successfully at `data/processed/l1_rent/daily_rollup_rent_components.csv`, `data/processed/panels/daily_rollup_panel.csv`, `data/processed_manifest/daily_rollup_rent_components_2026-04-09.json`, `data/processed_manifest/daily_rollup_panel_2026-04-09.json`, `data/raw_manifest/l1_rent_2026-04-09.json`, and matching samples.
+- 2026-04-10: Validation commands run:
+  - `python src/etl/build_l1_rent_panel.py --run-date 2026-04-09 --resume-manifested-run`
+  - `make gate`
+  Outcome: the ETL replay passed, and `make gate` passed while this task was still `backlog`. After changing the task state to `ready_for_review`, a second `make gate` failed only on the expected `missing_run_manifest` review-bundle check for `T052`. Operator still needs to attach the durable run manifest before the next review-bundle gate under the new state.
+- 2026-04-10: Residual caveats captured in `.orchestrator/handoff/H055_t052_starknet_direct_exclusive_rebuild_2026-04-10.md`. Besides the intended Starknet change, replay-side raw cache normalization shifted one `scroll` row by `+0.002711875740893184 ETH` and one `linea` row by `+1.31072e-13 ETH`; neither change alters the locked Starknet contract, but they should remain visible in review.
+- 2026-04-10: Judge approved; review log: reports/status/reviews/T052_20260410T194240Z.json
