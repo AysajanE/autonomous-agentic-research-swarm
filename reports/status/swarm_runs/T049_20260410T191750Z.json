@@ -1,0 +1,93 @@
+{
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "run_id": "T049_20260410T191750Z",
+  "generated_at_utc": "2026-04-10T19:17:50Z",
+  "task": {
+    "task_id": "T049",
+    "task_path": ".orchestrator/ready_for_review/T049_emit_rollup_day_rent_components_for_auditability.md",
+    "title": "Emit rollup-day rent component surfaces for auditability",
+    "role": "Worker",
+    "workstream": "W2",
+    "task_kind": "data",
+    "dependencies": [
+      "T035",
+      "T048"
+    ],
+    "integration_ready_dependencies": [],
+    "state_before": "active",
+    "state_after": "ready_for_review"
+  },
+  "repo": {
+    "branch": "T049_emit_rollup_day_rent_components",
+    "git_sha": "c98c1d2773562fd02d9d62f0f6a83b9ff950974d",
+    "base_branch": "main",
+    "remote": "origin"
+  },
+  "executor": {
+    "role": "Worker",
+    "runner": "local_swarm",
+    "tool": "manual",
+    "model": "gpt-5.4",
+    "sandbox": "workspace-write",
+    "allow_network": true,
+    "repair_context": null,
+    "returncode": 0,
+    "error": "executor_recorded_by_operator_after_manual_worker_pass"
+  },
+  "commands": {
+    "executor": [
+      "codex",
+      "-a",
+      "never",
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "-C",
+      "/Users/aeziz-local/Research/wt-T049",
+      "manual worker completion pass for T049"
+    ],
+    "executor_log_path": null,
+    "gates": [
+      "make gate"
+    ]
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "returncode": 0,
+      "output_tail": "[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 6, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 10, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 22, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 13, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n"
+    }
+  ],
+  "ownership": {
+    "ok": true,
+    "changed_paths": [
+      ".orchestrator/ready_for_review/T049_emit_rollup_day_rent_components_for_auditability.md",
+      ".orchestrator/handoff/H049_taiko_historical_surface_fix_2026-04-10.md",
+      "data/processed/l1_rent/daily_rollup_rent_components.csv",
+      "data/processed/panels/daily_rollup_panel.csv",
+      "data/processed_manifest/daily_l1_rent_decomposition_2026-04-09.json",
+      "data/processed_manifest/daily_rollup_panel_2026-04-09.json",
+      "data/processed_manifest/daily_rollup_rent_components_2026-04-09.json",
+      "data/raw_manifest/l1_rent_2026-04-09.json",
+      "data/samples/l1_rent/daily_l1_rent_decomposition_sample.csv",
+      "data/samples/l1_rent/daily_rollup_rent_components_sample.csv",
+      "data/samples/panels/daily_rollup_panel_sample.csv",
+      "reports/status/swarm_runs/T049_20260410T191750Z.json",
+      "src/etl/build_l1_rent_panel.py"
+    ],
+    "violations": []
+  },
+  "artifacts": {
+    "outputs_ok": true,
+    "missing_outputs": [],
+    "required_manifests_ok": true,
+    "missing_manifests": [],
+    "run_manifest_path": "reports/status/swarm_runs/T049_20260410T191750Z.json"
+  },
+  "result": {
+    "status": "ok",
+    "blocked_reasons": []
+  }
+}
