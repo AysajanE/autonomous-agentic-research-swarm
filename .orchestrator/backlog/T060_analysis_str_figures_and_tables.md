@@ -94,10 +94,9 @@ This task turns validated empirical artifacts into the minimum release analysis 
 - `python src/analysis/build_str_release_outputs.py --as-of YYYY-MM-DD`
 
 ## Status
-
-- State: backlog
-- Last updated: 2026-03-29
-
+- State: active
+- Last updated: 2026-04-11
 ## Notes / Decisions
 
 - 2026-03-29: v1 rewrite expands T060 from one sample figure to the minimum release figure-and-table bundle.
+- 2026-04-11: Claimed by local swarm runtime on branch T060_analysis_str_figures_and_tables.
