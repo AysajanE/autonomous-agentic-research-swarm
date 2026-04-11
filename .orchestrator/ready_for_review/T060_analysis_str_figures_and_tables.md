@@ -94,7 +94,7 @@ This task turns validated empirical artifacts into the minimum release analysis 
 - `python src/analysis/build_str_release_outputs.py --as-of YYYY-MM-DD`
 
 ## Status
-- State: ready_for_review
+- State: done
 - Last updated: 2026-04-11
 ## Notes / Decisions
 
@@ -109,3 +109,4 @@ This task turns validated empirical artifacts into the minimum release analysis 
 - 2026-04-11: Built `src/analysis/build_str_release_outputs.py` and emitted the locked release outputs: `reports/figures/str_ecosystem_timeseries.svg`, `reports/figures/str_post_dencun_regimes.svg`, `reports/tables/str_regime_summary.csv`, and `reports/tables/str_regime_summary.md`.
 - 2026-04-11: Reproduction commands run in this worktree: `python src/analysis/build_str_release_outputs.py --sample`; `python src/analysis/build_str_release_outputs.py --as-of 2026-04-09`; `make gate`.
 - 2026-04-11: Outcome summary: the declared sample build passed, the `2026-04-09` release build passed, `make gate` passed, and the downstream writing caveat note was recorded in `.orchestrator/handoff/H060_release_output_caveats_2026-04-11.md`.
+- 2026-04-11: Judge approved; review log: reports/status/reviews/T060_20260411T141012Z.json
