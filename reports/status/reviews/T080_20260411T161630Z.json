@@ -1,0 +1,27 @@
+{
+  "checks": {
+    "failures": [],
+    "gates_ok": true,
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "review_bundle_ok": true
+  },
+  "decision": {
+    "note": "Operator corrected the final task-gate contract defect by replacing the literal YYYY-MM-DD placeholder with the concrete 2026-04-11 release check and reran the declared gates. Judge approved deterministic review.",
+    "outcome": "approve"
+  },
+  "generated_at_utc": "2026-04-11T16:16:30Z",
+  "review_id": "T080_20260411T161630Z",
+  "reviewer": {
+    "role": "Judge"
+  },
+  "schema_version": "research_swarm.judge_review_log.v1",
+  "task": {
+    "role": "Operator",
+    "run_manifest_path": "reports/status/swarm_runs/T080_20260411T161258Z.json",
+    "state_after": "done",
+    "state_before": "ready_for_review",
+    "task_id": "T080",
+    "task_path": ".orchestrator/ready_for_review/T080_release_candidate_assembly.md"
+  }
+}
