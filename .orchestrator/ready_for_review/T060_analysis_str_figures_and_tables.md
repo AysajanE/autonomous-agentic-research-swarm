@@ -94,7 +94,7 @@ This task turns validated empirical artifacts into the minimum release analysis 
 - `python src/analysis/build_str_release_outputs.py --as-of YYYY-MM-DD`
 
 ## Status
-- State: active
+- State: ready_for_review
 - Last updated: 2026-04-11
 ## Notes / Decisions
 
@@ -106,3 +106,6 @@ This task turns validated empirical artifacts into the minimum release analysis 
 - 2026-04-11: @human Runtime blocked: gates_failed, missing_outputs, task_marked_blocked. Run manifest: reports/status/swarm_runs/T060_20260411T113419Z.json. outputs=src/analysis/build_str_release_outputs.py=missing_file; reports/figures/str_ecosystem_timeseries.svg=missing_file; reports/figures/str_post_dencun_regimes.svg=missing_file; reports/tables/str_regime_summary.csv=missing_file; reports/tables/str_regime_summary.md=missing_file
 - 2026-04-11: Operator root-cause review supersedes the earlier blocker rationale. The true upstream blocker was repo materialization: `data/processed/l1_rent/daily_rollup_rent_components.csv` matched its tracked `2026-04-09` processed manifest locally but remained git-ignored and therefore disappeared in fresh worktrees. That file is now tracked on `main`, and `scripts/quality_gates.py` now hard-fails review bundles when declared `data/processed/` file outputs are git-ignored or untracked in a real git worktree.
 - 2026-04-11: Resume T060 using the repaired W2/W5 contract: `daily_rollup_panel.csv` is vendor-keyed by protocol when both `l2_fees_eth` and `rent_paid_eth` exist, `daily_rollup_rent_components.csv` may be a strict superset of panel keys, and the locked internal coherence check is component daily totals versus `daily_l1_rent_decomposition.csv`, not panel daily totals versus decomposition.
+- 2026-04-11: Built `src/analysis/build_str_release_outputs.py` and emitted the locked release outputs: `reports/figures/str_ecosystem_timeseries.svg`, `reports/figures/str_post_dencun_regimes.svg`, `reports/tables/str_regime_summary.csv`, and `reports/tables/str_regime_summary.md`.
+- 2026-04-11: Reproduction commands run in this worktree: `python src/analysis/build_str_release_outputs.py --sample`; `python src/analysis/build_str_release_outputs.py --as-of 2026-04-09`; `make gate`.
+- 2026-04-11: Outcome summary: the declared sample build passed, the `2026-04-09` release build passed, `make gate` passed, and the downstream writing caveat note was recorded in `.orchestrator/handoff/H060_release_output_caveats_2026-04-11.md`.

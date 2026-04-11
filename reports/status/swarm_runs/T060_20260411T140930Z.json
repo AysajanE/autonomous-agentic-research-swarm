@@ -1,0 +1,93 @@
+{
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "run_id": "T060_20260411T140930Z",
+  "generated_at_utc": "2026-04-11T14:09:30Z",
+  "task": {
+    "task_id": "T060",
+    "task_path": ".orchestrator/ready_for_review/T060_analysis_str_figures_and_tables.md",
+    "title": "Analysis: release STR figures and tables from validated artifacts",
+    "role": "Worker",
+    "workstream": "W6",
+    "task_kind": "analysis",
+    "dependencies": [
+      "T040",
+      "T050"
+    ],
+    "integration_ready_dependencies": [],
+    "state_before": "active",
+    "state_after": "ready_for_review"
+  },
+  "repo": {
+    "branch": "T060_analysis_str_figures_and_tables",
+    "git_sha": "113290fb938e453f04a7deb5dfb081af4288e134",
+    "base_branch": "main",
+    "remote": "origin"
+  },
+  "executor": {
+    "role": "Worker",
+    "runner": "local_swarm",
+    "tool": "manual",
+    "model": "gpt-5.4",
+    "sandbox": "workspace-write",
+    "allow_network": false,
+    "repair_context": "operator_root_cause_unblock_and_manual_completion",
+    "returncode": 0,
+    "error": "executor_recorded_by_operator_after_manual_worker_completion"
+  },
+  "commands": {
+    "executor": [
+      "python",
+      "src/analysis/build_str_release_outputs.py",
+      "--as-of",
+      "2026-04-09"
+    ],
+    "executor_log_path": null,
+    "gates": [
+      "python src/analysis/build_str_release_outputs.py --sample",
+      "python src/analysis/build_str_release_outputs.py --as-of 2026-04-09",
+      "make gate"
+    ]
+  },
+  "gates": [
+    {
+      "command": "python src/analysis/build_str_release_outputs.py --sample",
+      "returncode": 0,
+      "output_tail": "Wrote reports/figures/str_ecosystem_timeseries.svg\nWrote reports/figures/str_post_dencun_regimes.svg\nWrote reports/tables/str_regime_summary.csv\nWrote reports/tables/str_regime_summary.md\n"
+    },
+    {
+      "command": "python src/analysis/build_str_release_outputs.py --as-of 2026-04-09",
+      "returncode": 0,
+      "output_tail": "Wrote reports/figures/str_ecosystem_timeseries.svg\nWrote reports/figures/str_post_dencun_regimes.svg\nWrote reports/tables/str_regime_summary.csv\nWrote reports/tables/str_regime_summary.md\n"
+    },
+    {
+      "command": "make gate",
+      "returncode": 0,
+      "output_tail": "[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 6, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 10, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 28, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 18, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n"
+    }
+  ],
+  "ownership": {
+    "ok": true,
+    "changed_paths": [
+      ".orchestrator/handoff/H060_release_output_caveats_2026-04-11.md",
+      ".orchestrator/ready_for_review/T060_analysis_str_figures_and_tables.md",
+      "reports/figures/str_ecosystem_timeseries.svg",
+      "reports/figures/str_post_dencun_regimes.svg",
+      "reports/status/swarm_runs/T060_20260411T140930Z.json",
+      "reports/tables/str_regime_summary.csv",
+      "reports/tables/str_regime_summary.md",
+      "src/analysis/build_str_release_outputs.py"
+    ],
+    "violations": []
+  },
+  "artifacts": {
+    "outputs_ok": true,
+    "missing_outputs": [],
+    "required_manifests_ok": true,
+    "missing_manifests": [],
+    "run_manifest_path": "reports/status/swarm_runs/T060_20260411T140930Z.json"
+  },
+  "result": {
+    "status": "ok",
+    "blocked_reasons": []
+  }
+}
