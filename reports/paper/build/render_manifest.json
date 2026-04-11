@@ -1,0 +1,65 @@
+{
+  "generated_at_utc": "2026-04-11T16:11:22Z",
+  "inputs": [
+    {
+      "bytes": 462,
+      "path": "reports/paper/_quarto.yml",
+      "sha256": "4af268409e46f43e54e8904e4541fc8a575ec97ffa8e1b0cd79496a08cf4a083"
+    },
+    {
+      "bytes": 7763,
+      "path": "reports/paper/index.qmd",
+      "sha256": "ab7c5434f2f74568d49541cbe28b8b5bc939fffca1d6053a20ab8dc007757269"
+    },
+    {
+      "bytes": 2362,
+      "path": "reports/paper/references.bib",
+      "sha256": "b5bfc044de5c2314f1b4b6e51ca2caf506f931f91b2952e5ccbad7676aa8a809"
+    },
+    {
+      "bytes": 171457,
+      "path": "reports/figures/str_ecosystem_timeseries.svg",
+      "sha256": "7909ed9db6730160f532863aa76d1d2bf70948dd2088001edbd40810c6cdd225"
+    },
+    {
+      "bytes": 119303,
+      "path": "reports/figures/str_post_dencun_regimes.svg",
+      "sha256": "2a8f4b5474fc8a7a5c82b261f75deebb4fb44a793e52231f6374646fd2b4c1c7"
+    },
+    {
+      "bytes": 858,
+      "path": "reports/tables/str_regime_summary.md",
+      "sha256": "84ac5f80f4c62eb86f0c2823da67c83c362596034825c28a376e7aff84fca9a6"
+    }
+  ],
+  "notes": [
+    "Rendered from the reports/paper/ project directory so _quarto.yml output-dir=build is respected.",
+    "The canonical build surface consists of the HTML and PDF artifacts above plus this render manifest."
+  ],
+  "outputs": [
+    {
+      "bytes": 1594162,
+      "path": "reports/paper/build/l2_l1_rent_working_paper.html",
+      "sha256": "cb581da602e86cc2399654878e37936bf6d4cd71f6b786847d3c2f16aa0c5973"
+    },
+    {
+      "bytes": 218022,
+      "path": "reports/paper/build/l2_l1_rent_working_paper.pdf",
+      "sha256": "b64b405f48d7d1ebfdc17ebdfb1c4b66b04e057468cbe3f824c92221699ea137"
+    }
+  ],
+  "render": {
+    "cache_note": "Quarto 1.9.36 on this macOS host writes cache state under HOME/Library/Caches/quarto, so T080 renders use a writable temporary HOME.",
+    "command": "env HOME=<tmp-home> quarto render reports/paper/",
+    "quarto_version": "1.9.36",
+    "temporary_home_required": true,
+    "working_directory": "."
+  },
+  "repo": {
+    "branch": "T080_release_candidate",
+    "git_sha": "6e7ba225588497dee39b8221faad0f4ef3729dea"
+  },
+  "role": "Operator",
+  "schema_version": "research_swarm.paper_render_manifest.v1",
+  "task_id": "T080"
+}

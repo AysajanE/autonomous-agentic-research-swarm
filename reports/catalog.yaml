@@ -23,4 +23,16 @@ artifact_roots:
   figures: "reports/figures/"
   tables: "reports/tables/"
   paper_build: "reports/paper/build/"
-releases: []
+releases:
+  - release_date_utc: "2026-04-11"
+    manifest_path: "reports/status/releases/release_2026-04-11.json"
+    git_sha: "6e7ba225588497dee39b8221faad0f4ef3729dea"
+    required_gates_ok: true
+    done_task_count: 19
+    blocked_task_count: 0
+    run_manifest_count: 32
+    review_log_count: 20
+    validation_artifact_count: 6
+    figure_count: 2
+    table_count: 2
+    paper_status: "present"

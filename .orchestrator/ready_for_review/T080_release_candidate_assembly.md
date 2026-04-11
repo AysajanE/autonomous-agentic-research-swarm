@@ -98,10 +98,15 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 - `quarto render reports/paper/index.qmd`
 
 ## Status
-- State: active
+- State: ready_for_review
 - Last updated: 2026-04-11
 ## Notes / Decisions
 
 - 2026-03-29: New v1 Operator task added to make catalog compilation, paper build, and release manifest assembly first-class release work.
 - 2026-04-11: Operator repaired the stale release-assembly gate contract. `scripts/release_assembly.py` now accepts a backward-compatible `--as-of` alias, and the task/runbook/framework references were aligned to the canonical `--release-date` form. Operational blocker cleared; task returned to backlog for normal execution.
 - 2026-04-11: Claimed by local swarm runtime on branch T080_release_candidate.
+- 2026-04-11: The restarted local-swarmed Operator executor did not progress past repo/context reads or write any task outputs. Operator stopped the stalled executor and completed the release assembly directly on the same isolated `T080_release_candidate` branch/worktree.
+- 2026-04-11: Found and repaired a second live operational blocker during release assembly: `.gitignore` still ignored the canonical T080 paper-build outputs and only unignored legacy `reports/paper/build/index.html`. Operator updated the ignore rules to track `l2_l1_rent_working_paper.html`, `l2_l1_rent_working_paper.pdf`, and `render_manifest.json`, while ignoring transient `reports/paper/index_files/`.
+- 2026-04-11: Rendered the paper with `env HOME=<tmp-home> quarto render reports/paper/`, wrote `reports/paper/build/render_manifest.json`, and wrote `reports/status/releases/release_2026-04-11.json` plus the synchronized `reports/catalog.yaml`. Rendering the project directory, not `reports/paper/index.qmd`, was required to honor `_quarto.yml` `output-dir: build` and land the canonical HTML/PDF outputs under `reports/paper/build/`.
+- 2026-04-11: Validation summary: `python scripts/release_assembly.py --release-date 2026-04-11 --check` passed and `make gate` passed after the release artifacts were materialized.
+- 2026-04-11: Additional repo-wide verification: `make test` passed (`35` tests) after the release-control repairs and T080 output materialization.

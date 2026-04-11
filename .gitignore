@@ -28,7 +28,10 @@ build/
 !reports/paper/build/
 reports/paper/build/*
 !reports/paper/build/README.md
-!reports/paper/build/index.html
+!reports/paper/build/l2_l1_rent_working_paper.html
+!reports/paper/build/l2_l1_rent_working_paper.pdf
+!reports/paper/build/render_manifest.json
+reports/paper/index_files/
 develop-eggs/
 dist/
 downloads/
