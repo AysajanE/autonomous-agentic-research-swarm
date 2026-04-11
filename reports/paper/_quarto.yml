@@ -5,15 +5,22 @@ project:
     - index.qmd
 
 bibliography: references.bib
+link-citations: true
 
 format:
   html:
+    output-file: l2_l1_rent_working_paper.html
     toc: true
     toc-depth: 2
     number-sections: true
     embed-resources: true
-    html-math-method: mathjax
     theme: default
+  pdf:
+    output-file: l2_l1_rent_working_paper.pdf
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    documentclass: article
 
 execute:
   enabled: false

@@ -1,0 +1,83 @@
+{
+  "artifacts": {
+    "missing_manifests": [],
+    "missing_outputs": [],
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "run_manifest_path": "reports/status/swarm_runs/T070_20260411T150935Z.json"
+  },
+  "commands": {
+    "executor": [
+      "/Users/aeziz-local/.nvm/versions/node/v20.19.0/bin/codex",
+      "-a",
+      "never",
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "-C",
+      "/Users/aeziz-local/Research/wt-T070",
+      "# Prompt Template \u2014 Worker\n\nRole: **Worker**\n\nYou execute exactly one assigned task in an isolated branch/worktree.\n\n## Instructions\n\n1. Read and follow `AGENTS.md` and any nested `AGENTS.md` under your working directory.\n2. Open the assigned task file and obey its `allowed_paths`, `disallowed_paths`, declared outputs, gates, and stop conditions.\n3. Do not coordinate with other agents through chat. Use:\n   - the task file `## Notes / Decisions`\n   - a handoff note under `.orchestrator/handoff/` when downstream tasks need durable guidance\n4. Update only the task file sections:\n   - `## Status`\n   - `## Notes / Decisions`\n   Do not move task files between lifecycle folders.\n5. You may set `State: integration_ready` or `State: ready_for_review` when the task contract permits it. You may never set `State: done`.\n6. Do not edit `reports/catalog.yaml`, `reports/paper/build/`, or release manifests. Those are Operator-owned surfaces.\n7. If the run is not using the local swarm runtime, hand the exact commands, outputs, and assumptions to Operator so a durable run manifest can be recorded before review.\n\n## Completion checklist\n\n- Run the declared gates and task-specific commands.\n- Ensure declared outputs exist at the declared paths.\n- Record reproduction commands, assumptions, and limitations in the task notes.\n- Write a handoff note if downstream work depends on your output.\n\n## Runtime context (auto-filled)\n\n- Repo root: `/Users/aeziz-local/Research/wt-T070`\n- Task path: `.orchestrator/backlog/T070_quarto_paper_build.md`\n- Task id: `T070`\n- Workstream: `W7`\n- Task kind: `writing`\n- Network enabled: `false`\n- Repair context: ``\n\n### Allowed paths\n\n- reports/paper/_quarto.yml\n- reports/paper/index.qmd\n- reports/paper/references.bib\n\n### Disallowed paths\n\n- docs/protocol.md\n- contracts/\n- src/\n- reports/paper/build/\n- reports/catalog.yaml\n\n### Declared outputs\n\n- reports/paper/_quarto.yml\n- reports/paper/index.qmd\n- reports/paper/references.bib\n\n### Gates\n\n- make gate\n\n### Stop conditions\n\n- Validated figures or tables are missing\n- Need to change protocol or metric definitions\n- Quarto is unavailable\n"
+    ],
+    "executor_log_path": "data/tmp/swarm_logs/T070_20260411T150935Z_executor.log",
+    "gates": [
+      "make gate"
+    ]
+  },
+  "executor": {
+    "allow_network": false,
+    "error": null,
+    "model": null,
+    "repair_context": null,
+    "returncode": 0,
+    "role": "Worker",
+    "runner": "local_swarm",
+    "sandbox": "workspace-write",
+    "tool": "codex"
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "output_tail": "python scripts/quality_gates.py\n[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 6, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 10, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 29, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 19, 'failures': []}\n[review_bundle_integrity] ok=True details={'failures': []}\n",
+      "returncode": 0
+    }
+  ],
+  "generated_at_utc": "2026-04-11T15:17:00Z",
+  "ownership": {
+    "changed_paths": [
+      ".orchestrator/backlog/T070_quarto_paper_build.md",
+      ".orchestrator/handoff/H070_paper_source_handoff_2026-04-11.md",
+      "reports/paper/_quarto.yml",
+      "reports/paper/index.qmd",
+      "reports/paper/references.bib"
+    ],
+    "ok": true,
+    "violations": []
+  },
+  "repo": {
+    "base_branch": "main",
+    "branch": "T070_quarto_paper_build",
+    "git_sha": "5c36a391bc905a4c72ba9f4971130e4b2d7f3624",
+    "remote": "origin"
+  },
+  "result": {
+    "blocked_reasons": [],
+    "status": "ok"
+  },
+  "run_id": "T070_20260411T150935Z",
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "task": {
+    "dependencies": [
+      "T050",
+      "T060"
+    ],
+    "integration_ready_dependencies": [],
+    "role": "Worker",
+    "state_after": "active",
+    "state_before": "active",
+    "task_id": "T070",
+    "task_kind": "writing",
+    "task_path": ".orchestrator/backlog/T070_quarto_paper_build.md",
+    "title": "Quarto manuscript source and draft render for the L2-to-L1 rent paper",
+    "workstream": "W7"
+  }
+}

@@ -1,129 +1,63 @@
 ---
-title: "Measuring Settlement Take Rate for Ethereum Rollups"
-subtitle: "Protocol, provenance, and a release-complete working paper surface"
+title: "Ethereum Rollup Settlement Take Rate After Dencun"
+subtitle: "Validated working paper source for the L2-to-L1 rent analysis release candidate"
 author: "autonomous-agentic-research-swarm"
 date: last-modified
 ---
 
 ## Abstract
 
-This working paper packages the repository's current L2-to-L1 rent analysis as a release-complete manuscript surface. The primary quantity of interest is Settlement Take Rate (STR), defined as `STR_t = (Σ_i RentPaid_{i,t}) / (Σ_i L2Fees_{i,t})`. The repository locks definitions, provenance, and review semantics before result claims are promoted into durable report outputs. This paper therefore combines an empirical protocol with an agentic operating model and a tracked paper build surface. Because the current repository snapshot exposes contracts and output conventions more clearly than populated result artifacts, the manuscript is intentionally a methods-and-release paper rather than a results-forward paper.
+This paper documents the current release-candidate estimate of Ethereum rollup Settlement Take Rate (STR), the share of rollup fee revenue paid back to Ethereum L1 as settlement rent. The evidence bundle uses validated local artifacts as of `2026-04-09` and spans `14` rollups over `1,559` daily observations from `2022-01-01` through `2026-04-08` [@project_contract; @rollup_panel_validation]. On the locked regime table, mean ecosystem STR is `69.14%` before Dencun and `11.68%` after Dencun, with a lower `8.98%` mean during post-Dencun blob-fee-floor runs [@protocol_lock; @str_regime_summary]. The manuscript is intentionally downstream of repo contracts and validation outputs: it reports the current validated surface, documents provenance, and records remaining release caveats instead of redefining metrics in prose.
 
-## Research Question And Metric Lock
+## Research Question
 
-The concrete battle-test project in this repository asks how much fee revenue paid by Ethereum rollup users is subsequently paid back to Ethereum L1 as settlement rent. The protocol fixes the primary outcome as Settlement Take Rate (STR) [@protocol_lock; @data_dictionary_contract; @decision_log_contract].
+The repository's locked project question is whether Ethereum L1's settlement take rate on rollup economics is rising, stable, or decaying as L2 usage scales [@project_contract]. The primary metric is Settlement Take Rate (STR), defined in the protocol as
 
-`STR_t = (Σ_i RentPaid_{i,t}) / (Σ_i L2Fees_{i,t})`
+`STR_t = (sum_i RentPaid_{i,t}) / (sum_i L2Fees_{i,t})`
 
-Several edge-case rules are locked before downstream analysis begins:
+where `RentPaid` is the authoritative on-chain estimate of rollup payments to Ethereum L1 and `L2Fees` comes from the locked vendor denominator surface [@protocol_lock]. The current validated evidence supports a specific descriptive answer: ecosystem STR decays sharply after the Dencun boundary on `2024-03-13`, even though rollup fee activity remains substantial [@protocol_lock; @str_regime_summary].
 
-- The series is daily and ETH-native.
-- If `Σ_i L2Fees_{i,t} == 0`, then `STR_t = NaN` rather than `0`.
-- If either `L2Fees_{i,t}` or `RentPaid_{i,t}` is missing for a rollup-day, exclude that rollup-day from both numerator and denominator sums for ecosystem aggregates.
-- Emit a `daily_rollup_panel` row if and only if both `l2_fees_eth` and `rent_paid_eth` are present.
-- The canonical rollup key is `rollup_id`.
-- The empirical window begins on `2022-01-01`, and dates on or after `2024-03-13` are treated as post-Dencun.
+## Data And Protocol
 
-Source priority is also explicit [@protocol_lock]:
+This draft uses only durable local artifacts already produced upstream of the paper layer. The core empirical inputs are the canonical rollup panel, the daily L1 rent decomposition, the validation bundle, and the W6 release figures/table [@rollup_panel_validation; @l1_rent_decomposition_validation; @cross_source_reconciliation; @str_ecosystem_timeseries; @str_post_dencun_regimes; @str_regime_summary].
 
-1. On-chain computed Ethereum L1 costs for rent and decomposition.
-2. growthepie exports for `L2Fees` and secondary rent/profit series.
-3. L2BEAT cost series for triangulation and sanity checks.
+Four protocol rules matter most for interpreting the paper [@protocol_lock]:
 
-These constraints matter because they prevent metric shopping. A result may later change because new durable artifacts arrive, but it should not change because the metric definition or source priority was silently rewritten.
+- STR is computed daily in ETH-native units.
+- A panel row exists only when both `l2_fees_eth` and `rent_paid_eth` are present.
+- Dates on or after `2024-03-13` are post-Dencun.
+- Blob-fee-floor runs are post-Dencun stretches of at least `7` consecutive days where blob base fee stays within `1.05 x` the post-Dencun minimum.
 
-## Data And Provenance Contracts
+On the validated `2026-04-09` surface, the authoritative panel contains `12,434` rollup-day rows across `14` rollups and `1,559` dates, while the decomposition covers the full `2022-01-01` through `2026-04-08` daily window [@rollup_panel_validation; @l1_rent_decomposition_validation]. The manuscript therefore treats the release figures and regime table as direct downstream artifacts of the locked analysis path rather than restating results from untracked calculations.
 
-Two contract surfaces define the core empirical tables [@data_dictionary_contract]:
+## Validation
 
-- `daily_rollup_panel` is the analysis-ready rollup-by-day panel used to compute STR.
-- `daily_l1_rent_decomposition` is the daily Ethereum L1 rent decomposition used for burn-versus-tips and blob-versus-calldata analysis.
+All three upstream validation reports currently pass on the same `2026-04-09` as-of surface [@rollup_panel_validation; @l1_rent_decomposition_validation; @cross_source_reconciliation]. The locked checks establish three distinct claims.
 
-The repository keeps raw and processed data out of git while tracking their provenance in git [@raw_manifest_readme; @processed_manifest_readme]. Raw snapshot provenance lives under `data/raw_manifest/`, and reproducible processed-artifact provenance lives under `data/processed_manifest/`. The rollup identity interface is versioned in `registry/rollup_registry_v1.csv` [@registry_rollup_v1].
+First, the authoritative panel and the rent-component surface satisfy schema, primary-key, and non-null requirements, and the component identities reconcile exactly to canonical `rent_paid_eth` under both tx-family and fee-class decompositions [@rollup_panel_validation]. Second, daily summed components match `daily_l1_rent_decomposition.l1_total_rent_eth` within the locked tolerance over all `1,559` dates [@l1_rent_decomposition_validation]. Third, canonical and vendor panels share full matched-key coverage, show no material unexplained rollup divergences, and differ by only about `0.02%` in aggregate rent over the full matched slice [@cross_source_reconciliation].
 
-Durable downstream report artifacts are expected under the stable report namespaces documented by the repository [@validation_readme; @validation_manifests_readme; @figures_readme; @tables_readme].
+The validation bundle still carries one documented non-gating residual worth keeping visible in release prose: in `2025-05`, authoritative monthly rent is `148.42 ETH` versus `166.78 ETH` in the vendor benchmark, a `12.37%` gap on a low-rent month [@cross_source_reconciliation; @release_output_caveats]. Under the locked benchmark policy, that remains diagnostic context rather than grounds to overwrite canonical rent or block the paper source.
 
-| Layer | Durable surface | Why it matters |
-|---|---|---|
-| Protocol and contracts | `docs/protocol.md`, `contracts/data_dictionary.md`, `contracts/decisions.md` | Lock metric definitions, source priority, and decision history. |
-| Registry | `registry/rollup_registry_v1.csv` | Locks the canonical `rollup_id` interface. |
-| Raw provenance | `data/raw_manifest/` | Records raw snapshots kept out of git. |
-| Processed provenance | `data/processed_manifest/` | Records how analysis-ready artifacts can be reproduced. |
-| Analysis outputs | `reports/validation/`, `reports/figures/`, `reports/tables/` | Durable report surfaces referenced by manuscripts and releases. |
-| Runtime evidence | `reports/status/swarm_runs/`, `reports/status/reviews/` | Durable execution and Judge review records. |
-| Paper surface | `reports/paper/index.qmd`, `reports/paper/build/index.html` | Human-readable working paper plus durable render artifact. |
-| Release surface | `reports/status/releases/release_<YYYY-MM-DD>.json`, `reports/catalog.yaml` | Canonical release snapshots and catalog projection. |
+## Results
 
-This artifact DAG is the key design choice behind the paper layer. The manuscript is not an isolated document; it is downstream of contracts, manifests, runtime evidence, and report artifacts, and upstream of the final release snapshot.
+Figure @fig-ecosystem-str shows the ecosystem time series built from the validated panel surface. The series makes the main qualitative result easy to see: pre-Dencun STR is frequently elevated, while post-Dencun STR is structurally lower even when L2 fees remain meaningful [@str_ecosystem_timeseries]. The accompanying regime table quantifies that break. Mean ecosystem STR falls from `69.14%` before Dencun to `11.68%` after Dencun, while mean daily rent drops from `147.014 ETH` to `19.064 ETH` [@str_regime_summary].
 
-## Agentic Runtime And Review Semantics
+![Settlement Take Rate ecosystem time series through 2026-04-08. The released figure overlays daily STR with smoothed L2 fee and L1 rent levels, and marks the Dencun boundary at 2024-03-13.](../figures/str_ecosystem_timeseries.svg){#fig-ecosystem-str fig-alt="Daily ecosystem Settlement Take Rate with smoothed L2 fees, smoothed L1 rent, and the Dencun boundary."}
 
-The paper layer inherits the repository's locked file-based control plane rather than redefining it. The repository acts as shared memory, and roles remain explicitly separated:
+Figure @fig-post-dencun-regimes focuses on the post-Dencun sample and shades the protocol-defined blob-fee-floor runs [@protocol_lock; @str_post_dencun_regimes]. The table shows that mean STR is `8.98%` during blob-fee-floor periods versus `12.77%` in the rest of the post-Dencun sample [@str_regime_summary]. On the current validated surface, the simplest answer to the project's primary question is therefore not "rising" or "stable" but "decaying after the Dencun regime change," with the cheapest blob-fee conditions coinciding with the lowest observed ecosystem rent take rates.
 
-| Role | Locked responsibility |
-|---|---|
-| Planner | Define tasks, dependencies, and required artifacts. |
-| Worker | Produce outputs inside allowed paths while respecting worktree isolation. |
-| Judge | Review evidence and approve transitions to `done`. |
-| Operator | Manage shared surfaces such as releases, catalogs, and durable paper builds. |
+![Post-Dencun STR regime figure with blob-fee-floor runs shaded according to the locked protocol rule.](../figures/str_post_dencun_regimes.svg){#fig-post-dencun-regimes fig-alt="Post-Dencun daily Settlement Take Rate, 14-day mean STR, and shaded blob fee floor periods."}
 
-Contracts-first discipline means that metric semantics change in upstream contracts first, not in the paper alone. Deterministic gates and git/worktree isolation constrain how durable claims reach shared surfaces. Judge remains the only role that may move scientific work to `done`.
+### Regime Summary Table
 
-Lifecycle semantics are also locked:
+The locked W6 regime table is included directly from the durable table surface so the manuscript and release bundle reference the same artifact.
 
-- `backlog`
-- `active`
-- `integration_ready`
-- `ready_for_review`
-- `blocked`
-- `done`
+{{< include ../tables/str_regime_summary.md >}}
 
-The task file `State:` field is authoritative, while lifecycle folders are only a projection of that state. `integration_ready` is a narrow allowlisted exception path; `ready_for_review` requires outputs, gates, required manifests, and a durable runtime run manifest; and `done` requires Judge approval plus a durable review log.
+## Provenance And Limitations
 
-The paper therefore depends on, but does not replace, the runtime and review chain. When a manuscript references durable outputs, those outputs should already be traceable to provenance manifests, runtime manifests, and review logs. That discipline is what turns the paper into an auditable release artifact rather than a disconnected narrative.
+This manuscript is downstream of the locked repository control plane, not a parallel analysis channel. Protocol definitions come from `docs/protocol.md`, project-level release requirements come from `contracts/project.yaml`, and the empirical claims quoted here are limited to validated report artifacts and their provenance manifests [@protocol_lock; @project_contract; @rollup_panel_validation; @l1_rent_decomposition_validation].
 
-## Release-Ready Paper Surface
+Two limitations matter for interpretation. First, the authoritative panel is intentionally denominator-keyed: rollup-days missing vendor fee denominators are omitted from STR aggregation even when rent-component data exists. The current validated surface therefore has `12,434` panel rows but `12,563` rent-component rows, and the component-to-decomposition identity is the correct full-rent coherence check [@rollup_panel_validation; @release_output_caveats]. Second, this task owns manuscript source only. Final rendered artifacts, release manifests, and catalog updates remain Operator-owned T080 surfaces.
 
-This Stage 2 paper layer is intentionally narrow and concrete:
-
-- `_quarto.yml` defines the Quarto project and renders into `reports/paper/build/`.
-- `index.qmd` is the manuscript source.
-- `references.bib` provides repo-local bibliography entries.
-- `reports/paper/build/index.html` is the durable self-contained HTML render.
-
-The release layer downstream of the paper is already locked by the approved Stage 1 continuation packet. It expects canonical release manifests at `reports/status/releases/release_<YYYY-MM-DD>.json` and a deterministic catalog at `reports/catalog.yaml`. Within that locked design, the paper build surface changes release status in only one way:
-
-- `paper.status = pending_stage2` when `reports/paper/build/` has no non-README render artifacts.
-- `paper.status = present` when the build namespace contains a durable render artifact.
-
-For v1, the cleanest durable build surface is a single self-contained `index.html`. That keeps `reports/paper/build/` easy to hash, easy to inspect, and easy for the release layer to snapshot without pulling in transient asset directories.
-
-## Scope Limits For This Release Candidate
-
-The current repository snapshot is strong on definitions and conventions but intentionally light on populated result artifacts. In the attached evidence for this continuation stage:
-
-- `registry/rollup_registry_v1.csv` exposes the registry interface but not populated rollup rows [@registry_rollup_v1].
-- `reports/validation/`, `reports/figures/`, and `reports/tables/` are represented by namespace conventions rather than populated empirical artifacts [@validation_readme; @validation_manifests_readme; @figures_readme; @tables_readme].
-
-Accordingly, this manuscript does not restate unattested numeric results, rank rollups, or embed figures/tables that are not present as durable report artifacts. The manuscript is intentionally a methods-and-release paper rather than a results-forward paper.
-
-That limitation is a feature, not a defect. It keeps the current release honest while still delivering a finished working-paper surface: the question is locked, the metric is locked, the provenance contract is locked, the runtime and review semantics are locked, and the paper can be rendered and hashed into a release manifest today.
-
-## From Repository Workflow To Finished Paper
-
-The repository now supports a clear end-to-end path from task definition to a finished working paper:
-
-1. `docs/protocol.md`, `contracts/data_dictionary.md`, and `contracts/decisions.md` lock the research question and empirical definitions.
-2. `registry/rollup_registry_v1.csv`, `data/raw_manifest/`, and `data/processed_manifest/` lock identity and provenance.
-3. Worker-generated artifacts accumulate under `reports/validation/`, `reports/figures/`, and `reports/tables/`.
-4. Runtime and Judge artifacts under `reports/status/swarm_runs/` and `reports/status/reviews/` certify how those outputs were produced and approved.
-5. Quarto renders this manuscript to `reports/paper/build/index.html`.
-6. Operator-owned release assembly snapshots the combined evidence into `reports/status/releases/release_<YYYY-MM-DD>.json` and updates `reports/catalog.yaml`.
-
-The result is a working paper that is not just readable, but also releaseable. The narrative, the build artifact, and the release manifest all point to the same durable filesystem surfaces.
-
-## Conclusion
-
-This repository's current L2-to-L1 rent analysis project now has a complete paper layer that matches its locked contract-first operating model. The paper does not pretend to have more empirical evidence than the current durable artifacts support, but it does provide a finished manuscript, a reproducible Quarto configuration, a durable HTML render, and paper-specific integrity checks.
-
-That is enough to make the release candidate real. Future revisions can become more results-forward by adding validated report artifacts and then updating the manuscript on top of the same locked protocol, provenance, runtime, and release surfaces rather than renegotiating them.
+Within those limits, the paper source is release-aligned: it uses the locked filenames, cites only durable local artifacts, and can be rendered by Quarto without inventing new evidence or changing scientific definitions.
