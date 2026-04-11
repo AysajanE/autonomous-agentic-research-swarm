@@ -99,9 +99,10 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 
 ## Status
 
-- State: backlog
-- Last updated: 2026-03-29
+- State: blocked
+- Last updated: 2026-04-11
 
 ## Notes / Decisions
 
 - 2026-03-29: New v1 Operator task added to make catalog compilation, paper build, and release manifest assembly first-class release work.
+- 2026-04-11: @human Blocked on a stale release-assembly gate contract before task launch. This task, related runbooks, and `contracts/framework.json` still reference `python scripts/release_assembly.py --as-of YYYY-MM-DD --check`, but the current `scripts/release_assembly.py` CLI accepts `--release-date`, not `--as-of`. Local swarm `run-task` and `judge-task` execute declared task gates literally, so T080 cannot pass runtime or Judge cleanly until the gate contract is aligned to the current CLI or the script restores a compatible `--as-of` alias.
