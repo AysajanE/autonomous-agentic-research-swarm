@@ -26,12 +26,12 @@ artifact_roots:
 releases:
   - release_date_utc: "2026-04-11"
     manifest_path: "reports/status/releases/release_2026-04-11.json"
-    git_sha: "12d5b279e9176e6f289ff69c00c0facffe247479"
+    git_sha: "be5df57e85942c3137dd6900beb80bc84fdaaeac"
     required_gates_ok: true
-    done_task_count: 19
+    done_task_count: 20
     blocked_task_count: 0
     run_manifest_count: 32
-    review_log_count: 21
+    review_log_count: 23
     validation_artifact_count: 6
     figure_count: 2
     table_count: 2

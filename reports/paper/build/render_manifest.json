@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2026-04-11T16:11:22Z",
+  "generated_at_utc": "2026-04-11T19:47:29Z",
   "inputs": [
     {
       "bytes": 462,
@@ -27,37 +27,37 @@
       "sha256": "2a8f4b5474fc8a7a5c82b261f75deebb4fb44a793e52231f6374646fd2b4c1c7"
     },
     {
-      "bytes": 858,
+      "bytes": 995,
       "path": "reports/tables/str_regime_summary.md",
-      "sha256": "84ac5f80f4c62eb86f0c2823da67c83c362596034825c28a376e7aff84fca9a6"
+      "sha256": "b77f33dd4992fb5c73b0e3ddfea342d5587c65110964852208982c5c2a48326e"
     }
   ],
   "notes": [
     "Rendered from the reports/paper/ project directory so _quarto.yml output-dir=build is respected.",
-    "The canonical build surface consists of the HTML and PDF artifacts above plus this render manifest."
+    "The regime summary markdown was reformatted into two compact manuscript tables so the PDF no longer overlaps columns on the release page."
   ],
   "outputs": [
     {
-      "bytes": 1594162,
+      "bytes": 1595499,
       "path": "reports/paper/build/l2_l1_rent_working_paper.html",
-      "sha256": "cb581da602e86cc2399654878e37936bf6d4cd71f6b786847d3c2f16aa0c5973"
+      "sha256": "4524a0b0b606a810a1e249be15548e69f50f064d70203ade72517334cbd69449"
     },
     {
-      "bytes": 218022,
+      "bytes": 218189,
       "path": "reports/paper/build/l2_l1_rent_working_paper.pdf",
-      "sha256": "b64b405f48d7d1ebfdc17ebdfb1c4b66b04e057468cbe3f824c92221699ea137"
+      "sha256": "f45104a0f496c27703b9d8360ff97665645d538522bd7a5ac02e97a003114951"
     }
   ],
   "render": {
-    "cache_note": "Quarto 1.9.36 on this macOS host writes cache state under HOME/Library/Caches/quarto, so T080 renders use a writable temporary HOME.",
+    "cache_note": "Quarto 1.9.36 on this macOS host writes cache state under HOME/Library/Caches/quarto, so paper renders use a writable temporary HOME.",
     "command": "env HOME=<tmp-home> quarto render reports/paper/",
     "quarto_version": "1.9.36",
     "temporary_home_required": true,
     "working_directory": "."
   },
   "repo": {
-    "branch": "T080_release_candidate",
-    "git_sha": "6e7ba225588497dee39b8221faad0f4ef3729dea"
+    "branch": "main",
+    "git_sha": "be5df57e85942c3137dd6900beb80bc84fdaaeac"
   },
   "role": "Operator",
   "schema_version": "research_swarm.paper_render_manifest.v1",

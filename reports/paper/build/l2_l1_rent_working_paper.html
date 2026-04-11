@@ -2291,100 +2291,110 @@ Figure 2: Post-Dencun STR regime figure with blob-fee-floor runs shaded accordi
 <section id="regime-summary-table" class="level3" data-number="5.1">
 <h3 data-number="5.1" class="anchored" data-anchor-id="regime-summary-table"><span class="header-section-number">5.1</span> Regime Summary Table</h3>
 <p>The locked W6 regime table is included directly from the durable table surface so the manuscript and release bundle reference the same artifact.</p>
+<p>Daily means are ETH/day. STR columns are percentages. Blob-fee values are in gwei.</p>
+<p>Table 1A. Regime coverage and central tendency</p>
 <table class="caption-top table">
 <colgroup>
-<col style="width: 9%">
-<col style="width: 9%">
-<col style="width: 9%">
-<col style="width: 9%">
-<col style="width: 9%">
-<col style="width: 9%">
-<col style="width: 9%">
-<col style="width: 9%">
-<col style="width: 9%">
-<col style="width: 9%">
-<col style="width: 9%">
+<col style="width: 13%">
+<col style="width: 13%">
+<col style="width: 18%">
+<col style="width: 18%">
+<col style="width: 18%">
+<col style="width: 18%">
 </colgroup>
 <thead>
 <tr class="header">
-<th>regime_id</th>
-<th>regime</th>
-<th>start_date_utc</th>
-<th>end_date_utc</th>
-<th>days</th>
-<th>mean_l2_fees_eth</th>
-<th>mean_rent_paid_eth</th>
-<th>mean_str_pct</th>
-<th>median_str_pct</th>
-<th>p90_str_pct</th>
-<th>mean_blob_base_fee_gwei</th>
+<th>Regime</th>
+<th>Window</th>
+<th style="text-align: right;">Days</th>
+<th style="text-align: right;">Mean fees</th>
+<th style="text-align: right;">Mean rent</th>
+<th style="text-align: right;">Mean STR</th>
 </tr>
 </thead>
 <tbody>
 <tr class="odd">
-<td>full_sample</td>
 <td>Full sample</td>
-<td>2022-01-01</td>
-<td>2026-04-08</td>
-<td>1559</td>
-<td>181.399</td>
-<td>84.886</td>
-<td>41.24%</td>
-<td>44.59%</td>
-<td>79.85%</td>
-<td>2.250096</td>
+<td>2022-01-01 to 2026-04-08</td>
+<td style="text-align: right;">1,559</td>
+<td style="text-align: right;">181.399</td>
+<td style="text-align: right;">84.886</td>
+<td style="text-align: right;">41.24%</td>
 </tr>
 <tr class="even">
-<td>pre_dencun</td>
 <td>Pre-Dencun</td>
-<td>2022-01-01</td>
-<td>2024-03-12</td>
-<td>802</td>
-<td>229.556</td>
-<td>147.014</td>
-<td>69.14%</td>
-<td>69.36%</td>
-<td>84.97%</td>
-<td></td>
+<td>2022-01-01 to 2024-03-12</td>
+<td style="text-align: right;">802</td>
+<td style="text-align: right;">229.556</td>
+<td style="text-align: right;">147.014</td>
+<td style="text-align: right;">69.14%</td>
 </tr>
 <tr class="odd">
-<td>post_dencun</td>
 <td>Post-Dencun</td>
-<td>2024-03-13</td>
-<td>2026-04-08</td>
-<td>757</td>
-<td>130.379</td>
-<td>19.064</td>
-<td>11.68%</td>
-<td>6.55%</td>
-<td>27.64%</td>
-<td>2.250096</td>
+<td>2024-03-13 to 2026-04-08</td>
+<td style="text-align: right;">757</td>
+<td style="text-align: right;">130.379</td>
+<td style="text-align: right;">19.064</td>
+<td style="text-align: right;">11.68%</td>
 </tr>
 <tr class="even">
-<td>post_dencun_blob_floor</td>
 <td>Blob fee floor</td>
-<td>2024-03-13</td>
-<td>2025-09-21</td>
-<td>217</td>
-<td>128.737</td>
-<td>18.740</td>
-<td>8.98%</td>
-<td>3.93%</td>
-<td>24.06%</td>
-<td>0.000000</td>
+<td>2024-03-13 to 2025-09-21</td>
+<td style="text-align: right;">217</td>
+<td style="text-align: right;">128.737</td>
+<td style="text-align: right;">18.740</td>
+<td style="text-align: right;">8.98%</td>
 </tr>
 <tr class="odd">
-<td>post_dencun_non_floor</td>
 <td>Post-Dencun ex floor</td>
-<td>2024-03-26</td>
-<td>2026-04-08</td>
-<td>540</td>
-<td>131.038</td>
-<td>19.194</td>
-<td>12.77%</td>
-<td>9.09%</td>
-<td>28.61%</td>
-<td>3.154302</td>
+<td>2024-03-26 to 2026-04-08</td>
+<td style="text-align: right;">540</td>
+<td style="text-align: right;">131.038</td>
+<td style="text-align: right;">19.194</td>
+<td style="text-align: right;">12.77%</td>
+</tr>
+</tbody>
+</table>
+<p>Table 1B. STR distribution and blob-fee diagnostics</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Regime</th>
+<th style="text-align: right;">Median STR</th>
+<th style="text-align: right;">P90 STR</th>
+<th style="text-align: right;">Mean blob fee</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Full sample</td>
+<td style="text-align: right;">44.59%</td>
+<td style="text-align: right;">79.85%</td>
+<td style="text-align: right;">2.250096</td>
+</tr>
+<tr class="even">
+<td>Pre-Dencun</td>
+<td style="text-align: right;">69.36%</td>
+<td style="text-align: right;">84.97%</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+<tr class="odd">
+<td>Post-Dencun</td>
+<td style="text-align: right;">6.55%</td>
+<td style="text-align: right;">27.64%</td>
+<td style="text-align: right;">2.250096</td>
+</tr>
+<tr class="even">
+<td>Blob fee floor</td>
+<td style="text-align: right;">3.93%</td>
+<td style="text-align: right;">24.06%</td>
+<td style="text-align: right;">0.000000</td>
+</tr>
+<tr class="odd">
+<td>Post-Dencun ex floor</td>
+<td style="text-align: right;">9.09%</td>
+<td style="text-align: right;">28.61%</td>
+<td style="text-align: right;">3.154302</td>
 </tr>
 </tbody>
 </table>

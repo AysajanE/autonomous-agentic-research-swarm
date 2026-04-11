@@ -358,43 +358,69 @@ def contiguous_true_spans(frame: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Ti
 def write_regime_tables(regime_table: pd.DataFrame) -> None:
     REGIME_TABLE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     regime_table.to_csv(REGIME_TABLE_CSV_PATH, index=False, float_format="%.6f")
-
-    markdown_table = markdown_from_dataframe(
-        regime_table,
-        formatters={
-            "mean_l2_fees_eth": lambda value: f"{value:,.3f}",
-            "mean_rent_paid_eth": lambda value: f"{value:,.3f}",
-            "mean_str_pct": lambda value: f"{value:.2f}%",
-            "median_str_pct": lambda value: f"{value:.2f}%",
-            "p90_str_pct": lambda value: f"{value:.2f}%",
-            "mean_blob_base_fee_gwei": lambda value: "" if pd.isna(value) else f"{value:.6f}",
-        },
-    )
+    markdown_table = manuscript_markdown_from_regime_table(regime_table)
     REGIME_TABLE_MD_PATH.write_text(markdown_table + "\n", encoding="utf-8")
 
 
-def markdown_from_dataframe(
-    frame: pd.DataFrame,
-    *,
-    formatters: dict[str, callable],
-) -> str:
-    headers = list(frame.columns)
-    rendered_rows: list[list[str]] = []
+def manuscript_markdown_from_regime_table(frame: pd.DataFrame) -> str:
+    overview_rows: list[list[str]] = []
+    distribution_rows: list[list[str]] = []
     for _, row in frame.iterrows():
-        rendered: list[str] = []
-        for column in headers:
-            value = row[column]
-            if column in formatters:
-                rendered.append(formatters[column](value))
-            elif pd.isna(value):
-                rendered.append("")
-            else:
-                rendered.append(str(value))
-        rendered_rows.append(rendered)
+        overview_rows.append(
+            [
+                str(row["regime"]),
+                f"{row['start_date_utc']} to {row['end_date_utc']}",
+                f"{int(row['days']):,}",
+                f"{row['mean_l2_fees_eth']:,.3f}",
+                f"{row['mean_rent_paid_eth']:,.3f}",
+                f"{row['mean_str_pct']:.2f}%",
+            ]
+        )
+        distribution_rows.append(
+            [
+                str(row["regime"]),
+                f"{row['median_str_pct']:.2f}%",
+                f"{row['p90_str_pct']:.2f}%",
+                "n/a"
+                if pd.isna(row["mean_blob_base_fee_gwei"])
+                else f"{row['mean_blob_base_fee_gwei']:.6f}",
+            ]
+        )
 
+    overview = render_markdown_table(
+        headers=["Regime", "Window", "Days", "Mean fees", "Mean rent", "Mean STR"],
+        rows=overview_rows,
+        alignments=["---", "---", "---:", "---:", "---:", "---:"],
+    )
+    distribution = render_markdown_table(
+        headers=["Regime", "Median STR", "P90 STR", "Mean blob fee"],
+        rows=distribution_rows,
+        alignments=["---", "---:", "---:", "---:"],
+    )
+    return "\n".join(
+        [
+            "Daily means are ETH/day. STR columns are percentages. Blob-fee values are in gwei.",
+            "",
+            "Table 1A. Regime coverage and central tendency",
+            "",
+            overview,
+            "",
+            "Table 1B. STR distribution and blob-fee diagnostics",
+            "",
+            distribution,
+        ]
+    )
+
+
+def render_markdown_table(
+    *,
+    headers: list[str],
+    rows: list[list[str]],
+    alignments: list[str],
+) -> str:
     header_line = "| " + " | ".join(headers) + " |"
-    separator_line = "| " + " | ".join("---" for _ in headers) + " |"
-    body_lines = ["| " + " | ".join(row) + " |" for row in rendered_rows]
+    separator_line = "| " + " | ".join(alignments) + " |"
+    body_lines = ["| " + " | ".join(row) + " |" for row in rows]
     return "\n".join([header_line, separator_line, *body_lines])
 
 

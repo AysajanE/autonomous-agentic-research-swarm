@@ -67,19 +67,19 @@
     "paper": {
       "artifacts": [
         {
-          "bytes": 1594162,
+          "bytes": 1595499,
           "path": "reports/paper/build/l2_l1_rent_working_paper.html",
-          "sha256": "cb581da602e86cc2399654878e37936bf6d4cd71f6b786847d3c2f16aa0c5973"
+          "sha256": "4524a0b0b606a810a1e249be15548e69f50f064d70203ade72517334cbd69449"
         },
         {
-          "bytes": 218022,
+          "bytes": 218189,
           "path": "reports/paper/build/l2_l1_rent_working_paper.pdf",
-          "sha256": "b64b405f48d7d1ebfdc17ebdfb1c4b66b04e057468cbe3f824c92221699ea137"
+          "sha256": "f45104a0f496c27703b9d8360ff97665645d538522bd7a5ac02e97a003114951"
         },
         {
-          "bytes": 2256,
+          "bytes": 2277,
           "path": "reports/paper/build/render_manifest.json",
-          "sha256": "3edf208dfa2942d7768ddc8d4b68f9b4c1570d8e77253a61cfcb33389fe212fd"
+          "sha256": "e6d7fc0a0299c94695cc0eb7188a4c93b51eb965b3ce9d36d6d99a44971142ba"
         }
       ],
       "expected_namespace": "reports/paper/build/",
@@ -281,6 +281,16 @@
         "bytes": 924,
         "path": "reports/status/reviews/T080_20260411T161415Z.json",
         "sha256": "4c455db73cf9402523e197eff5b4c7776ed8238d35ded57b26be64345531aa93"
+      },
+      {
+        "bytes": 887,
+        "path": "reports/status/reviews/T080_20260411T161524Z.json",
+        "sha256": "93e434a68659212b0b471d7a34b08b87db815cd7a804e34c51100bd32517810e"
+      },
+      {
+        "bytes": 908,
+        "path": "reports/status/reviews/T080_20260411T161630Z.json",
+        "sha256": "108fa27608f66f830a6be5637f9a4666c0fe3be6872b9042f3aba142a91274cd"
       }
     ],
     "runtime_runs": [
@@ -452,9 +462,9 @@
         "sha256": "35657202938c6ca63beb67f97b51d961b2fe4a66818a31ed2167b837a8a40f4c"
       },
       {
-        "bytes": 858,
+        "bytes": 995,
         "path": "reports/tables/str_regime_summary.md",
-        "sha256": "84ac5f80f4c62eb86f0c2823da67c83c362596034825c28a376e7aff84fca9a6"
+        "sha256": "b77f33dd4992fb5c73b0e3ddfea342d5587c65110964852208982c5c2a48326e"
       }
     ],
     "validation": [
@@ -493,20 +503,20 @@
   "counts": {
     "blocked_tasks": 0,
     "contracts_and_protocol": 10,
-    "done_tasks": 19,
+    "done_tasks": 20,
     "figures": 2,
     "integration_ready_tasks": 0,
     "paper_artifacts": 3,
     "processed_manifests": 10,
     "raw_manifests": 6,
-    "ready_for_review_tasks": 1,
+    "ready_for_review_tasks": 0,
     "registry": 1,
-    "runtime_reviews": 21,
+    "runtime_reviews": 23,
     "runtime_runs": 32,
     "tables": 2,
     "validation": 6
   },
-  "generated_at_utc": "2026-04-11T16:15:05Z",
+  "generated_at_utc": "2026-04-11T19:47:35Z",
   "lifecycle": {
     "allowed_states": [
       "backlog",
@@ -521,9 +531,7 @@
     "runtime_manifest_dir": "reports/status/swarm_runs",
     "scientific_review_role": "Judge"
   },
-  "notes": [
-    "There are tasks still in ready_for_review; release status is a snapshot, not a completion claim."
-  ],
+  "notes": [],
   "quality_gates": {
     "all_required_ok": true,
     "required_gate_names": [
@@ -558,7 +566,7 @@
       },
       "judge_review_log_validity": {
         "details": {
-          "count": 21,
+          "count": 23,
           "failures": []
         },
         "ok": true
@@ -644,7 +652,7 @@
   "release_id": "release_2026-04-11",
   "repo": {
     "catalog_path": "reports/catalog.yaml",
-    "git_sha": "12d5b279e9176e6f289ff69c00c0facffe247479",
+    "git_sha": "be5df57e85942c3137dd6900beb80bc84fdaaeac",
     "project_mode": "empirical",
     "release_manifest_path": "reports/status/releases/release_2026-04-11.json"
   },
@@ -655,9 +663,9 @@
       "active": 0,
       "backlog": 0,
       "blocked": 0,
-      "done": 19,
+      "done": 20,
       "integration_ready": 0,
-      "ready_for_review": 1
+      "ready_for_review": 0
     },
     "task_ids_by_state": {
       "active": [],
@@ -682,12 +690,11 @@
         "T051",
         "T052",
         "T060",
-        "T070"
+        "T070",
+        "T080"
       ],
       "integration_ready": [],
-      "ready_for_review": [
-        "T080"
-      ]
+      "ready_for_review": []
     },
     "total_tasks": 20
   }
