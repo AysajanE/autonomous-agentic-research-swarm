@@ -81,7 +81,7 @@ If automation is unavailable or a task needs a short repair:
 
 After `T025` through `T070` are `done`:
 
-1. Operator runs `python scripts/release_assembly.py --as-of YYYY-MM-DD --check`
+1. Operator runs `python scripts/release_assembly.py --release-date YYYY-MM-DD --check`
 2. Operator runs `quarto render reports/paper/index.qmd`
 3. Operator confirms:
    - `reports/catalog.yaml`

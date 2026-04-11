@@ -1129,6 +1129,11 @@ def main(argv: list[str] | None = None) -> int:
         help="UTC release date in YYYY-MM-DD form (default: today UTC).",
     )
     parser.add_argument(
+        "--as-of",
+        dest="release_date",
+        help="Backward-compatible alias for --release-date.",
+    )
+    parser.add_argument(
         "--write",
         action="store_true",
         help="Write the canonical release manifest and rebuild reports/catalog.yaml.",

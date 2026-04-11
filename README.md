@@ -65,7 +65,7 @@ A sample figure alone is not battle-test success.
 3. Inspect `.orchestrator/workstreams.md` and the live backlog under `.orchestrator/backlog/`.
 4. Run `make gate` and `make test` on the base branch.
 5. Use `docs/runbook_swarm.md` for manual execution or `docs/runbook_swarm_automation.md` for the default local swarm path.
-6. When upstream tasks are done, run the Operator release path with `python scripts/release_assembly.py --as-of YYYY-MM-DD --check`.
+6. When upstream tasks are done, run the Operator release path with `python scripts/release_assembly.py --release-date YYYY-MM-DD --check`.
 
 ## Mode coverage
 

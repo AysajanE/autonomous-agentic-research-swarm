@@ -137,6 +137,6 @@
     "paper_build_dir": "reports/paper/build/",
     "catalog_compiler_role": "Operator",
     "release_manifest_pattern": "reports/status/releases/release_<YYYY-MM-DD>.json",
-    "release_assembly_command": "python scripts/release_assembly.py --as-of <YYYY-MM-DD> --check"
+    "release_assembly_command": "python scripts/release_assembly.py --release-date <YYYY-MM-DD> --check"
   }
 }

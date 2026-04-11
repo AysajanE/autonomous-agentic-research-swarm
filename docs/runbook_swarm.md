@@ -69,7 +69,7 @@ Suggested worktree pattern:
 
 After `T070` is done:
 
-- Operator runs `python scripts/release_assembly.py --as-of YYYY-MM-DD --check`
+- Operator runs `python scripts/release_assembly.py --release-date YYYY-MM-DD --check`
 - Operator runs `quarto render reports/paper/index.qmd`
 - Judge verifies `reports/catalog.yaml`, paper build outputs, `render_manifest.json`, and `reports/status/releases/release_<YYYY-MM-DD>.json`
 

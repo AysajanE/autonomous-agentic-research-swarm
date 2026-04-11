@@ -37,7 +37,7 @@ outputs:
   - "reports/status/releases/release_YYYY-MM-DD.json"
 gates:
   - "make gate"
-  - "python scripts/release_assembly.py --as-of YYYY-MM-DD --check"
+  - "python scripts/release_assembly.py --release-date YYYY-MM-DD --check"
 stop_conditions:
   - "Successful producing run manifests are missing"
   - "Quarto render fails"
@@ -79,7 +79,7 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 ## Success Criteria
 
 - [ ] `reports/catalog.yaml` is compiled from successful run manifests and released artifacts, not hand-edited as task prose
-- [ ] `python scripts/release_assembly.py --as-of YYYY-MM-DD --check` succeeds
+- [ ] `python scripts/release_assembly.py --release-date YYYY-MM-DD --check` succeeds
 - [ ] `quarto render reports/paper/index.qmd` emits the locked HTML, PDF, and render manifest outputs
 - [ ] The release manifest references exact raw manifests, processed manifests, validation artifacts, figures, tables, paper outputs, compiled catalog, and git SHA
 - [ ] The task is handed to Judge at `ready_for_review`; Operator does not mark it `done`
@@ -94,15 +94,15 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 ## Validation / Commands
 
 - `make gate`
-- `python scripts/release_assembly.py --as-of YYYY-MM-DD --check`
+- `python scripts/release_assembly.py --release-date YYYY-MM-DD --check`
 - `quarto render reports/paper/index.qmd`
 
 ## Status
 
-- State: blocked
+- State: backlog
 - Last updated: 2026-04-11
 
 ## Notes / Decisions
 
 - 2026-03-29: New v1 Operator task added to make catalog compilation, paper build, and release manifest assembly first-class release work.
-- 2026-04-11: @human Blocked on a stale release-assembly gate contract before task launch. This task, related runbooks, and `contracts/framework.json` still reference `python scripts/release_assembly.py --as-of YYYY-MM-DD --check`, but the current `scripts/release_assembly.py` CLI accepts `--release-date`, not `--as-of`. Local swarm `run-task` and `judge-task` execute declared task gates literally, so T080 cannot pass runtime or Judge cleanly until the gate contract is aligned to the current CLI or the script restores a compatible `--as-of` alias.
+- 2026-04-11: Operator repaired the stale release-assembly gate contract. `scripts/release_assembly.py` now accepts a backward-compatible `--as-of` alias, and the task/runbook/framework references were aligned to the canonical `--release-date` form. Operational blocker cleared; task returned to backlog for normal execution.
