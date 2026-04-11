@@ -94,9 +94,13 @@ This task turns validated empirical artifacts into the minimum release analysis 
 - `python src/analysis/build_str_release_outputs.py --as-of YYYY-MM-DD`
 
 ## Status
-- State: active
+- State: blocked
 - Last updated: 2026-04-11
 ## Notes / Decisions
 
 - 2026-03-29: v1 rewrite expands T060 from one sample figure to the minimum release figure-and-table bundle.
 - 2026-04-11: Claimed by local swarm runtime on branch T060_analysis_str_figures_and_tables.
+- 2026-04-11: Blocked under the task stop conditions. The current `2026-04-09` canonical surfaces in this worktree are not safe for downstream W6 release analysis: an independent panel-vs-decomposition coherence check on `data/processed/panels/daily_rollup_panel.csv` and `data/processed/l1_rent/daily_l1_rent_decomposition.csv` found `129` dates where daily summed panel rent differs from decomposition total, with `max_abs_diff=2.9148600184379916 ETH` on `2022-05-11`.
+- 2026-04-11: `make gate` also fails upstream at `review_bundle_integrity` because completed tasks `T049` and `T052` declare `data/processed/l1_rent/daily_rollup_rent_components.csv`, but that file is missing in this worktree. The current validation reports still cite that missing component surface in their provenance, so the requested release outputs would rely on inconsistent validated inputs.
+- 2026-04-11: @human unblock needed: provide a coherence-clean, reviewable canonical artifact bundle for W6 consumption, including a restored `data/processed/l1_rent/daily_rollup_rent_components.csv` and a panel/decomposition pair that agrees at the locked tolerance, or explicitly direct T060 to consume a different validated as-of surface.
+- 2026-04-11: @human Runtime blocked: gates_failed, missing_outputs, task_marked_blocked. Run manifest: reports/status/swarm_runs/T060_20260411T113419Z.json. outputs=src/analysis/build_str_release_outputs.py=missing_file; reports/figures/str_ecosystem_timeseries.svg=missing_file; reports/figures/str_post_dencun_regimes.svg=missing_file; reports/tables/str_regime_summary.csv=missing_file; reports/tables/str_regime_summary.md=missing_file

@@ -1,0 +1,105 @@
+{
+  "artifacts": {
+    "missing_manifests": [],
+    "missing_outputs": [
+      {
+        "output": "src/analysis/build_str_release_outputs.py",
+        "reason": "missing_file"
+      },
+      {
+        "output": "reports/figures/str_ecosystem_timeseries.svg",
+        "reason": "missing_file"
+      },
+      {
+        "output": "reports/figures/str_post_dencun_regimes.svg",
+        "reason": "missing_file"
+      },
+      {
+        "output": "reports/tables/str_regime_summary.csv",
+        "reason": "missing_file"
+      },
+      {
+        "output": "reports/tables/str_regime_summary.md",
+        "reason": "missing_file"
+      }
+    ],
+    "outputs_ok": false,
+    "required_manifests_ok": true,
+    "run_manifest_path": "reports/status/swarm_runs/T060_20260411T113419Z.json"
+  },
+  "commands": {
+    "executor": [
+      "/Users/aeziz-local/.nvm/versions/node/v20.19.0/bin/codex",
+      "-a",
+      "never",
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "-C",
+      "/Users/aeziz-local/Research/wt-T060",
+      "# Prompt Template \u2014 Worker\n\nRole: **Worker**\n\nYou execute exactly one assigned task in an isolated branch/worktree.\n\n## Instructions\n\n1. Read and follow `AGENTS.md` and any nested `AGENTS.md` under your working directory.\n2. Open the assigned task file and obey its `allowed_paths`, `disallowed_paths`, declared outputs, gates, and stop conditions.\n3. Do not coordinate with other agents through chat. Use:\n   - the task file `## Notes / Decisions`\n   - a handoff note under `.orchestrator/handoff/` when downstream tasks need durable guidance\n4. Update only the task file sections:\n   - `## Status`\n   - `## Notes / Decisions`\n   Do not move task files between lifecycle folders.\n5. You may set `State: integration_ready` or `State: ready_for_review` when the task contract permits it. You may never set `State: done`.\n6. Do not edit `reports/catalog.yaml`, `reports/paper/build/`, or release manifests. Those are Operator-owned surfaces.\n7. If the run is not using the local swarm runtime, hand the exact commands, outputs, and assumptions to Operator so a durable run manifest can be recorded before review.\n\n## Completion checklist\n\n- Run the declared gates and task-specific commands.\n- Ensure declared outputs exist at the declared paths.\n- Record reproduction commands, assumptions, and limitations in the task notes.\n- Write a handoff note if downstream work depends on your output.\n\n## Runtime context (auto-filled)\n\n- Repo root: `/Users/aeziz-local/Research/wt-T060`\n- Task path: `.orchestrator/backlog/T060_analysis_str_figures_and_tables.md`\n- Task id: `T060`\n- Workstream: `W6`\n- Task kind: `analysis`\n- Network enabled: `false`\n- Repair context: ``\n\n### Allowed paths\n\n- src/analysis/build_str_release_outputs.py\n- reports/figures/str_ecosystem_timeseries.svg\n- reports/figures/str_post_dencun_regimes.svg\n- reports/tables/str_regime_summary.csv\n- reports/tables/str_regime_summary.md\n\n### Disallowed paths\n\n- docs/protocol.md\n- contracts/\n- src/etl/\n- src/analysis/metrics_str.py\n- data/raw/\n- reports/catalog.yaml\n\n### Declared outputs\n\n- src/analysis/build_str_release_outputs.py\n- reports/figures/str_ecosystem_timeseries.svg\n- reports/figures/str_post_dencun_regimes.svg\n- reports/tables/str_regime_summary.csv\n- reports/tables/str_regime_summary.md\n\n### Gates\n\n- make gate\n\n### Stop conditions\n\n- Validated inputs are missing or failing\n- Need to change metric definitions\n"
+    ],
+    "executor_log_path": "data/tmp/swarm_logs/T060_20260411T113419Z_executor.log",
+    "gates": [
+      "make gate"
+    ]
+  },
+  "executor": {
+    "allow_network": false,
+    "error": null,
+    "model": null,
+    "repair_context": null,
+    "returncode": 0,
+    "role": "Worker",
+    "runner": "local_swarm",
+    "sandbox": "workspace-write",
+    "tool": "codex"
+  },
+  "gates": [
+    {
+      "command": "make gate",
+      "output_tail": "python scripts/quality_gates.py\n[framework_contract] ok=True details={'project_mode': 'empirical', 'failures': []}\n[repo_structure] ok=True details={'project_mode': 'empirical', 'registry_enabled': True, 'missing': [], 'deferred_paths': ['reports/paper/', 'reports/status/']}\n[project_contract] ok=True details={'mode': 'empirical'}\n[protocol_complete] ok=True details={'failures': []}\n[workstreams_complete] ok=True details={'failures': []}\n[task_hygiene] ok=True details={'failures': []}\n[task_dependencies] ok=True details={'failures': []}\n[integration_ready_policy] ok=True details={'failures': []}\n[operator_surface_ownership] ok=True details={'failures': []}\n[raw_manifest_validity] ok=True details={'count': 6, 'failures': []}\n[processed_manifest_validity] ok=True details={'count': 10, 'failures': []}\n[swarm_run_manifest_validity] ok=True details={'count': 27, 'failures': []}\n[judge_review_log_validity] ok=True details={'count': 18, 'failures': []}\n[review_bundle_integrity] ok=False details={'failures': ['.orchestrator/done/T049_emit_rollup_day_rent_components_for_auditability.md:missing_outputs:data/processed/l1_rent/daily_rollup_rent_components.csv=missing_file', '.orchestrator/done/T052_repair_starknet_shared_sharp_allocation_in_canonical_etl.md:missing_outputs:data/processed/l1_rent/daily_rollup_rent_components.csv=missing_file']}\nmake: *** [gate] Error 1\n",
+      "returncode": 2
+    }
+  ],
+  "generated_at_utc": "2026-04-11T11:36:43Z",
+  "ownership": {
+    "changed_paths": [
+      ".orchestrator/backlog/T060_analysis_str_figures_and_tables.md",
+      ".orchestrator/handoff/H060_release_analysis_blocked_on_upstream_canonical_integrity.md"
+    ],
+    "ok": true,
+    "violations": []
+  },
+  "repo": {
+    "base_branch": "main",
+    "branch": "T060_analysis_str_figures_and_tables",
+    "git_sha": "55dc87491c8645231be06721e88cdbe00ecf7607",
+    "remote": "origin"
+  },
+  "result": {
+    "blocked_reasons": [
+      "gates_failed",
+      "missing_outputs",
+      "task_marked_blocked"
+    ],
+    "status": "blocked"
+  },
+  "run_id": "T060_20260411T113419Z",
+  "schema_version": "research_swarm.runtime_run_manifest.v1",
+  "task": {
+    "dependencies": [
+      "T040",
+      "T050"
+    ],
+    "integration_ready_dependencies": [],
+    "role": "Worker",
+    "state_after": "blocked",
+    "state_before": "backlog",
+    "task_id": "T060",
+    "task_kind": "analysis",
+    "task_path": ".orchestrator/backlog/T060_analysis_str_figures_and_tables.md",
+    "title": "Analysis: release STR figures and tables from validated artifacts",
+    "workstream": "W6"
+  }
+}
