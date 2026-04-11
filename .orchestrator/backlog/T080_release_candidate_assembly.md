@@ -98,11 +98,10 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 - `quarto render reports/paper/index.qmd`
 
 ## Status
-
-- State: backlog
+- State: active
 - Last updated: 2026-04-11
-
 ## Notes / Decisions
 
 - 2026-03-29: New v1 Operator task added to make catalog compilation, paper build, and release manifest assembly first-class release work.
 - 2026-04-11: Operator repaired the stale release-assembly gate contract. `scripts/release_assembly.py` now accepts a backward-compatible `--as-of` alias, and the task/runbook/framework references were aligned to the canonical `--release-date` form. Operational blocker cleared; task returned to backlog for normal execution.
+- 2026-04-11: Claimed by local swarm runtime on branch T080_release_candidate.
