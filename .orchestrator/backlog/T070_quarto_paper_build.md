@@ -89,15 +89,16 @@ The paper is a first-class release surface. This task owns manuscript source onl
 - `quarto render reports/paper/index.qmd --to html`
 
 ## Status
-- State: active
+- State: ready_for_review
 - Last updated: 2026-04-11
 ## Notes / Decisions
 
 - 2026-03-29: New v1 task added so Quarto manuscript source is part of the core battle-test path instead of a placeholder.
-- 2026-04-11: Claimed by local swarm runtime on branch main.
+- 2026-04-11: Claimed by local swarm runtime on branch `T070_quarto_paper_build` (base branch `main`).
 - 2026-04-11: Rewrote `reports/paper/index.qmd` from the earlier methods placeholder into a results-forward working paper tied to the validated `2026-04-09` bundle. The manuscript now includes the required question, data/protocol, validation, results, and provenance/limitations sections; links figures from `../figures/`; and includes the locked regime table from `../tables/str_regime_summary.md`.
 - 2026-04-11: Updated `reports/paper/_quarto.yml` to keep the locked `build/` output directory while targeting the downstream release basenames `l2_l1_rent_working_paper.html` and `l2_l1_rent_working_paper.pdf`. Refreshed `reports/paper/references.bib` to cite the protocol, project contract, validation bundle, release figures/table, and the W6 caveat note used in manuscript prose.
-- 2026-04-11: Reproduction commands run in this worktree: `env HOME=/tmp/t070_home quarto render /tmp/t070_quarto_check/reports/paper/index.qmd --to html`; `make gate`.
-- 2026-04-11: Outcome summary: the draft Quarto render succeeded in a `/tmp/t070_quarto_check/` mirror and produced `/tmp/t070_quarto_check/reports/paper/build/l2_l1_rent_working_paper.html`; `make gate` passed. The temp mirror preserved the same relative `reports/paper`, `reports/figures`, and `reports/tables` layout as the repo so include paths and the locked basename were exercised without writing to the Operator-owned `reports/paper/build/` surface.
-- 2026-04-11: This run did not use the local swarm runtime, so no durable `reports/status/swarm_runs/` manifest was generated here. `State` remains `active` pending an Operator/local-swarm run record and the exact in-repo render on the T080 release surface. Downstream handoff: `.orchestrator/handoff/H070_paper_source_handoff_2026-04-11.md`.
-- 2026-04-11: Runtime completed without promotion; preserving worker state active. Run manifest: reports/status/swarm_runs/T070_20260411T150935Z.json
+- 2026-04-11: Reproduction commands re-verified in this worktree: `make gate`; `tmpdir="$(mktemp -d /tmp/t070_quarto_check.XXXXXX)"`; `homedir="$(mktemp -d /tmp/t070_home.XXXXXX)"`; `cp -R reports "$tmpdir/"`; `env HOME="$homedir" quarto render "$tmpdir/reports/paper/index.qmd" --to html`.
+- 2026-04-11: Outcome summary: `make gate` passed; the draft Quarto render succeeded in a `/tmp` mirror and produced `/tmp/t070_quarto_check.UwoqfM/reports/paper/build/l2_l1_rent_working_paper.html`. The temp mirror preserved the same relative `reports/paper`, `reports/figures`, and `reports/tables` layout as the repo so include paths and the locked basename were exercised without writing to the Operator-owned `reports/paper/build/` surface.
+- 2026-04-11: Durable local-swarm run manifest already exists at `reports/status/swarm_runs/T070_20260411T150935Z.json`. This repair pass only re-verified the existing paper-source outputs and corrected the runtime notes; final in-repo paper build artifacts remain T080/Operator-owned.
+- 2026-04-11: Remaining caveats and downstream guidance are captured in superseding handoff note `.orchestrator/handoff/H070_paper_source_handoff_2026-04-11_reverify.md`.
+- 2026-04-11: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T070_20260411T153246Z.json
