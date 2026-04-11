@@ -98,7 +98,7 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 - `quarto render reports/paper/index.qmd`
 
 ## Status
-- State: ready_for_review
+- State: blocked
 - Last updated: 2026-04-11
 ## Notes / Decisions
 
@@ -110,3 +110,4 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 - 2026-04-11: Rendered the paper with `env HOME=<tmp-home> quarto render reports/paper/`, wrote `reports/paper/build/render_manifest.json`, and wrote `reports/status/releases/release_2026-04-11.json` plus the synchronized `reports/catalog.yaml`. Rendering the project directory, not `reports/paper/index.qmd`, was required to honor `_quarto.yml` `output-dir: build` and land the canonical HTML/PDF outputs under `reports/paper/build/`.
 - 2026-04-11: Validation summary: `python scripts/release_assembly.py --release-date 2026-04-11 --check` passed and `make gate` passed after the release artifacts were materialized.
 - 2026-04-11: Additional repo-wide verification: `make test` passed (`35` tests) after the release-control repairs and T080 output materialization.
+- 2026-04-11: @human Judge returned task; review log: reports/status/reviews/T080_20260411T161415Z.json; failures: gates_failed
