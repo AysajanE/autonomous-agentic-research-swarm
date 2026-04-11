@@ -37,7 +37,7 @@ outputs:
   - "reports/status/releases/release_YYYY-MM-DD.json"
 gates:
   - "make gate"
-  - "python scripts/release_assembly.py --release-date YYYY-MM-DD --check"
+  - "python scripts/release_assembly.py --release-date 2026-04-11 --check"
 stop_conditions:
   - "Successful producing run manifests are missing"
   - "Quarto render fails"
@@ -79,7 +79,7 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 ## Success Criteria
 
 - [ ] `reports/catalog.yaml` is compiled from successful run manifests and released artifacts, not hand-edited as task prose
-- [ ] `python scripts/release_assembly.py --release-date YYYY-MM-DD --check` succeeds
+- [ ] `python scripts/release_assembly.py --release-date 2026-04-11 --check` succeeds
 - [ ] `quarto render reports/paper/index.qmd` emits the locked HTML, PDF, and render manifest outputs
 - [ ] The release manifest references exact raw manifests, processed manifests, validation artifacts, figures, tables, paper outputs, compiled catalog, and git SHA
 - [ ] The task is handed to Judge at `ready_for_review`; Operator does not mark it `done`
@@ -94,11 +94,11 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 ## Validation / Commands
 
 - `make gate`
-- `python scripts/release_assembly.py --release-date YYYY-MM-DD --check`
+- `python scripts/release_assembly.py --release-date 2026-04-11 --check`
 - `quarto render reports/paper/index.qmd`
 
 ## Status
-- State: blocked
+- State: ready_for_review
 - Last updated: 2026-04-11
 ## Notes / Decisions
 
@@ -112,4 +112,5 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 - 2026-04-11: Additional repo-wide verification: `make test` passed (`35` tests) after the release-control repairs and T080 output materialization.
 - 2026-04-11: @human Judge returned task; review log: reports/status/reviews/T080_20260411T161415Z.json; failures: gates_failed
 - 2026-04-11: Root cause of the Judge return was release snapshot drift, not missing outputs: Operator updated `reports/status/swarm_runs/T080_20260411T161258Z.json` after the prior `release_2026-04-11.json` write, so `python scripts/release_assembly.py --check` correctly reported the release manifest SHA/bytes for the T080 run manifest as stale and `reports/catalog.yaml` as out of sync. Repair path: rewrite the release manifest/catalog from the current review bundle, rerun the declared gates, and resubmit to Judge.
+- 2026-04-11: Final Judge blocker root cause: the task frontmatter still declared `python scripts/release_assembly.py --release-date YYYY-MM-DD --check`. Judge executes task gates verbatim, so this placeholder command deterministically failed with `invalid_release_date:YYYY-MM-DD` even though the synchronized concrete-date check succeeded. Repair path: lock the task gate and validation command to `2026-04-11`, rerun the declared gates, and resubmit to Judge.
 - 2026-04-11: @human Judge returned task; review log: reports/status/reviews/T080_20260411T161524Z.json; failures: gates_failed
