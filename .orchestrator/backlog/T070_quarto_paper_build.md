@@ -89,10 +89,9 @@ The paper is a first-class release surface. This task owns manuscript source onl
 - `quarto render reports/paper/index.qmd --to html`
 
 ## Status
-
-- State: backlog
-- Last updated: 2026-03-29
-
+- State: active
+- Last updated: 2026-04-11
 ## Notes / Decisions
 
 - 2026-03-29: New v1 task added so Quarto manuscript source is part of the core battle-test path instead of a placeholder.
+- 2026-04-11: Claimed by local swarm runtime on branch main.
