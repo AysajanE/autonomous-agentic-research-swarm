@@ -276,6 +276,11 @@
         "bytes": 773,
         "path": "reports/status/reviews/T070_20260411T153559Z.json",
         "sha256": "cf414eca99c2bc3a5fb7ccf01592849f8dae0f1039ceab49ef9172b0a5197abf"
+      },
+      {
+        "bytes": 924,
+        "path": "reports/status/reviews/T080_20260411T161415Z.json",
+        "sha256": "4c455db73cf9402523e197eff5b4c7776ed8238d35ded57b26be64345531aa93"
       }
     ],
     "runtime_runs": [
@@ -435,9 +440,9 @@
         "sha256": "2a722d6d1216389df20751dd926e70f8f3b7d5eca146ede4a9d2a0ef440b6ccd"
       },
       {
-        "bytes": 3221,
+        "bytes": 3767,
         "path": "reports/status/swarm_runs/T080_20260411T161258Z.json",
-        "sha256": "ba371e0a035683942b88f56ecbe92a6e223e125a54dba238813729bb297787ce"
+        "sha256": "81954fe528e7f402a092b264abb6249c04dcf55426038cd3025412daa2dbcbc1"
       }
     ],
     "tables": [
@@ -496,12 +501,12 @@
     "raw_manifests": 6,
     "ready_for_review_tasks": 1,
     "registry": 1,
-    "runtime_reviews": 20,
+    "runtime_reviews": 21,
     "runtime_runs": 32,
     "tables": 2,
     "validation": 6
   },
-  "generated_at_utc": "2026-04-11T16:13:10Z",
+  "generated_at_utc": "2026-04-11T16:15:05Z",
   "lifecycle": {
     "allowed_states": [
       "backlog",
@@ -553,7 +558,7 @@
       },
       "judge_review_log_validity": {
         "details": {
-          "count": 20,
+          "count": 21,
           "failures": []
         },
         "ok": true
@@ -639,7 +644,7 @@
   "release_id": "release_2026-04-11",
   "repo": {
     "catalog_path": "reports/catalog.yaml",
-    "git_sha": "6e7ba225588497dee39b8221faad0f4ef3729dea",
+    "git_sha": "12d5b279e9176e6f289ff69c00c0facffe247479",
     "project_mode": "empirical",
     "release_manifest_path": "reports/status/releases/release_2026-04-11.json"
   },
