@@ -1,0 +1,29 @@
+{
+  "checks": {
+    "failures": [
+      "gates_failed"
+    ],
+    "gates_ok": false,
+    "outputs_ok": true,
+    "required_manifests_ok": true,
+    "review_bundle_ok": true
+  },
+  "decision": {
+    "note": "Operator repaired the prior release-snapshot drift and reran the declared gates on the synchronized review bundle. Judge returned task with failures: gates_failed.",
+    "outcome": "block"
+  },
+  "generated_at_utc": "2026-04-11T16:15:24Z",
+  "review_id": "T080_20260411T161524Z",
+  "reviewer": {
+    "role": "Judge"
+  },
+  "schema_version": "research_swarm.judge_review_log.v1",
+  "task": {
+    "role": "Operator",
+    "run_manifest_path": "reports/status/swarm_runs/T080_20260411T161258Z.json",
+    "state_after": "blocked",
+    "state_before": "ready_for_review",
+    "task_id": "T080",
+    "task_path": ".orchestrator/ready_for_review/T080_release_candidate_assembly.md"
+  }
+}

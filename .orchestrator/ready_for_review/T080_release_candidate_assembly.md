@@ -98,7 +98,7 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 - `quarto render reports/paper/index.qmd`
 
 ## Status
-- State: ready_for_review
+- State: blocked
 - Last updated: 2026-04-11
 ## Notes / Decisions
 
@@ -112,3 +112,4 @@ This is the Operator-owned final assembly task. It compiles the catalog from suc
 - 2026-04-11: Additional repo-wide verification: `make test` passed (`35` tests) after the release-control repairs and T080 output materialization.
 - 2026-04-11: @human Judge returned task; review log: reports/status/reviews/T080_20260411T161415Z.json; failures: gates_failed
 - 2026-04-11: Root cause of the Judge return was release snapshot drift, not missing outputs: Operator updated `reports/status/swarm_runs/T080_20260411T161258Z.json` after the prior `release_2026-04-11.json` write, so `python scripts/release_assembly.py --check` correctly reported the release manifest SHA/bytes for the T080 run manifest as stale and `reports/catalog.yaml` as out of sync. Repair path: rewrite the release manifest/catalog from the current review bundle, rerun the declared gates, and resubmit to Judge.
+- 2026-04-11: @human Judge returned task; review log: reports/status/reviews/T080_20260411T161524Z.json; failures: gates_failed
