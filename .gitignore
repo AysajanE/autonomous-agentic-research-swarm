@@ -107,6 +107,7 @@ data/processed/growthepie/*
 !data/processed/l1_rent/
 data/processed/l1_rent/*
 !data/processed/l1_rent/daily_l1_rent_decomposition.csv
+!data/processed/l1_rent/daily_rollup_rent_components.csv
 !data/processed/panels/
 data/processed/panels/*
 !data/processed/panels/daily_rollup_panel.csv

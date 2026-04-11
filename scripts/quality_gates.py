@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 from typing import Any
 
@@ -163,6 +164,43 @@ def _path_matches_prefix(value: str, prefix: str) -> bool:
     if norm_value == norm_prefix.rstrip("/"):
         return True
     return norm_value.startswith(norm_prefix)
+
+
+def _git_path_is_ignored(path: str, repo: Path) -> bool:
+    if not _repo_has_git_worktree(repo):
+        return False
+    cp = subprocess.run(
+        ["git", "check-ignore", "-q", "--", path],
+        cwd=str(repo),
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return cp.returncode == 0
+
+
+def _git_path_is_tracked(path: str, repo: Path) -> bool:
+    if not _repo_has_git_worktree(repo):
+        return True
+    cp = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", path],
+        cwd=str(repo),
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return cp.returncode == 0
+
+
+def _repo_has_git_worktree(repo: Path) -> bool:
+    cp = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(repo),
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return cp.returncode == 0
 
 
 def _coerce_bool(value: object, default: bool = False) -> bool:
@@ -667,6 +705,26 @@ def _check_review_bundle_outputs_exist(task: Task, repo: Path = Path(".")) -> tu
         if not _output_is_manifest_backed_local_etl_output(task, failure["output"])
     ]
     return len(retained_failures) == 0, retained_failures
+
+
+def _check_repo_materialized_processed_outputs(task: Task, repo: Path = Path(".")) -> list[str]:
+    failures: list[str] = []
+    for output in task.outputs:
+        if not _path_matches_prefix(output, "data/processed/"):
+            continue
+        safe, _ = _output_spec_is_safe(output)
+        if not safe or _guess_output_kind(output) != "file":
+            continue
+        for path in _find_paths_matching_output_spec(output, repo):
+            if not path.is_file():
+                continue
+            relpath = path.relative_to(repo).as_posix()
+            if _git_path_is_ignored(relpath, repo):
+                failures.append(f"{relpath}:git_ignored")
+                continue
+            if not _git_path_is_tracked(relpath, repo):
+                failures.append(f"{relpath}:not_tracked")
+    return failures
 
 
 def _task_requires_manifest(task: Task, prefix: str) -> bool:
@@ -1370,6 +1428,9 @@ def gate_review_bundle_integrity() -> GateResult:
                 f"{task.path}:missing_outputs:"
                 + ";".join(f"{item['output']}={item['reason']}" for item in output_failures)
             )
+
+        for reason in _check_repo_materialized_processed_outputs(task, repo):
+            failures.append(f"{task.path}:repo_materialization_failure:{reason}")
 
         for reason in required_manifest_failures(task, repo):
             failures.append(f"{task.path}:required_manifest_failure:{reason}")
