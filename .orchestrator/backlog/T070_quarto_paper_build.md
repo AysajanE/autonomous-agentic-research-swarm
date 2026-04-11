@@ -89,7 +89,7 @@ The paper is a first-class release surface. This task owns manuscript source onl
 - `quarto render reports/paper/index.qmd --to html`
 
 ## Status
-- State: ready_for_review
+- State: done
 - Last updated: 2026-04-11
 ## Notes / Decisions
 
@@ -102,3 +102,4 @@ The paper is a first-class release surface. This task owns manuscript source onl
 - 2026-04-11: Durable local-swarm run manifest already exists at `reports/status/swarm_runs/T070_20260411T150935Z.json`. This repair pass only re-verified the existing paper-source outputs and corrected the runtime notes; final in-repo paper build artifacts remain T080/Operator-owned.
 - 2026-04-11: Remaining caveats and downstream guidance are captured in superseding handoff note `.orchestrator/handoff/H070_paper_source_handoff_2026-04-11_reverify.md`.
 - 2026-04-11: Runtime passed: outputs, gates, manifests, and run manifest are present. Ready for Judge review. Run manifest: reports/status/swarm_runs/T070_20260411T153246Z.json
+- 2026-04-11: Judge approved; review log: reports/status/reviews/T070_20260411T153559Z.json
