@@ -94,7 +94,7 @@ This task turns validated empirical artifacts into the minimum release analysis 
 - `python src/analysis/build_str_release_outputs.py --as-of YYYY-MM-DD`
 
 ## Status
-- State: blocked
+- State: active
 - Last updated: 2026-04-11
 ## Notes / Decisions
 
@@ -104,3 +104,5 @@ This task turns validated empirical artifacts into the minimum release analysis 
 - 2026-04-11: `make gate` also fails upstream at `review_bundle_integrity` because completed tasks `T049` and `T052` declare `data/processed/l1_rent/daily_rollup_rent_components.csv`, but that file is missing in this worktree. The current validation reports still cite that missing component surface in their provenance, so the requested release outputs would rely on inconsistent validated inputs.
 - 2026-04-11: @human unblock needed: provide a coherence-clean, reviewable canonical artifact bundle for W6 consumption, including a restored `data/processed/l1_rent/daily_rollup_rent_components.csv` and a panel/decomposition pair that agrees at the locked tolerance, or explicitly direct T060 to consume a different validated as-of surface.
 - 2026-04-11: @human Runtime blocked: gates_failed, missing_outputs, task_marked_blocked. Run manifest: reports/status/swarm_runs/T060_20260411T113419Z.json. outputs=src/analysis/build_str_release_outputs.py=missing_file; reports/figures/str_ecosystem_timeseries.svg=missing_file; reports/figures/str_post_dencun_regimes.svg=missing_file; reports/tables/str_regime_summary.csv=missing_file; reports/tables/str_regime_summary.md=missing_file
+- 2026-04-11: Operator root-cause review supersedes the earlier blocker rationale. The true upstream blocker was repo materialization: `data/processed/l1_rent/daily_rollup_rent_components.csv` matched its tracked `2026-04-09` processed manifest locally but remained git-ignored and therefore disappeared in fresh worktrees. That file is now tracked on `main`, and `scripts/quality_gates.py` now hard-fails review bundles when declared `data/processed/` file outputs are git-ignored or untracked in a real git worktree.
+- 2026-04-11: Resume T060 using the repaired W2/W5 contract: `daily_rollup_panel.csv` is vendor-keyed by protocol when both `l2_fees_eth` and `rent_paid_eth` exist, `daily_rollup_rent_components.csv` may be a strict superset of panel keys, and the locked internal coherence check is component daily totals versus `daily_l1_rent_decomposition.csv`, not panel daily totals versus decomposition.
