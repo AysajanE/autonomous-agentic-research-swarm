@@ -6,27 +6,30 @@ import unittest
 
 EXPECTED_SECTIONS = [
     "## Abstract",
-    "## Research Question And Metric Lock",
-    "## Data And Provenance Contracts",
-    "## Agentic Runtime And Review Semantics",
-    "## Release-Ready Paper Surface",
-    "## Scope Limits For This Release Candidate",
-    "## From Repository Workflow To Finished Paper",
-    "## Conclusion",
+    "## Research Question",
+    "## Data And Protocol",
+    "## Validation",
+    "## Results",
+    "## Provenance And Limitations",
 ]
 
 EXPECTED_BIB_KEYS = [
     "@misc{protocol_lock,",
-    "@misc{data_dictionary_contract,",
-    "@misc{decision_log_contract,",
-    "@misc{registry_rollup_v1,",
-    "@misc{raw_manifest_readme,",
-    "@misc{processed_manifest_readme,",
-    "@misc{validation_readme,",
-    "@misc{validation_manifests_readme,",
-    "@misc{figures_readme,",
-    "@misc{tables_readme,",
+    "@misc{project_contract,",
+    "@misc{rollup_panel_validation,",
+    "@misc{l1_rent_decomposition_validation,",
+    "@misc{cross_source_reconciliation,",
+    "@misc{str_ecosystem_timeseries,",
+    "@misc{str_post_dencun_regimes,",
+    "@misc{str_regime_summary,",
+    "@misc{release_output_caveats,",
 ]
+
+CANONICAL_PAPER_BUILD_ARTIFACTS = {
+    "l2_l1_rent_working_paper.html",
+    "l2_l1_rent_working_paper.pdf",
+    "render_manifest.json",
+}
 
 
 class PaperSurfaceIntegrityTest(unittest.TestCase):
@@ -44,7 +47,6 @@ class PaperSurfaceIntegrityTest(unittest.TestCase):
             "reports/paper/index.qmd",
             "reports/paper/references.bib",
             "reports/paper/build/README.md",
-            "reports/paper/build/index.html",
         ]
         for relpath in required:
             with self.subTest(relpath=relpath):
@@ -53,41 +55,36 @@ class PaperSurfaceIntegrityTest(unittest.TestCase):
     def test_paper_readme_documents_render_and_release_workflow(self) -> None:
         text = self.read("reports/paper/README.md")
         self.assertIn("quarto render reports/paper/", text)
-        self.assertIn("reports/paper/build/index.html", text)
+        self.assertIn("reports/paper/build/l2_l1_rent_working_paper.html", text)
+        self.assertIn("reports/paper/build/l2_l1_rent_working_paper.pdf", text)
+        self.assertIn("reports/paper/build/render_manifest.json", text)
         self.assertIn("pending_stage2", text)
         self.assertIn("present", text)
 
-    def test_quarto_project_targets_self_contained_build_surface(self) -> None:
+    def test_quarto_project_targets_release_candidate_build_surface(self) -> None:
         text = self.read("reports/paper/_quarto.yml")
         self.assertIn("output-dir: build", text)
         self.assertIn("render:", text)
         self.assertIn("- index.qmd", text)
         self.assertIn("bibliography: references.bib", text)
         self.assertIn("embed-resources: true", text)
+        self.assertIn("output-file: l2_l1_rent_working_paper.html", text)
+        self.assertIn("output-file: l2_l1_rent_working_paper.pdf", text)
 
-    def test_manuscript_contains_locked_sections_and_core_terms(self) -> None:
+    def test_manuscript_contains_required_sections_and_release_links(self) -> None:
         text = self.read("reports/paper/index.qmd")
         for heading in EXPECTED_SECTIONS:
             with self.subTest(heading=heading):
                 self.assertIn(heading, text)
 
         expected_terms = [
-            "STR_t = (Σ_i RentPaid_{i,t}) / (Σ_i L2Fees_{i,t})",
-            "Planner",
-            "Worker",
-            "Judge",
-            "Operator",
-            "`backlog`",
-            "`active`",
-            "`integration_ready`",
-            "`ready_for_review`",
-            "`blocked`",
-            "`done`",
-            "`reports/paper/build/index.html`",
-            "`reports/catalog.yaml`",
-            "`paper.status = pending_stage2`",
-            "`paper.status = present`",
-            "methods-and-release paper rather than a results-forward paper",
+            "STR_t = (sum_i RentPaid_{i,t}) / (sum_i L2Fees_{i,t})",
+            "../figures/str_ecosystem_timeseries.svg",
+            "../figures/str_post_dencun_regimes.svg",
+            "../tables/str_regime_summary.md",
+            "`2026-04-09`",
+            "`2024-03-13`",
+            "Operator-owned T080 surfaces",
         ]
         for needle in expected_terms:
             with self.subTest(needle=needle):
@@ -99,35 +96,28 @@ class PaperSurfaceIntegrityTest(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIn(key, text)
 
-    def test_build_namespace_is_clean_and_contains_single_html_artifact(self) -> None:
+    def test_build_readme_documents_operator_owned_release_surface(self) -> None:
+        text = self.read("reports/paper/build/README.md")
+        self.assertIn("l2_l1_rent_working_paper.html", text)
+        self.assertIn("l2_l1_rent_working_paper.pdf", text)
+        self.assertIn("render_manifest.json", text)
+        self.assertIn("pending_stage2", text)
+        self.assertIn("index.html", text)
+
+    def test_build_namespace_contains_only_canonical_release_artifacts(self) -> None:
         build_root = self.repo_root / "reports" / "paper" / "build"
         files = sorted(
             path.relative_to(build_root).as_posix()
             for path in build_root.rglob("*")
             if path.is_file()
         )
-        self.assertEqual(files, ["README.md", "index.html"])
-
-    def test_rendered_html_contains_expected_release_candidate_content(self) -> None:
-        text = self.read("reports/paper/build/index.html")
-        normalized_text = " ".join(text.split())
-        expected_terms = [
-            "Measuring Settlement Take Rate for Ethereum Rollups",
-            "Protocol, provenance, and a release-complete working paper surface",
-            "STR_t = (Σ_i RentPaid_{i,t}) / (Σ_i L2Fees_{i,t})",
-            "Planner",
-            "Worker",
-            "Judge",
-            "Operator",
-            "reports/paper/build/index.html",
-            "reports/catalog.yaml",
-            "pending_stage2",
-            "present",
-            "methods-and-release paper rather than a results-forward paper",
-        ]
-        for needle in expected_terms:
-            with self.subTest(needle=needle):
-                self.assertIn(needle, normalized_text)
+        self.assertNotIn("index.html", files)
+        for filename in files:
+            with self.subTest(filename=filename):
+                self.assertIn(
+                    filename,
+                    {"README.md", *CANONICAL_PAPER_BUILD_ARTIFACTS},
+                )
 
 
 if __name__ == "__main__":

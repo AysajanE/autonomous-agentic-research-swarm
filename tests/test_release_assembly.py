@@ -37,7 +37,12 @@ def load_release_assembly_module():
 release_assembly = load_release_assembly_module()
 
 
-def scaffold_release_ready_repo(root: Path, *, include_paper: bool = False) -> None:
+def scaffold_release_ready_repo(
+    root: Path,
+    *,
+    include_paper: bool = False,
+    include_legacy_paper: bool = False,
+) -> None:
     scaffold_runtime_repo(root, mode="empirical")
 
     write_text(
@@ -99,7 +104,29 @@ def scaffold_release_ready_repo(root: Path, *, include_paper: bool = False) -> N
     write_text(root, "reports/tables/str.csv", "date_utc,str\n2026-03-29,0.42\n")
 
     if include_paper:
-        write_text(root, "reports/paper/build/index.html", "<html>paper</html>\n")
+        write_text(
+            root,
+            "reports/paper/build/l2_l1_rent_working_paper.html",
+            "<html>paper</html>\n",
+        )
+        write_text(
+            root,
+            "reports/paper/build/l2_l1_rent_working_paper.pdf",
+            "%PDF-1.4\n",
+        )
+        write_json(
+            root,
+            "reports/paper/build/render_manifest.json",
+            {
+                "entrypoint": "reports/paper/index.qmd",
+                "outputs": [
+                    "reports/paper/build/l2_l1_rent_working_paper.html",
+                    "reports/paper/build/l2_l1_rent_working_paper.pdf",
+                ],
+            },
+        )
+    if include_legacy_paper:
+        write_text(root, "reports/paper/build/index.html", "<html>legacy</html>\n")
 
     task_path = write_task(
         root,
@@ -190,14 +217,32 @@ class ReleaseAssemblyTest(unittest.TestCase):
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
 
             self.assertEqual(payload["artifacts"]["paper"]["status"], "present")
-            self.assertEqual(payload["counts"]["paper_artifacts"], 1)
+            self.assertEqual(payload["counts"]["paper_artifacts"], 3)
             self.assertEqual(
-                payload["artifacts"]["paper"]["artifacts"][0]["path"],
-                "reports/paper/build/index.html",
+                [artifact["path"] for artifact in payload["artifacts"]["paper"]["artifacts"]],
+                [
+                    "reports/paper/build/l2_l1_rent_working_paper.html",
+                    "reports/paper/build/l2_l1_rent_working_paper.pdf",
+                    "reports/paper/build/render_manifest.json",
+                ],
             )
 
             catalog_text = (root / "reports" / "catalog.yaml").read_text(encoding="utf-8")
             self.assertIn('paper_status: "present"', catalog_text)
+
+    def test_legacy_index_html_does_not_mark_paper_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_release_ready_repo(root, include_legacy_paper=True)
+
+            release_assembly.write_release(root, date(2026, 3, 31))
+
+            manifest_path = root / "reports" / "status" / "releases" / "release_2026-03-31.json"
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(payload["artifacts"]["paper"]["status"], "pending_stage2")
+            self.assertEqual(payload["counts"]["paper_artifacts"], 0)
+            self.assertEqual(payload["artifacts"]["paper"]["artifacts"], [])
 
 
 if __name__ == "__main__":

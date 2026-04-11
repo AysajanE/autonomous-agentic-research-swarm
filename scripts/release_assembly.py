@@ -9,9 +9,14 @@ release-relevant state into:
 - reports/status/releases/release_<YYYY-MM-DD>.json
 - reports/catalog.yaml
 
-Paper sources/builds remain reserved for continuation Stage 2. When
-reports/paper/build/ is absent or empty, the release manifest records
-paper.status = "pending_stage2" instead of inventing manuscript artifacts.
+The canonical release-candidate paper surface is the Operator-owned T080 build:
+
+- reports/paper/build/l2_l1_rent_working_paper.html
+- reports/paper/build/l2_l1_rent_working_paper.pdf
+- reports/paper/build/render_manifest.json
+
+Until those three files exist together, the release manifest records
+paper.status = "pending_stage2".
 """
 
 from __future__ import annotations
@@ -39,6 +44,11 @@ CANONICAL_RELEASE_MANIFEST_PATTERN = "reports/status/releases/release_<YYYY-MM-D
 RELEASE_NAMESPACE = Path("reports/status/releases")
 CATALOG_PATH = Path("reports/catalog.yaml")
 PAPER_BUILD_NAMESPACE = "reports/paper/build/"
+CANONICAL_PAPER_BUILD_REL_PATHS = (
+    "reports/paper/build/l2_l1_rent_working_paper.html",
+    "reports/paper/build/l2_l1_rent_working_paper.pdf",
+    "reports/paper/build/render_manifest.json",
+)
 RELEASE_MANIFEST_FILENAME_RE = re.compile(r"^release_(\d{4}-\d{2}-\d{2})\.json$")
 
 ALL_STAGE4_GATE_NAMES = (
@@ -407,10 +417,12 @@ def assemble_release_manifest(
     validation = _collect_dir_artifacts(repo_root, "reports/validation")
     figures = _collect_dir_artifacts(repo_root, "reports/figures")
     tables = _collect_dir_artifacts(repo_root, "reports/tables")
-    paper_artifacts = _collect_dir_artifacts(repo_root, PAPER_BUILD_NAMESPACE.rstrip("/"))
+    paper_artifacts, missing_paper_artifacts = _collect_explicit_artifacts(
+        repo_root, CANONICAL_PAPER_BUILD_REL_PATHS
+    )
 
     task_status = _collect_task_status(repo_root)
-    paper_status = "present" if paper_artifacts else "pending_stage2"
+    paper_status = "present" if not missing_paper_artifacts else "pending_stage2"
 
     missing_required_inputs = sorted(missing_contracts + missing_registry)
     notes: list[str] = []
@@ -426,7 +438,8 @@ def assemble_release_manifest(
         )
     if paper_status == "pending_stage2":
         notes.append(
-            "Paper build outputs remain reserved for continuation Stage 2."
+            "Canonical paper build outputs are missing: "
+            + ", ".join(sorted(missing_paper_artifacts))
         )
     if task_status["state_counts"].get("ready_for_review", 0) > 0:
         notes.append(

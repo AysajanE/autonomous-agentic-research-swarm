@@ -1,32 +1,29 @@
 # `reports/paper/`
 
-Quarto-backed manuscript sources and durable rendered outputs for the repository's current L2-to-L1 rent analysis project.
+Quarto-backed manuscript sources for the repository's L2-to-L1 rent paper plus
+the Operator-owned release build namespace that T080 materializes.
 
 ## Scope and ownership
 
-This directory is the Stage 2 continuation-owned paper layer.
+`reports/paper/` is downstream of the locked protocol, contracts, and validated
+release artifacts.
 
-It sits downstream of the locked:
+- T070 owns manuscript source only:
+  - `reports/paper/_quarto.yml`
+  - `reports/paper/index.qmd`
+  - `reports/paper/references.bib`
+- T080 owns the tracked release-candidate build namespace under
+  `reports/paper/build/`.
 
-- protocol and contract surfaces
-- runtime and review semantics
-- Stage 1 continuation release/catalog layer
-
-Do not use paper work to reopen:
-
-- Stage 1 diagnosis
-- Stage 2 architecture
-- Stage 3 foundations
-- Stage 4 runtime/gate semantics
-- Stage 1 continuation release assembly, catalog, or release-status behavior
+Do not use paper work to reopen protocol definitions, registry scope, runtime
+semantics, or release-catalog policy.
 
 ## Files
 
-- `_quarto.yml` — Quarto project configuration for the paper surface
-- `index.qmd` — manuscript source
+- `_quarto.yml` — Quarto project configuration for the release-candidate paper
+- `index.qmd` — manuscript source tied to the validated release bundle
 - `references.bib` — repo-local bibliography entries used by the manuscript
-- `build/index.html` — durable self-contained HTML render
-- `build/README.md` — build namespace policy and expected durable outputs
+- `build/README.md` — build namespace policy and canonical T080 outputs
 
 ## Render workflow
 
@@ -34,33 +31,30 @@ From the repository root, render the paper with:
 
 `quarto render reports/paper/`
 
-Expected durable output for v1:
+The canonical T080 build outputs are:
 
-- `reports/paper/build/index.html`
-
-## Build namespace policy
-
-Treat `reports/paper/build/` as a tracked durable artifact surface, not as scratch space.
-
-For v1, keep the namespace clean:
-
-- `README.md`
-- `index.html`
-
-The locked Stage 1 release layer hashes every non-README artifact under `reports/paper/build/`, so transient side files should not be committed there.
+- `reports/paper/build/l2_l1_rent_working_paper.html`
+- `reports/paper/build/l2_l1_rent_working_paper.pdf`
+- `reports/paper/build/render_manifest.json`
 
 ## Writing rules
 
-- Keep scientific definitions aligned with `docs/protocol.md`, `contracts/data_dictionary.md`, and `contracts/decisions.md`.
-- Do not introduce figures or tables that are not backed by durable artifacts under `reports/figures/` or `reports/tables/`.
-- If the repository still lacks populated result artifacts, keep the manuscript honest: describe the protocol, provenance, runtime, and release surface without inventing unattested empirical estimates.
-- Treat the manuscript as downstream of the repo's contracts-first workflow rather than as a place to redefine metric semantics.
+- Keep scientific definitions aligned with `docs/protocol.md`,
+  `contracts/data_dictionary.md`, and `contracts/decisions.md`.
+- Do not introduce figures or tables that are not backed by durable artifacts
+  under `reports/figures/` or `reports/tables/`.
+- Treat the manuscript as downstream of the repo's contracts-first workflow
+  rather than as a place to redefine metric semantics.
+- Keep source/release boundaries explicit: T070 writes source, T080 writes
+  rendered build artifacts and release surfaces.
 
 ## Release integration
 
-The locked Stage 1 release layer already defines paper status semantics:
+`scripts/release_assembly.py` keeps the historical paper-status vocabulary:
 
-- `pending_stage2` when `reports/paper/build/` has no non-README artifacts
-- `present` when the build namespace contains durable render artifacts
+- `pending_stage2` until all three canonical T080 build outputs exist
+- `present` once the HTML, PDF, and `render_manifest.json` are all materialized
 
-This packet materializes `reports/paper/build/index.html`, so follow-on release previews and release writes should report `paper.status = present` without changing any Stage 1 release semantics.
+Legacy draft artifacts such as `reports/paper/build/index.html` are not part of
+the canonical release-candidate contract and should not be used to claim
+`paper.status = present`.
