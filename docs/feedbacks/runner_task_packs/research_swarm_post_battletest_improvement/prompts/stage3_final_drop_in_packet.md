@@ -20,6 +20,11 @@ Non-negotiable rules:
 - Every changed file must be emitted as a drop-in patch.
 - Every removed surface must be listed explicitly.
 - The validation table in this stage specifies the acceptance checks to run after applying the packet. Do not claim that any check was executed in this stage.
+- If the required concise approved handoff markdown is missing from the stage-two review bundle, treat that as a blocking review-bundle defect. State the defect explicitly in section 1. For sections 2 through 9, do not reopen architecture from raw stage-two artifacts alone; emit only the minimum blocked-form content needed to satisfy the required structure:
+  - for required tables, emit the required header and one row with `BLOCKED` in the first column and `N/A` in remaining columns
+  - for freeform sections, write `Blocked by missing approved downstream handoff markdown.`
+- In blocked mode, section 1 must contain one blocking paragraph followed by the required section-1 table header and one `BLOCKED | N/A | N/A | N/A` row.
+- When blocked-form output is triggered, the blocked-form instructions override any section-specific formatting or field rules below.
 - Do not leave TODOs, placeholders, or unresolved text inside final file contents or final patches.
 
 Return these sections in this exact order:

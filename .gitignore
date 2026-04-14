@@ -122,3 +122,11 @@ data/processed/panels/*
 
 # Internal documents
 docs/feedbacks/
+!docs/feedbacks/
+docs/feedbacks/*
+!docs/feedbacks/runner_task_packs/
+docs/feedbacks/runner_task_packs/*
+!docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/
+docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/*
+!docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/review_templates/
+!docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/review_templates/*.md

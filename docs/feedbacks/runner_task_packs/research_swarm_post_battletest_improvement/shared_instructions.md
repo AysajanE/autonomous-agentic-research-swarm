@@ -100,6 +100,7 @@ Among attached materials, follow this authority order:
 Before finalizing any stage, verify:
 
 - grounding: important current-state claims are backed by attached repo files
+- review_bundle_integrity: the required concise approved downstream handoff exists and is being used as the primary reviewed synthesis for this stage
 - requirement fidelity: the result follows the corpus files and approved handoffs without adding unstated requirements
 - generality: the redesign still makes sense across empirical, modeling, and hybrid work
 - stage discipline: the stage did not step into a later stage’s job

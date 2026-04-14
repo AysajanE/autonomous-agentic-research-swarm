@@ -188,9 +188,12 @@ python3 "/Users/aeziz-local/staged-workflow-runner/automation/run_responses_v2.p
 - Keep stage review manual and explicit.
 - Use `--skip-token-count` for live runs unless token preflight is known to be reliable again.
 - Stage 1 may consult external sources, but Stages 2 and 3 should stay fully local.
+- If stage 1 completed before the current handoff requirements were introduced, rebuild the stage-1 review bundle using the current required handoff template before launching stage 2. Apply the same rule to any preexisting stage-2 review bundle before launching stage 3.
 - When preparing the stage-1 or stage-2 review bundle, include the concise reviewed handoff markdown. Do not launch stage 2 or stage 3 on raw prior-stage artifacts alone when a reviewed handoff is required.
+- The required reviewed handoff for stages 2 and 3 is supplied dynamically through workflow `carry_forward`, so the static stage-2 and stage-3 manifests intentionally keep `reviewed_handoff_inputs: []`.
 - Stage 2 is intentionally authority-shaped: direct framework control surfaces stay attached at higher priority, while supporting examples and current-instance evidence remain available as lower-priority reference context.
 - Stage-2 review should reject any approved inventory that cannot fit the current stage-3 packet budget. In this runner, `gpt-5.4-pro` is capped at `128000` `max_output_tokens`.
+- Packet-budget-fit review should explicitly check the touched file count, whether any large runtime or test file is being fully recreated, whether multiple large patch blocks are expected, and whether early-locked exact files remain minimal.
 - In stages 2 and 3, validation tables are specified later checks, not claims that the checks were executed during packet design.
 - The final stage output is the packet the team should be able to apply directly without reinterpretation.
 - No sidecar output is required for this pack.

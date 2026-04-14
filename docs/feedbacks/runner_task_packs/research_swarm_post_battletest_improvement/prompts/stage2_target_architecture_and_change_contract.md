@@ -37,6 +37,10 @@ Non-negotiable rules:
 - Do not emit patch blocks, diff hunks, or a near-final implementation packet in this stage.
 - Stage 2 must not emit the full final package.
 - The validation matrix in this stage specifies the approved red/green baseline to run later. Do not claim that any check was executed in this stage.
+- If the required concise approved handoff markdown is missing from the stage-one review bundle, treat that as a blocking review-bundle defect. State the defect explicitly in section 1. For sections 2 through 8, do not infer reopened architecture from raw prior-stage artifacts alone; emit only the minimum blocked-form content needed to satisfy the required structure:
+  - for required tables, emit the required header and one row with `BLOCKED` in the first column and `N/A` in remaining columns
+  - for freeform sections, write `Blocked by missing approved downstream handoff markdown.`
+- When blocked-form output is triggered, the blocked-form instructions override any section-specific formatting or field rules below.
 - The final packet mode is locked:
   - `create` files end as full file contents in stage 3
   - `update` files end as drop-in patches in stage 3
@@ -53,6 +57,8 @@ State:
 - how the redesign stays general across empirical, modeling, and hybrid work in one paragraph
 - the exact stage-2/stage-3 boundary in one paragraph
 
+In blocked mode, section 1 must be a blocking summary only and must not infer or restate approved architecture.
+
 ## 2. Decision-To-Architecture Derivation
 
 Use this exact table:
@@ -64,9 +70,10 @@ Rules:
 - `decision_id` must be a stable short id such as `D01`, `D02`, and so on.
 - Normalize the approved handoff into the smallest stable set of decision IDs. Merge overlapping wording variants instead of proliferating near-duplicate rows.
 - Every row must come from the approved stage-one handoff, reviewer notes, or a directly necessary repo-grounded architectural consequence of those approved decisions.
+- If a row is using the preserved-no-change guardrail exception, start `locked_decision` with `[guardrail]`.
 - `repo_surfaces_required` must name exact repo-relative paths or clearly delimited path groups.
 - `validation_consequence` must explain what must become testable because of that decision.
-- Every `decision_id` in section 2 must map to at least one inventory row and at least one validation consequence, unless the row explicitly states that it is a preserved-no-change guardrail.
+- Every `decision_id` in section 2 must appear in at least one section-3 inventory row and at least one section-6 validation row, unless `locked_decision` explicitly starts with `[guardrail]` to mark a preserved-no-change guardrail.
 - This section is the controlling derivation chain for the rest of the stage-two output.
 
 ## 3. Exact File Inventory
