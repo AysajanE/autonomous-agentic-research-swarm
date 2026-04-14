@@ -3,7 +3,7 @@
   "manifest_id": "research_swarm_post_battletest_improvement.stage3",
   "workflow_id": "research_swarm_post_battletest_improvement",
   "stage_id": "final_drop_in_packet",
-  "description": "Stage 3 is the final hardening corpus. It keeps the same likely change-target surfaces as stage 2 so the final packet can patch real current files, including the runtime/review/release contract layer and its validation tests, but it stays fully local and depends on the approved stage-two review bundle for the authoritative architecture and file contract. Ad-hoc local operator workflow notes remain excluded here for the same reason they are excluded in stage 2: the final packet should harden the official framework surfaces, not preserve interim local workarounds. The current project contract remains reference-only here unless the approved stage-two inventory explicitly included it. Historical battle-test artifacts remain excluded here because the final stage should emit the packet, not re-diagnose the repo.",
+  "description": "Stage 3 is the final hardening corpus. It keeps the same direct architecture-control surfaces at attached authority as stage 2 so the final packet can patch real current files, including the runtime/review/release contract layer and its validation tests, but it stays fully local and depends on the approved stage-two review bundle for the authoritative architecture and file contract. Previously demoted coherence surfaces remain reference-only here unless the stage-two review explicitly reopened them. Ad-hoc local operator workflow notes remain excluded here for the same reason they are excluded in stage 2: the final packet should harden the official framework surfaces, not preserve interim local workarounds. The current project contract remains reference-only here unless the approved stage-two inventory explicitly included it. Historical battle-test artifacts remain excluded here because the final stage should emit the packet, not re-diagnose the repo.",
   "primary_job_inputs": [
     {
       "path": "docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/corpus/mission_brief.md",
@@ -119,21 +119,6 @@
       "notes": "hybrid interface contract surface"
     },
     {
-      "path": "contracts/instances/README.md",
-      "kind": "file",
-      "notes": "instance-manifest contract surface for modeling work"
-    },
-    {
-      "path": "contracts/experiments/README.md",
-      "kind": "file",
-      "notes": "experiment-spec contract surface for modeling work"
-    },
-    {
-      "path": "contracts/experiments/exp_001.yaml",
-      "kind": "file",
-      "notes": "current experiment template for modeling work"
-    },
-    {
       "path": "docs/runbook_swarm.md",
       "kind": "file",
       "notes": "manual swarm runbook"
@@ -184,21 +169,6 @@
       "notes": "projection-sweep implementation"
     },
     {
-      "path": "src/model/README.md",
-      "kind": "file",
-      "notes": "modeling code-surface guidance"
-    },
-    {
-      "path": "src/model/AGENTS.md",
-      "kind": "file",
-      "notes": "modeling execution rules"
-    },
-    {
-      "path": "tests/README.md",
-      "kind": "file",
-      "notes": "test-discipline surface"
-    },
-    {
       "path": "tests/runtime_test_utils.py",
       "kind": "file",
       "notes": "runtime-test harness and scaffold utilities"
@@ -244,6 +214,71 @@
       "path": "contracts/project.yaml",
       "kind": "file",
       "notes": "current empirical instance contract; reference-only unless the approved stage-two inventory explicitly included it"
+    },
+    {
+      "path": "docs/protocol.md",
+      "kind": "file",
+      "notes": "reference-only scientific-program and protocol-definition surface for coherence checks across empirical work"
+    },
+    {
+      "path": "contracts/decisions.md",
+      "kind": "file",
+      "notes": "reference-only decision-log surface that helps keep framework wording coherent without reopening historical decisions by default"
+    },
+    {
+      "path": "contracts/data_dictionary.md",
+      "kind": "file",
+      "notes": "reference-only data-definition surface for empirical coherence checks"
+    },
+    {
+      "path": ".orchestrator/templates/examples/README.md",
+      "kind": "file",
+      "notes": "reference-only example-template index so final packet changes do not leave the example scaffold misleading"
+    },
+    {
+      "path": ".orchestrator/templates/examples/T100_example_w1_etl_task.md",
+      "kind": "file",
+      "notes": "reference-only ETL example task for example-coherence checks"
+    },
+    {
+      "path": ".orchestrator/templates/examples/T110_example_w3_registry_task.md",
+      "kind": "file",
+      "notes": "reference-only registry example task for example-coherence checks"
+    },
+    {
+      "path": ".orchestrator/templates/examples/T120_example_w5_validation_task.md",
+      "kind": "file",
+      "notes": "reference-only validation example task for example-coherence checks"
+    },
+    {
+      "path": "contracts/instances/README.md",
+      "kind": "file",
+      "notes": "reference-only instance-manifest contract surface; do not re-elevate unless stage-two review explicitly reopened it"
+    },
+    {
+      "path": "contracts/experiments/README.md",
+      "kind": "file",
+      "notes": "reference-only experiment-spec contract surface; do not re-elevate unless stage-two review explicitly reopened it"
+    },
+    {
+      "path": "contracts/experiments/exp_001.yaml",
+      "kind": "file",
+      "notes": "reference-only modeling experiment example so examples remain visible without widening default rewrite scope"
+    },
+    {
+      "path": "src/model/README.md",
+      "kind": "file",
+      "notes": "reference-only modeling code-surface guidance for cross-mode coherence"
+    },
+    {
+      "path": "src/model/AGENTS.md",
+      "kind": "file",
+      "notes": "reference-only modeling execution guidance for cross-mode coherence"
+    },
+    {
+      "path": "tests/README.md",
+      "kind": "file",
+      "notes": "reference-only test-discipline guidance below the executable semantics tests"
     }
   ]
 }

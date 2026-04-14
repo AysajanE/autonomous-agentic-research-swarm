@@ -22,6 +22,8 @@ Produce a final drop-in improvement packet that makes the framework stronger for
 - modeling research
 - hybrid research
 
+Framework improvements should land as enforceable changes across contracts, prompts, runtime behavior, and tests as needed, not as prose-only recommendations.
+
 ## Preserve These Current Strengths
 
 - repo as shared memory

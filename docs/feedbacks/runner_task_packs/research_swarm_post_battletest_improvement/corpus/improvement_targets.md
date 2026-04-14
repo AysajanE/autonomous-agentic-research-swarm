@@ -27,6 +27,7 @@ This improvement round should address the following framework-wide targets.
 7. Analysis and writing should be treated as real scientific programs, not as thin release wrappers.
 8. The framework should stay general across empirical, modeling, and hybrid work rather than drifting toward the current empirical reference instance.
 9. Contract and documentation drift should be harder to create and easier to detect.
+10. Each approved improvement must become enforceable through the smallest coherent combination of contract, prompt, runtime, and test changes.
 
 ## Generality Requirement
 

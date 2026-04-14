@@ -20,18 +20,20 @@ For every **changed file** in the final package:
 
 - provide a clear drop-in patch
 - the patch must be specific to the current attached file state
+- the patch must be detailed enough to pass a normal patch-application check against the current attached file basis
 - the patch must be sufficient for verbatim application without hidden interpretation
 
 For every **removed surface**:
 
 - list the exact path
 - state the reason for removal
+- include every collateral consistency repair needed elsewhere in the packet to keep the result internally coherent
 
 ## Final Packet Quality Bar
 
 - minimum-change file set
 - internally consistent across docs, contracts, prompts, runtime code, and tests
-- explicit red/green validation checks
+- explicit red/green validation checks as acceptance checks to run after applying the packet, not as claims of execution in this stage
 - explicit human-pause or escalation conditions where truly required
 - no hidden design work deferred after the final stage
 
@@ -40,3 +42,4 @@ For every **removed surface**:
 The final packet format is a locked requirement.
 
 Earlier stages may diagnose and lock architecture or file contracts, but only the final stage may emit the complete package.
+The final stage may not add file paths outside the approved stage-two inventory unless explicit review authority reopened the file set.

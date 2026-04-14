@@ -32,7 +32,10 @@ Among attached materials, follow this authority order:
 </attachment_authority_order>
 
 <review_bundle_precedence>
-- When an approved review bundle includes both a prior-stage artifact and reviewer notes / locked decisions, treat the reviewer notes and locked decisions as controlling wherever they narrow, exclude, or correct the prior-stage artifact.
+- Every approved review bundle that advances work to a later stage must include concise approved downstream handoff markdown.
+- When an approved review bundle includes concise approved downstream handoff markdown, treat that handoff as the primary reviewed synthesis for the next stage.
+- When an approved review bundle includes a downstream handoff, a prior-stage artifact, and reviewer notes / locked decisions, treat the reviewer notes and locked decisions as controlling wherever they narrow, exclude, or correct either the handoff or the prior-stage artifact.
+- Use the raw prior-stage artifact as detail and evidence only where the approved handoff and reviewer notes do not already settle the downstream requirement.
 - Do not treat a cited file from a prior-stage artifact as re-approved input when the reviewer notes explicitly excluded it from downstream authority.
 </review_bundle_precedence>
 
@@ -65,9 +68,11 @@ Among attached materials, follow this authority order:
 
 <shared_stage_rules>
 - Every stage must stay inside its own responsibility boundary.
+- Every review-required stage that feeds a later stage must have a concise approved downstream handoff markdown; later stages should not rely on raw prior-stage artifacts alone when a reviewed handoff is expected.
 - Stage 1 diagnoses and locks evidence-backed redesign decisions. It may name change domains, but it must not lock the exact final file inventory or emit implementation files.
 - Stage 2 converts the approved diagnosis into one exact target architecture and one exact file-level change contract. It must lock the exact file inventory, the per-file obligations, and the validation baseline. It may emit only the smallest necessary subset of boundary-locking full file contents, and it must not emit patch blocks or a near-final implementation packet.
 - Stage 3 emits the final drop-in packet. It must preserve the approved Stage-2 inventory, per-file contracts, and validation baseline unless the Stage-2 review explicitly reopens them.
+- Later stages may not elevate a reference-only file to attached-authority rewrite scope unless explicit review authority reopened that surface.
 - Stage 3 must emit:
   - every new file as full contents
   - every changed file as a drop-in patch
@@ -86,6 +91,7 @@ Among attached materials, follow this authority order:
 - Return exactly the sections requested, in the requested order.
 - If the prompt requires exact tables, use those exact headers.
 - If the prompt requires file blocks or patch blocks, emit only the requested forms.
+- For no-tools stages, validation sections specify checks to run later and must not be written as executed results.
 - Do not place TODOs, placeholders, or unresolved text inside final file contents or final patches.
 - Keep the writing concise but not thin; every required decision must be explicit enough for the next stage to use without guesswork.
 </output_contract>
