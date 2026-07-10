@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import datetime as dt
 import json
 from pathlib import Path
 import re
@@ -31,7 +32,8 @@ from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 
 SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
 SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
-JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v1"
+JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
+JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1 = "research_swarm.judge_review_log.v1"
 
 DEFAULT_ALLOWED_STATES = (
     "backlog",
@@ -834,17 +836,28 @@ def _validate_judge_review_log(path: Path, contract: FrameworkContract) -> list[
         )
     )
 
-    if payload.get("schema_version") != JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version not in {
+        JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1,
+        JUDGE_REVIEW_LOG_SCHEMA_VERSION,
+    }:
         failures.append(f"{path}:invalid_schema_version:{payload.get('schema_version')}")
 
     reviewer = payload.get("reviewer")
+    reviewer_keys = {"role"}
+    if schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+        reviewer_keys.update({"session_id", "recorded_at_utc"})
     failures.extend(
         f"{path}:{failure}"
-        for failure in _validate_required_keys(reviewer, {"role"}, "reviewer")
+        for failure in _validate_required_keys(reviewer, reviewer_keys, "reviewer")
     )
     if isinstance(reviewer, dict):
         if reviewer.get("role") != contract.scientific_review_role:
             failures.append(f"{path}:invalid_reviewer_role:{reviewer.get('role')}")
+        if schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+            session_id = reviewer.get("session_id")
+            if not isinstance(session_id, str) or not session_id.strip():
+                failures.append(f"{path}:invalid_reviewer_session_id")
 
     task = payload.get("task")
     failures.extend(
@@ -1368,6 +1381,67 @@ def gate_judge_review_log_validity() -> GateResult:
     return GateResult(ok=len(failures) == 0, details={"count": len(review_paths), "failures": failures})
 
 
+def _parse_utc_iso(value: object) -> dt.datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _review_min_separation_seconds(repo: Path) -> int:
+    framework_path = repo / "contracts" / "framework.json"
+    try:
+        payload = json.loads(framework_path.read_text(encoding="utf-8"))
+        return int(payload["review_bundle"]["min_separation_seconds"])
+    except Exception:
+        return 60
+
+
+def _review_log_actor_separation_failures(review_path: Path, repo: Path) -> list[str]:
+    """§4.0 #17: a v2 review log is invalid if written by the same actor session
+    as the run manifest it reviews, or inside the minimum separation window."""
+    payload, error = _load_json_file(review_path)
+    if error is not None or payload is None:
+        return []
+    if payload.get("schema_version") != JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+        return []
+
+    reviewer = payload.get("reviewer") if isinstance(payload.get("reviewer"), dict) else {}
+    task_block = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+    manifest_rel = task_block.get("run_manifest_path")
+    if not isinstance(manifest_rel, str) or not manifest_rel:
+        return []
+    manifest_payload, manifest_error = _load_json_file(repo / manifest_rel)
+    if manifest_error is not None or manifest_payload is None:
+        return []
+    if manifest_payload.get("schema_version") != SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+        return []
+
+    failures: list[str] = []
+    actor = manifest_payload.get("actor") if isinstance(manifest_payload.get("actor"), dict) else {}
+    run_session = actor.get("session_id")
+    review_session = reviewer.get("session_id")
+    if (
+        isinstance(run_session, str)
+        and run_session.strip()
+        and run_session == review_session
+    ):
+        failures.append(f"actor_separation_same_session:{review_path.name}")
+
+    run_time = _parse_utc_iso(manifest_payload.get("generated_at_utc"))
+    review_time = _parse_utc_iso(payload.get("generated_at_utc"))
+    if run_time is not None and review_time is not None:
+        separation = (review_time - run_time).total_seconds()
+        minimum = _review_min_separation_seconds(repo)
+        if separation < minimum:
+            failures.append(
+                f"actor_separation_window:{review_path.name}:{int(separation)}s<{minimum}s"
+            )
+    return failures
+
+
 def gate_review_bundle_integrity() -> GateResult:
     try:
         contract = load_framework_contract()
@@ -1417,6 +1491,9 @@ def gate_review_bundle_integrity() -> GateResult:
                     f"{task.path}:"
                     + ("invalid_review_log" if matching_review_logs else "missing_review_log")
                 )
+            for review_path in valid_review_logs:
+                for reason in _review_log_actor_separation_failures(review_path, repo):
+                    failures.append(f"{task.path}:{reason}")
 
     return GateResult(ok=len(failures) == 0, details={"failures": failures})
 

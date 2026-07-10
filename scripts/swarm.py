@@ -40,6 +40,7 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 from typing import Any, Iterable
 
 
@@ -55,10 +56,16 @@ from swarm_taskfile import update_task_status_and_notes as _shared_update_task_s
 
 
 SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
-JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v1"
+JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
 
 EXECUTOR_LOG_MAX_BYTES = 128 * 1024
 EXECUTOR_LOG_SEGMENT_BYTES = 64 * 1024
+
+DEFAULT_REVIEW_MIN_SEPARATION_SECONDS = 60
+
+# One actor session id per process: a review written by the same session that
+# produced the run manifest it reviews is invalid (§4.0 #17 actor separation).
+_ACTOR_SESSION_ID = os.environ.get("SWARM_ACTOR_SESSION", "").strip() or uuid.uuid4().hex
 
 DEFAULT_ALLOWED_STATES = (
     "backlog",
@@ -136,6 +143,7 @@ class FrameworkContract:
     run_manifest_dir: Path
     judge_review_dir: Path
     release_manifest_pattern: str | None
+    review_min_separation_seconds: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -505,6 +513,14 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
         else None
     )
 
+    review_min_separation_raw = (
+        review_bundle.get("min_separation_seconds") if isinstance(review_bundle, dict) else None
+    )
+    try:
+        review_min_separation_seconds = int(review_min_separation_raw)
+    except (TypeError, ValueError):
+        review_min_separation_seconds = DEFAULT_REVIEW_MIN_SEPARATION_SECONDS
+
     return FrameworkContract(
         repo_root=repo,
         control_plane_root=control_plane_root,
@@ -523,6 +539,7 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
         run_manifest_dir=_resolve_repo_relative_path(repo, run_manifest_dir_raw),
         judge_review_dir=_resolve_repo_relative_path(repo, judge_review_dir_raw),
         release_manifest_pattern=release_manifest_pattern,
+        review_min_separation_seconds=review_min_separation_seconds,
     )
 
 
@@ -1056,9 +1073,37 @@ def _require_unattended_ack() -> None:
     raise SystemExit("missing_unattended_ack:SWARM_UNATTENDED_I_UNDERSTAND=1")
 
 
+def _local_base_ahead_count(*, repo: Path, remote: str, base_branch: str) -> int:
+    if not _git_ref_exists(repo, f"refs/heads/{base_branch}"):
+        return 0
+    cp = _run(
+        ["git", "rev-list", "--count", f"{remote}/{base_branch}..{base_branch}"],
+        cwd=repo,
+        capture=True,
+        check=False,
+    )
+    if cp.returncode != 0:
+        return 0
+    try:
+        return int((cp.stdout or "0").strip())
+    except ValueError:
+        return 0
+
+
 def _supervisor_sync_to_remote_base(*, repo: Path, remote: str, base_branch: str) -> None:
+    # Guarded sync (§4.0 #9): never discard local base commits with checkout -B.
+    # If the local base is ahead of the remote, refuse loudly and escalate.
     _run(["git", "fetch", remote], cwd=repo, check=True)
-    _run(["git", "checkout", "-B", base_branch, f"{remote}/{base_branch}"], cwd=repo, check=True)
+
+    ahead = _local_base_ahead_count(repo=repo, remote=remote, base_branch=base_branch)
+    if ahead > 0:
+        raise SystemExit(f"base_sync_refused_local_ahead:{base_branch}:{ahead}")
+
+    if _git_current_branch(repo) == base_branch:
+        _run(["git", "merge", "--ff-only", f"{remote}/{base_branch}"], cwd=repo, check=True)
+    else:
+        _run(["git", "branch", "-f", base_branch, f"{remote}/{base_branch}"], cwd=repo, check=True)
+        _run(["git", "checkout", base_branch], cwd=repo, check=True)
 
 
 def _git_diff_name_status_entries(cwd: Path, diff_args: list[str]) -> list[dict[str, str]]:
@@ -1407,6 +1452,146 @@ def _matching_v2_run_manifest_data(paths: list[Path], task_id: str) -> list[tupl
     return matches
 
 
+def _parse_utc_iso(value: object) -> dt.datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _git_commit_message(cwd: Path, ref: str) -> str:
+    cp = _run(["git", "log", "-1", "--pretty=%s", ref], cwd=cwd, capture=True, check=False)
+    return (cp.stdout or "").strip()
+
+
+def _git_commit_paths(cwd: Path, ref: str) -> list[str]:
+    cp = _run(
+        ["git", "show", "--name-only", "--pretty=format:", ref],
+        cwd=cwd,
+        capture=True,
+        check=False,
+    )
+    return [line.strip() for line in (cp.stdout or "").splitlines() if line.strip()]
+
+
+def _judge_manifest_integrity_failures(
+    *,
+    repo: Path,
+    task: Task,
+    manifest: dict[str, object],
+    contract: FrameworkContract,
+) -> list[str]:
+    """§4.0 #10 + #17: the branch tip must be exactly what the manifest attests,
+    and the review actor must be separated from the run actor."""
+    failures: list[str] = []
+
+    repo_block = manifest.get("repo") if isinstance(manifest.get("repo"), dict) else {}
+    manifest_branch = repo_block.get("branch")
+    manifest_sha = repo_block.get("git_sha")
+
+    current_branch = _git_current_branch(repo)
+    if isinstance(manifest_branch, str) and manifest_branch and manifest_branch != current_branch:
+        failures.append(f"manifest_branch_mismatch:{manifest_branch}:{current_branch}")
+
+    if not isinstance(manifest_sha, str) or not manifest_sha:
+        failures.append("manifest_missing_git_sha")
+    else:
+        is_ancestor = (
+            _run(
+                ["git", "merge-base", "--is-ancestor", manifest_sha, "HEAD"],
+                cwd=repo,
+                capture=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+        if not is_ancestor:
+            failures.append(f"manifest_sha_not_ancestor:{manifest_sha}")
+        else:
+            cp = _run(
+                ["git", "rev-list", f"{manifest_sha}..HEAD"],
+                cwd=repo,
+                capture=True,
+                check=False,
+            )
+            commits_after = [line.strip() for line in (cp.stdout or "").splitlines() if line.strip()]
+            if len(commits_after) > 1:
+                failures.append(f"post_manifest_commits:{len(commits_after)}")
+            elif len(commits_after) == 1:
+                run_commit = commits_after[0]
+                task_block = manifest.get("task") if isinstance(manifest.get("task"), dict) else {}
+                expected_message = f"{task.task_id}: {task_block.get('state_after')}"
+                if _git_commit_message(repo, run_commit) != expected_message:
+                    failures.append(f"post_manifest_commit_message:{run_commit[:12]}")
+                ownership_block = manifest.get("ownership") if isinstance(manifest.get("ownership"), dict) else {}
+                declared_changed = set(
+                    item for item in ownership_block.get("changed_paths", []) if isinstance(item, str)
+                )
+                commands_block = manifest.get("commands") if isinstance(manifest.get("commands"), dict) else {}
+                task_file_rel = task.path.relative_to(repo).as_posix()
+                control_plane = {task_file_rel}
+                control_plane.update(_task_projection_paths(task_file_rel))
+                for key in ("executor_log_path",):
+                    value = commands_block.get(key)
+                    if isinstance(value, str) and value:
+                        control_plane.add(value)
+                artifacts_block = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+                manifest_rel = artifacts_block.get("run_manifest_path")
+                if isinstance(manifest_rel, str) and manifest_rel:
+                    control_plane.add(manifest_rel)
+                for committed_path in _git_commit_paths(repo, run_commit):
+                    if committed_path in declared_changed or committed_path in control_plane:
+                        continue
+                    if committed_path.startswith(".orchestrator/handoff/"):
+                        continue
+                    failures.append(f"post_manifest_tamper:{committed_path}")
+
+    actor_block = manifest.get("actor") if isinstance(manifest.get("actor"), dict) else {}
+    run_session = actor_block.get("session_id")
+    if isinstance(run_session, str) and run_session and run_session == _ACTOR_SESSION_ID:
+        failures.append("actor_separation_same_session")
+
+    generated_at = _parse_utc_iso(manifest.get("generated_at_utc"))
+    if generated_at is not None:
+        elapsed = (dt.datetime.now(tz=dt.timezone.utc) - generated_at).total_seconds()
+        if elapsed < contract.review_min_separation_seconds:
+            failures.append(
+                f"actor_separation_window:{int(elapsed)}s<{contract.review_min_separation_seconds}s"
+            )
+
+    return failures
+
+
+def _judge_ownership_failures(
+    *,
+    repo: Path,
+    task: Task,
+    base_branch: str,
+    remote: str,
+) -> list[str]:
+    """§4.0 #10: re-run the same merge-base ownership/diff check run-task uses."""
+    base_ref = _resolve_base_ref_for_diff(cwd=repo, base_branch=base_branch, remote=remote)
+    if base_ref is None:
+        return [f"ownership_recheck_base_unresolved:{base_branch}"]
+
+    failures: list[str] = []
+    task_file_rel = task.path.relative_to(repo).as_posix()
+    path_sources, _ = _collect_changed_paths_with_sources(repo=repo, base_ref=base_ref)
+    for changed_path in sorted(path_sources):
+        ok, reason = _path_is_allowed(
+            path=changed_path,
+            allowed_paths=task.allowed_paths,
+            disallowed_paths=task.disallowed_paths,
+            task_file_path=task_file_rel,
+            task_id=task.task_id,
+        )
+        if not ok:
+            failures.append(f"ownership_violation:{changed_path}:{reason}")
+    return failures
+
+
 def _is_valid_review_log(path: Path, task_id: str, scientific_review_role: str) -> bool:
     try:
         data = json.loads(_read_text(path))
@@ -1419,7 +1604,7 @@ def _is_valid_review_log(path: Path, task_id: str, scientific_review_role: str) 
     reviewer = data.get("reviewer")
     task = data.get("task")
     decision = data.get("decision")
-    return (
+    if not (
         isinstance(reviewer, dict)
         and reviewer.get("role") == scientific_review_role
         and isinstance(task, dict)
@@ -1427,7 +1612,10 @@ def _is_valid_review_log(path: Path, task_id: str, scientific_review_role: str) 
         and isinstance(decision, dict)
         and decision.get("outcome") == "approve"
         and task.get("state_after") == "done"
-    )
+    ):
+        return False
+    session_id = reviewer.get("session_id")
+    return isinstance(session_id, str) and bool(session_id.strip())
 
 
 def _update_task_status_and_notes(*, task_path: Path, new_state: str, note_line: str) -> None:
@@ -1983,6 +2171,10 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         "run_id": run_id,
         "generated_at_utc": _utc_now_iso(),
         "provenance_class": "manual_operator" if args.skip_executor else "executor_run",
+        "actor": {
+            "session_id": _ACTOR_SESSION_ID,
+            "recorded_at_utc": _utc_now_iso(),
+        },
         "task": {
             "task_id": task.task_id,
             "task_path": task.path.relative_to(repo).as_posix(),
@@ -2209,17 +2401,43 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
         else:
             review_bundle_failures.append("missing_valid_run_manifest")
 
-    approved = gate_ok and outputs_ok and not manifest_failures and not review_bundle_failures
-    state_after = "done" if approved else args.on_fail
-
-    review_log_path = _next_json_artifact_path(contract.judge_review_dir, task.task_id, _utc_timestamp_compact())
-    review_log_relpath = review_log_path.relative_to(repo).as_posix()
     selected_run_manifest = (
         valid_run_manifests[-1]
         if valid_run_manifests
         else (matching_v2_manifests[-1][0] if matching_v2_manifests else None)
     )
     run_manifest_relpath = selected_run_manifest.relative_to(repo).as_posix() if selected_run_manifest else None
+
+    integrity_failures: list[str] = []
+    if valid_run_manifests:
+        selected_manifest_data = dict(matching_v2_manifests[-1][1]) if matching_v2_manifests else {}
+        for path, data in matching_v2_manifests:
+            if path == selected_run_manifest:
+                selected_manifest_data = data
+                break
+        integrity_failures.extend(
+            _judge_manifest_integrity_failures(
+                repo=repo,
+                task=task,
+                manifest=selected_manifest_data,
+                contract=contract,
+            )
+        )
+    integrity_failures.extend(
+        _judge_ownership_failures(
+            repo=repo,
+            task=task,
+            base_branch=args.base_branch,
+            remote=args.remote,
+        )
+    )
+    review_bundle_failures.extend(integrity_failures)
+
+    approved = gate_ok and outputs_ok and not manifest_failures and not review_bundle_failures
+    state_after = "done" if approved else args.on_fail
+
+    review_log_path = _next_json_artifact_path(contract.judge_review_dir, task.task_id, _utc_timestamp_compact())
+    review_log_relpath = review_log_path.relative_to(repo).as_posix()
 
     check_failures: list[str] = []
     if not gate_ok:
@@ -2242,7 +2460,10 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
         "generated_at_utc": _utc_now_iso(),
         "reviewer": {
             "role": contract.scientific_review_role,
+            "session_id": _ACTOR_SESSION_ID,
+            "recorded_at_utc": _utc_now_iso(),
         },
+        "operator_attestation": None,
         "task": {
             "task_id": task.task_id,
             "task_path": task.path.relative_to(repo).as_posix(),
@@ -2273,8 +2494,17 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
     _update_task_status_and_notes(task_path=task.path, new_state=state_after, note_line=task_note)
 
     if _git_has_changes(repo):
-        _run(["git", "add", "-A"], cwd=repo, check=True)
-        _git_commit(cwd=repo, message=f"{task.task_id}: {state_after}", strict=strict_sync)
+        # The Judge commits only its own control-plane artifacts; anything else
+        # in the tree (e.g. violations a run left uncommitted) stays uncommitted.
+        judge_paths = [review_log_relpath, task.path.relative_to(repo).as_posix()]
+        for judge_path in judge_paths:
+            _run(["git", "add", "--", judge_path], cwd=repo, check=True)
+        _git_commit(
+            cwd=repo,
+            message=f"{task.task_id}: {state_after}",
+            strict=strict_sync,
+            paths=judge_paths,
+        )
         _git_push(
             cwd=repo,
             remote=args.remote,

@@ -19,7 +19,22 @@ SWEEP_TASKS_PATH = REPO_ROOT / "scripts" / "sweep_tasks.py"
 
 SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
 SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
-JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v1"
+JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
+JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1 = "research_swarm.judge_review_log.v1"
+
+
+def _git_read_or_default(root: Path, args: list[str], default: str) -> str:
+    try:
+        cp = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        value = cp.stdout.strip()
+        return value or default
+    except Exception:
+        return default
 
 
 def _load_module(module_name: str, path: Path):
@@ -435,12 +450,22 @@ def write_run_manifest(
     provenance_class: str = "executor_run",
     result_status: str = "ok",
     schema_version: str = SWARM_RUN_MANIFEST_SCHEMA_VERSION,
+    branch: str | None = None,
+    git_sha: str | None = None,
+    actor_session_id: str = "fixture-worker-session",
+    generated_at_utc: str = "2026-03-29T00:00:00Z",
 ) -> Path:
+    if branch is None:
+        branch = _git_read_or_default(root, ["rev-parse", "--abbrev-ref", "HEAD"], f"{task_id}_branch")
+    if git_sha is None:
+        git_sha = _git_read_or_default(
+            root, ["rev-parse", "HEAD"], "0123456789abcdef0123456789abcdef01234567"
+        )
     rel = f"reports/status/swarm_runs/{task_id}_20260329T000000Z.json"
     payload = {
         "schema_version": schema_version,
         "run_id": f"{task_id}_20260329T000000Z",
-        "generated_at_utc": "2026-03-29T00:00:00Z",
+        "generated_at_utc": generated_at_utc,
         "task": {
             "task_id": task_id,
             "task_path": task_path,
@@ -454,8 +479,8 @@ def write_run_manifest(
             "state_after": state_after,
         },
         "repo": {
-            "branch": f"{task_id}_branch",
-            "git_sha": "0123456789abcdef0123456789abcdef01234567",
+            "branch": branch,
+            "git_sha": git_sha,
             "base_branch": "main",
             "remote": "origin",
         },
@@ -500,6 +525,10 @@ def write_run_manifest(
     }
     if schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION:
         payload["provenance_class"] = provenance_class
+        payload["actor"] = {
+            "session_id": actor_session_id,
+            "recorded_at_utc": "2026-03-29T00:00:00Z",
+        }
         payload["commands"]["executor_log_sha256"] = None
         payload["frontmatter"] = {
             "pinned_sha256": "0" * 64,
@@ -521,15 +550,20 @@ def write_review_log(
     state_before: str = "ready_for_review",
     state_after: str = "done",
     outcome: str = "approve",
+    schema_version: str = JUDGE_REVIEW_LOG_SCHEMA_VERSION,
+    reviewer_session_id: str = "fixture-judge-session",
+    generated_at_utc: str = "2026-03-29T01:00:00Z",
 ) -> Path:
     rel = f"reports/status/reviews/{task_id}_20260329T010000Z.json"
+    reviewer: dict[str, Any] = {"role": reviewer_role}
+    if schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+        reviewer["session_id"] = reviewer_session_id
+        reviewer["recorded_at_utc"] = generated_at_utc
     payload = {
-        "schema_version": JUDGE_REVIEW_LOG_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "review_id": f"{task_id}_20260329T010000Z",
-        "generated_at_utc": "2026-03-29T01:00:00Z",
-        "reviewer": {
-            "role": reviewer_role,
-        },
+        "generated_at_utc": generated_at_utc,
+        "reviewer": reviewer,
         "task": {
             "task_id": task_id,
             "task_path": task_path,
@@ -550,4 +584,6 @@ def write_review_log(
             "note": "review note",
         },
     }
+    if schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+        payload["operator_attestation"] = None
     return write_json(root, rel, payload)

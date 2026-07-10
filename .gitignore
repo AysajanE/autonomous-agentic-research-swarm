@@ -117,6 +117,8 @@ data/processed/panels/*
 
 # Logs / temp
 *.log
+# Durable executor logs are control-plane evidence (plan §4.0 #7), not temp files.
+!reports/status/swarm_runs/logs/*.log
 *.tmp
 .local/
 
