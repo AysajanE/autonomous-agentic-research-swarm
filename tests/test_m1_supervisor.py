@@ -466,6 +466,8 @@ class M1SupervisorTests(unittest.TestCase):
             )
             _git(worktree, "add", manifest_path.relative_to(worktree).as_posix())
             _git(worktree, "commit", "-m", f"{task_id}: stamp lease")
+
+            # renewals advance the SAME chain — still mergeable (not stale)
             renewed = swarm_claims.renew_lease(
                 root,
                 "origin",
@@ -475,10 +477,33 @@ class M1SupervisorTests(unittest.TestCase):
             )
             self.assertEqual(renewed.lease_id, 2)
 
+            # the REAL stale-lease attack: reap + reclaim = a NEW claim epoch
+            # (new commit root) — the old manifest must never merge under it
+            released = swarm_claims.release_claim(
+                root,
+                "origin",
+                task_id,
+                expected_sha=str(renewed.sha),
+                reason="test_reap",
+            )
+            self.assertTrue(released.ok)
+            reclaimed = swarm_claims.claim_task(
+                root,
+                "origin",
+                task_id,
+                session_id=swarm._ACTOR_SESSION_ID,
+                branch=f"{task_id}_task",
+            )
+            self.assertTrue(reclaimed.ok)
+            self.assertEqual(reclaimed.lease_id, 1)  # recycled number, new root
+
             with _fixture_root(root):
                 summary = swarm._step_merge(_supervise_args(worktrees))
 
-            self.assertEqual(summary["refused"], [{"task_id": task_id, "reason": "stale_lease"}])
+            self.assertEqual(
+                summary["refused"],
+                [{"task_id": task_id, "reason": "stale_lease_chain"}],
+            )
             self.assertIn("merge_refused_stale_lease", _event_names(root, task_id))
 
     def test_repair_retries_with_context_then_exhausts(self) -> None:

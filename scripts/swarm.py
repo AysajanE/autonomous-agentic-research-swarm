@@ -3260,6 +3260,12 @@ def _block_base_task(
 
 
 def _step_reap(args: argparse.Namespace) -> dict[str, object]:
+    """Reap expired leases STATE-AWARE (§4.1): only genuinely orphaned ACTIVE
+    work is reopened; a blocked task keeps its @human hold and an approved
+    task keeps its approval — their expired claims are released with the
+    state preserved. Reopen is written BEFORE the release so a crash between
+    the two converges on the next cycle (backlog + expired claim → release
+    only)."""
     repo = _repo_root()
     contract = load_framework_contract(repo)
     tasks, _ = load_tasks_quarantined(contract)
@@ -3271,41 +3277,17 @@ def _step_reap(args: argparse.Namespace) -> dict[str, object]:
     reopened: list[str] = []
     stale_done: list[str] = []
     released: list[str] = []
+    preserved: list[dict[str, str]] = []
+    candidates: list[str] = []
     filenames: list[str] = []
 
-    for task_id, claim in sorted(claims.items()):
-        task = tasks.get(task_id)
-        action = expired.get(task_id)
-        if task is not None and task.state == "done":
-            _record_swarm_event(
-                repo,
-                {
-                    "event": "orphan_stale_claim",
-                    "task_id": task_id,
-                    "lease_id": claim.lease_id,
-                },
-            )
-            result = swarm_claims.release_claim(
-                repo,
-                args.remote,
-                task_id,
-                expected_sha=claim.sha,
-                reason="done_task_stale_claim",
-                journal=lambda event: _record_swarm_event(repo, event),
-            )
-            if result.ok:
-                released.append(task_id)
-            stale_done.append(task_id)
-            continue
-        if action is None:
-            continue
-
+    def _release(task_id: str, sha: str, lease_id: object, reason: str) -> bool:
         result = swarm_claims.release_claim(
             repo,
             args.remote,
             task_id,
-            expected_sha=action.sha,
-            reason=action.reason,
+            expected_sha=sha,
+            reason=reason,
             journal=lambda event: _record_swarm_event(repo, event),
         )
         if not result.ok:
@@ -3314,13 +3296,65 @@ def _step_reap(args: argparse.Namespace) -> dict[str, object]:
                 {
                     "event": "reap_release_failed",
                     "task_id": task_id,
-                    "lease_id": action.lease_id,
+                    "lease_id": lease_id,
                     "reason": result.reason,
                 },
                 escalation=True,
             )
-            continue
+            return False
         released.append(task_id)
+        return True
+
+    for task_id, claim in sorted(claims.items()):
+        task = tasks.get(task_id)
+        action = expired.get(task_id)
+
+        if task is not None and task.state == "done":
+            _record_swarm_event(
+                repo,
+                {"event": "orphan_stale_claim", "task_id": task_id, "lease_id": claim.lease_id},
+            )
+            _release(task_id, claim.sha, claim.lease_id, "done_task_stale_claim")
+            stale_done.append(task_id)
+            continue
+
+        if action is None:
+            continue
+
+        if task is None or task.state == "backlog":
+            # nothing to reopen (missing task, or a prior crash already
+            # reopened it) — the expired ref is the only cleanup left
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "orphan_claim_released",
+                    "task_id": task_id,
+                    "lease_id": action.lease_id,
+                    "task_state": task.state if task is not None else None,
+                },
+            )
+            _release(task_id, action.sha, action.lease_id, action.reason)
+            continue
+
+        if task.state != "active":
+            # blocked keeps its @human hold; ready_for_review keeps its
+            # approval; integration_ready keeps its interface state — the
+            # lease is released, the scientific state is NEVER conflated
+            # with orphanhood (§4.1).
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "orphan_claim_released",
+                    "task_id": task_id,
+                    "lease_id": action.lease_id,
+                    "task_state": task.state,
+                },
+            )
+            _release(task_id, action.sha, action.lease_id, action.reason)
+            preserved.append({"task_id": task_id, "state": task.state})
+            continue
+
+        # active + expired lease = orphaned work: reopen FIRST, release second
         _record_swarm_event(
             repo,
             {
@@ -3330,8 +3364,6 @@ def _step_reap(args: argparse.Namespace) -> dict[str, object]:
                 "cause": action.reason,
             },
         )
-        if task is None:
-            continue
         filenames.append(task.path.name)
         _update_task_status_and_notes(
             task_path=task.path,
@@ -3340,6 +3372,40 @@ def _step_reap(args: argparse.Namespace) -> dict[str, object]:
                 f"orphaned: lease expired (lease {action.lease_id}); "
                 "reopened by supervisor"
             ),
+        )
+        reopened_task = load_task(task.path, contract)
+        _move_task_to_state_projection(repo, reopened_task)
+        reopened.append(task_id)
+        _release(task_id, action.sha, action.lease_id, action.reason)
+
+    # plan precedence: file active + no ref → orphaned claim, reap it —
+    # but only when no worktree evidence suggests a live manual run
+    worktree_parent = (
+        Path(args.worktree_parent).expanduser().resolve()
+        if getattr(args, "worktree_parent", None)
+        else repo.parent
+    )
+    for task_id, task in sorted(tasks.items()):
+        if task.state != "active" or task_id in claims:
+            continue
+        worktree_path = worktree_parent / f"wt-{task_id}"
+        if worktree_path.exists():
+            _record_swarm_event(
+                repo,
+                {"event": "orphaned_candidate", "task_id": task_id, "worktree": str(worktree_path)},
+                escalation=True,
+            )
+            candidates.append(task_id)
+            continue
+        _record_swarm_event(
+            repo,
+            {"event": "task_orphaned", "task_id": task_id, "cause": "active_without_claim"},
+        )
+        filenames.append(task.path.name)
+        _update_task_status_and_notes(
+            task_path=task.path,
+            new_state="backlog",
+            note_line="orphaned: active with no live claim; reopened by supervisor",
         )
         reopened_task = load_task(task.path, contract)
         _move_task_to_state_projection(repo, reopened_task)
@@ -3359,8 +3425,9 @@ def _step_reap(args: argparse.Namespace) -> dict[str, object]:
         "reopened": reopened,
         "stale_done": stale_done,
         "released": released,
+        "preserved": preserved,
+        "candidates": candidates,
     }
-
 
 def _step_tick(args: argparse.Namespace) -> dict[str, object]:
     repo = _repo_root()
@@ -3562,6 +3629,22 @@ def _step_judge(
     deferred: list[dict[str, object]] = []
     now = dt.datetime.now(tz=dt.timezone.utc)
 
+    # Shepherded claims stay alive through review + merge: the supervisor
+    # renews the leases it holds for ready_for_review work so the merge
+    # queue's live-claim fencing path remains the common case.
+    claims = swarm_claims.read_claims(_repo_root(), args.remote, fetch=False)
+    for task_id in sorted(contexts):
+        claim = claims.get(task_id)
+        if claim is not None and claim.session_id == _ACTOR_SESSION_ID:
+            try:
+                _renew_runtime_claim(repo=_repo_root(), remote=args.remote, task_id=task_id)
+            except SystemExit as exc:
+                _record_swarm_event(
+                    _repo_root(),
+                    {"event": "shepherd_renewal_failed", "task_id": task_id, "reason": str(exc)},
+                    escalation=True,
+                )
+
     for task_id, context in sorted(contexts.items()):
         contract = context["contract"]
         manifest = context["manifest"]
@@ -3757,32 +3840,71 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
         if not review_in_tip:
             continue
 
+        # Lease fencing binds to the claim COMMIT CHAIN, not the recyclable
+        # lease number: the manifest's claim sha must be ancestor-or-equal of
+        # the live claim tip (renewals advance the same chain; a reap+reclaim
+        # is a NEW ROOT and can never pass). A manifest without a claim block
+        # is claimless manual work — M0 semantics apply, the review/ownership/
+        # integrity checks still gate it. A claim-stamped manifest whose claim
+        # vanished needs a journaled orderly release after the run.
         claims = swarm_claims.read_claims(repo, args.remote)
         claim = claims.get(task_id)
-        if claim is not None:
-            claim_block = manifest.get("claim") if isinstance(manifest.get("claim"), dict) else {}
-            if claim_block.get("lease_id") != claim.lease_id:
-                _record_swarm_event(
-                    repo,
-                    {
-                        "event": "merge_refused_stale_lease",
-                        "task_id": task_id,
-                        "manifest_lease_id": claim_block.get("lease_id"),
-                        "current_lease_id": claim.lease_id,
-                    },
-                    escalation=True,
+        claim_block = manifest.get("claim") if isinstance(manifest.get("claim"), dict) else {}
+        manifest_claim_sha = claim_block.get("sha")
+        fencing_failure: str | None = None
+        if isinstance(manifest_claim_sha, str) and manifest_claim_sha:
+            if claim is not None:
+                same_chain = (
+                    _run(
+                        ["git", "merge-base", "--is-ancestor", manifest_claim_sha, claim.sha],
+                        cwd=repo,
+                        capture=True,
+                        check=False,
+                    ).returncode
+                    == 0
                 )
-                _block_base_task(
-                    repo=repo,
-                    contract=contract,
-                    args=args,
-                    task_id=task_id,
-                    note="@human Merge refused: run manifest carries a stale lease.",
-                    message=f"{task_id}: block stale lease merge",
+                if not same_chain:
+                    fencing_failure = "stale_lease_chain"
+            else:
+                events, _ = swarm_events.read_events(repo)
+                manifest_time = _parse_utc_iso(manifest.get("generated_at_utc"))
+                orderly_release = any(
+                    event.get("event") in {"claim_released", "orphan_claim_released"}
+                    and event.get("task_id") == task_id
+                    and (
+                        manifest_time is None
+                        or (
+                            _parse_utc_iso(event.get("ts_utc")) is not None
+                            and _parse_utc_iso(event.get("ts_utc")) >= manifest_time
+                        )
+                    )
+                    for event in events
                 )
-                refused.append({"task_id": task_id, "reason": "stale_lease"})
-                base_tasks, _ = load_tasks_quarantined(contract)
-                continue
+                if not orderly_release:
+                    fencing_failure = "missing_claim_without_release_record"
+        if fencing_failure is not None:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "merge_refused_stale_lease",
+                    "task_id": task_id,
+                    "reason": fencing_failure,
+                    "manifest_claim_sha": manifest_claim_sha,
+                    "current_claim_sha": claim.sha if claim is not None else None,
+                },
+                escalation=True,
+            )
+            _block_base_task(
+                repo=repo,
+                contract=contract,
+                args=args,
+                task_id=task_id,
+                note=f"@human Merge refused: claim fencing failed ({fencing_failure}).",
+                message=f"{task_id}: block stale lease merge",
+            )
+            refused.append({"task_id": task_id, "reason": fencing_failure})
+            base_tasks, _ = load_tasks_quarantined(contract)
+            continue
 
         diff_cp = _run(
             ["git", "diff", "--name-only", f"{args.base_branch}..{branch}"],
@@ -4658,6 +4780,65 @@ def _resolve_runtime_task(tasks: dict[str, Task], quarantined: list[dict[str, st
     raise SystemExit(f"unknown_task_id:{task_id}")
 
 
+import threading
+
+
+@contextlib.contextmanager
+def _lease_heartbeat(*, repo: Path, remote: str, task_id: str):
+    """§4.1 session model: workers heartbeat below 50% of the lease TTL even
+    while blocked on the executor. Renewal failures are journaled, never
+    raised from the timer thread (the post-run renewal fails loudly)."""
+    claims = swarm_claims.read_claims(repo, remote, fetch=False)
+    claim = claims.get(task_id)
+    if claim is None or claim.session_id != _ACTOR_SESSION_ID:
+        yield
+        return
+    ttl = claim.payload.get("lease_ttl_seconds")
+    interval = max(5, int(ttl) // 3) if isinstance(ttl, int) and ttl > 0 else 1200
+    stop = threading.Event()
+
+    def _beat() -> None:
+        current_sha = claim.sha
+        while not stop.wait(interval):
+            try:
+                renewed = swarm_claims.renew_lease(
+                    repo,
+                    remote,
+                    task_id,
+                    expected_sha=current_sha,
+                    session_id=_ACTOR_SESSION_ID,
+                    journal=lambda event: _record_swarm_event(repo, event),
+                )
+                if renewed.ok and renewed.sha:
+                    current_sha = renewed.sha
+                else:
+                    _record_swarm_event(
+                        repo,
+                        {
+                            "event": "heartbeat_failed",
+                            "task_id": task_id,
+                            "reason": renewed.reason,
+                        },
+                        escalation=True,
+                    )
+                    return
+            except Exception as exc:
+                _record_swarm_event(
+                    repo,
+                    {"event": "heartbeat_failed", "task_id": task_id, "reason": str(exc)},
+                    escalation=True,
+                )
+                return
+
+    thread = threading.Thread(target=_beat, name=f"lease-heartbeat-{task_id}", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+
+
 def _renew_runtime_claim(
     *,
     repo: Path,
@@ -4812,14 +4993,15 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             execution_values = dict(vars(args))
             execution_values["_executor_command"] = executor_command
             execution_args = argparse.Namespace(**execution_values)
-            outcome = _execute_task(
-                backend=executor_backend,
-                task=task,
-                prompt=prompt,
-                args=execution_args,
-                repo=repo,
-                timeout_seconds=int(args.max_worker_seconds) if args.max_worker_seconds else None,
-            )
+            with _lease_heartbeat(repo=repo, remote=args.remote, task_id=task.task_id):
+                outcome = _execute_task(
+                    backend=executor_backend,
+                    task=task,
+                    prompt=prompt,
+                    args=execution_args,
+                    repo=repo,
+                    timeout_seconds=int(args.max_worker_seconds) if args.max_worker_seconds else None,
+                )
             executor_returncode = outcome.returncode
             executor_output = outcome.stdout
             executor_wall_clock_seconds = outcome.wall_clock_seconds
