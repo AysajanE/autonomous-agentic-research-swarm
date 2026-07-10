@@ -19,6 +19,10 @@
   "citation_policy": {
     "staleness_days": 90
   },
+  "literature_policy": {
+    "recall_uncovered_cluster_threshold": 2,
+    "fixture_test_corpus_acquisition_ids": []
+  },
   "complexity_tier_ceilings": {
     "S": {
       "max_wall_clock_seconds": 7200,
@@ -212,7 +216,9 @@
     "reports/status/referee_reports/",
     "reports/status/referee_calibration.json",
     "reports/status/referee_calibration_runs/",
-    "reports/status/events/"
+    "reports/status/events/",
+    "reports/status/integrity_audit/",
+    "reports/status/recall_audit/"
   ],
   "referee_panel": {
     "required_non_authoring_families": 2,

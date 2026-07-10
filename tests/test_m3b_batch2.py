@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from runtime_test_utils import (
     chdir,
@@ -53,7 +54,51 @@ def _reasons(result) -> set[str]:
 
 
 def _valid_report(root: Path, *, audited_sha: str = "a" * 40) -> dict[str, object]:
-    inventory = write_json(root, "reports/status/releases/release.json", {"artifacts": {}})
+    write_text(
+        root,
+        "contracts/schemas/integrity_audit_v1.json",
+        (REPO / "contracts/schemas/integrity_audit_v1.json").read_text(encoding="utf-8"),
+    )
+    write_text(root, "contracts/project.yaml", "mode: empirical\n")
+    write_json(
+        root,
+        "contracts/framework.json",
+        {
+            "executors": {
+                "integrity_audit": {
+                    "backend": "claude",
+                    "family": "claude",
+                    "model": "fixture-auditor",
+                }
+            }
+        },
+    )
+    output = write_text(root, "data/processed/result.txt", "69.14%\n")
+    manifest = write_json(
+        root,
+        "data/processed_manifest/result.json",
+        {"outputs": [{"path": "data/processed/result.txt", "sha256": _sha(output)}]},
+    )
+    run = write_json(
+        root,
+        "reports/status/swarm_runs/T900_run.json",
+        {
+            "run_id": "run-builder",
+            "executor": {"tool": "codex", "family": "manual"},
+            "ownership": {"changed_paths": ["data/processed/result.txt"]},
+        },
+    )
+    inventory = write_json(
+        root,
+        "reports/status/releases/release.json",
+        {
+            "artifacts": {
+                "processed": [{"path": "data/processed/result.txt", "sha256": _sha(output)}],
+                "runs": [{"path": run.relative_to(root).as_posix(), "sha256": _sha(run)}],
+            }
+        },
+    )
+    digest = _sha(output)
     return {
         "schema_version": "research_swarm.integrity_audit.v1",
         "generated_at_utc": "2026-07-10T12:00:00Z",
@@ -65,12 +110,28 @@ def _valid_report(root: Path, *, audited_sha: str = "a" * 40) -> dict[str, objec
             "sha256": _sha(inventory),
         },
         "executor": {
-            "backend": "mock",
+            "backend": "claude",
+            "model": "fixture-auditor",
             "audit_family": "claude",
             "builder_families": ["codex"],
+            "builder_run_manifest_evidence": [
+                {
+                    "run_manifest": run.relative_to(root).as_posix(),
+                    "family": "codex",
+                    "family_source": "executor.tool",
+                    "artifacts": [{"path": "data/processed/result.txt", "sha256": digest}],
+                }
+            ],
             "profile": "scratch-worktree",
             "network": "off",
             "commit_push_allowed": False,
+            "scratch_kind": "hermetic_temp_copy",
+        },
+        "repo_confinement": {
+            "excluded_prefixes": [".git/", "reports/status/integrity_audit/"],
+            "changed_paths": [],
+            "passed": True,
+            "enforcement": "detect-and-reject",
         },
         "sampling": {
             "seed_path": "contracts/integrity_audit_seed.txt",
@@ -78,17 +139,48 @@ def _valid_report(root: Path, *, audited_sha: str = "a" * 40) -> dict[str, objec
         },
         "surface_rebuilds": [
             {
+                "manifest": manifest.relative_to(root).as_posix(),
+                "command": "python scripts/generate_surface.py",
+                "returncode": 0,
                 "outputs": [
                     {
                         "path": "data/processed/result.txt",
+                        "expected_manifest_sha256": digest,
+                        "release_inventory_sha256": digest,
+                        "recomputed_sha256": digest,
                         "matches_manifest": True,
                         "matches_release_inventory": True,
                     }
                 ]
             }
         ],
-        "inventory_hash_checks": [{"path": "data/processed/result.txt", "passed": True}],
-        "claim_recomputations": [{"claim_id": "C1", "headline": True, "passed": True}],
+        "inventory_hash_checks": [
+            {
+                "path": "data/processed/result.txt",
+                "release_inventory_sha256": digest,
+                "scratch_sha256": digest,
+                "passed": True,
+            }
+        ],
+        "claim_recomputations": [
+            {
+                "claim_id": "C1",
+                "headline": True,
+                "claim_type": "descriptive",
+                "expected_role_values": {"pre_dencun_mean_str": "69.14%"},
+                "recomputed_role_values": {"pre_dencun_mean_str": "69.14%"},
+                "expected_numeric_literals": ["69.14%"],
+                "recomputed_numeric_literals": ["69.14%"],
+                "source_artifacts": [
+                    {
+                        "path": "data/processed/result.txt",
+                        "asserted_sha256": digest,
+                        "release_inventory_sha256": digest,
+                    }
+                ],
+                "passed": True,
+            }
+        ],
         "etl_decision_samples": [
             {"manifest": "data/processed_manifest/result.json", "protocol_clause_id": "P1", "status": "pass"}
         ],
@@ -102,6 +194,21 @@ def _valid_report(root: Path, *, audited_sha: str = "a" * 40) -> dict[str, objec
 
 class IntegrityAuditTest(unittest.TestCase):
     def _audit_fixture(self, root: Path, *, family: str = "claude", role_value: str = "69.14%") -> argparse.Namespace:
+        write_text(root, "contracts/project.yaml", "mode: empirical\n")
+        write_json(
+            root,
+            "contracts/framework.json",
+            {
+                "executors": {
+                    "integrity_audit": {
+                        "backend": "claude",
+                        "family": family,
+                        "command": "claude",
+                        "model": "fixture-auditor",
+                    }
+                }
+            },
+        )
         write_text(root, "contracts/integrity_audit_seed.txt", "fixture-seed\n")
         write_text(root, "data/raw/source.txt", "69.14%\n")
         generator = write_text(
@@ -144,6 +251,15 @@ class IntegrityAuditTest(unittest.TestCase):
             "reports/status/releases/release.json",
             {"artifacts": {"processed": [{"path": "data/processed/result.txt", "sha256": _sha(output)}]}},
         )
+        write_json(
+            root,
+            "reports/status/swarm_runs/T900_run.json",
+            {
+                "run_id": "run-builder",
+                "executor": {"tool": "codex", "family": "manual"},
+                "ownership": {"changed_paths": ["data/processed/result.txt"]},
+            },
+        )
         transcript = write_json(
             root,
             "mock_audit.json",
@@ -169,7 +285,7 @@ class IntegrityAuditTest(unittest.TestCase):
             release_inventory=inventory.relative_to(root),
             mode="empirical",
             audit_family=family,
-            builder_family=["codex"],
+            builder_family=[],
             backend="mock",
             mock_transcript=transcript,
             seed_path=Path("contracts/integrity_audit_seed.txt"),
@@ -194,6 +310,15 @@ class IntegrityAuditTest(unittest.TestCase):
             report = integrity_audit.run_audit(args)
             self.assertEqual(report["status"], "block")
             self.assertIn("integrity_audit_family_of_builder", report["failures"])
+
+    def test_cli_builder_family_override_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            args = self._audit_fixture(root)
+            args.builder_family = ["third-party-label"]
+            report = integrity_audit.run_audit(args)
+            self.assertIn("builder_family_override_refused", report["failures"])
 
     def test_wrong_headline_semantic_role_is_caught(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -245,11 +370,158 @@ class IntegrityAuditTest(unittest.TestCase):
             self.assertIn("integrity_audit_family_of_builder", _reasons(result))
             self.assertIn("integrity_audit_recompute_mismatch", _reasons(result))
 
+    def test_mock_backend_cannot_authorize_release_but_live_contract_report_can(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            report = _valid_report(root)
+            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            with chdir(root):
+                self.assertTrue(quality_gates.gate_integrity_audit().ok)
+            report["executor"]["backend"] = "mock"
+            report["executor"]["model"] = None
+            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            with chdir(root):
+                result = quality_gates.gate_integrity_audit()
+            self.assertIn("integrity_audit_executor_contract_mismatch", _reasons(result))
+
+    def test_gate_rehashes_bytes_even_when_report_flags_claim_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            report = _valid_report(root)
+            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            write_text(root, "data/processed/result.txt", "tampered\n")
+            with chdir(root):
+                result = quality_gates.gate_integrity_audit()
+            reasons = _reasons(result)
+            self.assertIn("integrity_audit_recompute_mismatch", reasons)
+            self.assertIn("integrity_audit_claim_source_hash_mismatch", reasons)
+
+    def test_mode_downgrade_cannot_authorize_current_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            report = _valid_report(root)
+            write_text(root, "contracts/project.yaml", "mode: hybrid\n")
+            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            with chdir(root):
+                result = quality_gates.gate_integrity_audit()
+            self.assertIn("integrity_audit_mode_mismatch", _reasons(result))
+
+    def test_answer_surfaces_are_scrubbed_before_value_recomputation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            args = self._audit_fixture(root)
+            write_text(root, "reports/tables/answer.csv", "role,value\npre_dencun_mean_str,11.68%\n")
+            write_text(root, "reports/figures/answer.svg", "<svg><text>11.68%</text></svg>\n")
+            write_text(root, "reports/validation/answer.txt", "11.68%\n")
+            claims = json.loads((root / "contracts/claims.yaml").read_text())
+            claims["claims"][0]["statement"] = "Pre-Dencun mean STR is 11.68%."
+            claims["claims"][0]["manuscript_numeric_literals"] = ["11.68%"]
+            claims["claims"][0]["recomputation_roles"] = {"pre_dencun_mean_str": "11.68%"}
+            write_json(root, "contracts/claims.yaml", claims)
+            transcript = json.loads(args.mock_transcript.read_text())
+
+            def inspect_scrub(**kwargs):
+                scratch = kwargs["scratch"]
+                for relpath in ("contracts/claims.yaml", "reports/paper", "reports/tables", "reports/figures", "reports/validation"):
+                    self.assertFalse((scratch / relpath).exists(), relpath)
+                return transcript
+
+            with mock.patch.object(integrity_audit, "_load_transcript", side_effect=inspect_scrub):
+                report = integrity_audit.run_audit(args)
+            self.assertIn("claim_semantic_role_mismatch:C1", report["failures"])
+
+    def test_manual_builder_self_label_does_not_supply_verified_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            report = _valid_report(root)
+            run_path = root / "reports/status/swarm_runs/T900_run.json"
+            run = json.loads(run_path.read_text())
+            run["executor"] = {"tool": "manual", "family": "codex"}
+            write_json(root, run_path.relative_to(root).as_posix(), run)
+            report["executor"]["builder_run_manifest_evidence"][0]["family"] = "codex"
+            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            with chdir(root):
+                result = quality_gates.gate_integrity_audit()
+            self.assertIn("builder_family_unverified", _reasons(result))
+
+    def test_omitted_same_family_builder_run_is_derived_from_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            report = _valid_report(root)
+            write_json(
+                root,
+                "reports/status/swarm_runs/T901_run.json",
+                {
+                    "run_id": "same-family-builder",
+                    "executor": {"tool": "claude", "family": "manual"},
+                    "ownership": {"changed_paths": ["data/processed/result.txt"]},
+                },
+            )
+            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            with chdir(root):
+                result = quality_gates.gate_integrity_audit()
+            reasons = _reasons(result)
+            self.assertIn("builder_family_evidence_mismatch", reasons)
+            self.assertIn("integrity_audit_family_of_builder", reasons)
+
+    def test_main_repo_mutation_during_audit_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            args = self._audit_fixture(root)
+            transcript = json.loads(args.mock_transcript.read_text())
+
+            def mutate_repo(**_kwargs):
+                write_text(root, "outside-audit.txt", "mutation\n")
+                return transcript
+
+            with mock.patch.object(integrity_audit, "_load_transcript", side_effect=mutate_repo):
+                report = integrity_audit.run_audit(args)
+            self.assertTrue(any(item.startswith("main_repo_mutated_during_audit:") for item in report["failures"]))
+
+    def test_future_timestamp_cannot_shadow_committed_audit_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            report = _valid_report(root)
+            write_json(root, "reports/status/integrity_audit/real.json", report)
+            subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "test"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "trusted audit"], cwd=root, check=True, capture_output=True)
+            forged = dict(report)
+            forged["generated_at_utc"] = "2999-01-01T00:00:00Z"
+            forged["executor"] = {**report["executor"], "backend": "mock", "model": None}
+            write_json(root, "reports/status/integrity_audit/zzz_forged.json", forged)
+            with chdir(root):
+                result = quality_gates.gate_integrity_audit()
+            self.assertEqual(result.details["report"], "reports/status/integrity_audit/real.json")
+
     def test_scratch_argv_is_detached_and_has_no_commit_push(self) -> None:
         argv = integrity_audit.scratch_worktree_argv(Path("/repo"), Path("/tmp/audit"))
         self.assertEqual(argv[:4], ["git", "worktree", "add", "--detach"])
         self.assertNotIn("commit", argv)
         self.assertNotIn("push", argv)
+
+    def test_rebuild_allowlist_rejects_forbidden_command_in_referenced_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_text(
+                root,
+                "scripts/rebuild.py",
+                "import subprocess\nsubprocess.run(['git', 'status'], check=False)\n",
+            )
+            self.assertEqual(
+                integrity_audit._command_violation("python scripts/rebuild.py", repo=root),
+                "referenced_script_forbidden_token:git",
+            )
 
     def test_modeling_mode_reruns_locked_seed_with_tolerance_and_rederives(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -292,6 +564,12 @@ class IntegrityAuditTest(unittest.TestCase):
                 "reports/status/releases/release.json",
                 {
                     "artifacts": {
+                        "processed": [
+                            {
+                                "path": "data/processed/result.txt",
+                                "sha256": _sha(root / "data/processed/result.txt"),
+                            }
+                        ],
                         "models": [
                             {
                                 "path": "reports/models/experiment_E1.json",
@@ -326,6 +604,16 @@ class IntegrityAuditTest(unittest.TestCase):
 
 class LiteratureTest(unittest.TestCase):
     def _corpus(self, root: Path) -> tuple[str, Path]:
+        write_json(
+            root,
+            "contracts/framework.json",
+            {
+                "literature_policy": {
+                    "recall_uncovered_cluster_threshold": 2,
+                    "fixture_test_corpus_acquisition_ids": [],
+                }
+            },
+        )
         fixture = write_text(root, "fixtures/paper.txt", "The intervention reduced measured latency by 12 percent.\n")
         request = write_json(
             root,
@@ -410,11 +698,23 @@ class LiteratureTest(unittest.TestCase):
             root = Path(tmp) / "repo"
             root.mkdir()
             self._corpus(root)
+            write_json(
+                root,
+                "reports/status/swarm_runs/primary.json",
+                {"run_id": "primary", "executor": {"tool": "codex"}},
+            )
+            write_json(
+                root,
+                "reports/status/swarm_runs/recall.json",
+                {"run_id": "recall", "executor": {"tool": "claude"}},
+            )
             search = write_json(
                 root,
                 "recall.json",
                 {
                     "schema_version": "research_swarm.recall_search.v1",
+                    "primary_run_manifest": "reports/status/swarm_runs/primary.json",
+                    "recall_run_manifest": "reports/status/swarm_runs/recall.json",
                     "primary_search_strategy": {
                         "databases": ["OpenAlex"],
                         "queries": ["latency intervention"],
@@ -440,6 +740,41 @@ class LiteratureTest(unittest.TestCase):
             with chdir(root):
                 result = quality_gates.gate_recall_audit()
             self.assertIn("recall_audit_uncovered_cluster", _reasons(result))
+            self.assertNotIn("recall_audit_executor_run_unverified", _reasons(result))
+            self.assertNotIn("recall_audit_query_manifest_unverified", _reasons(result))
+
+    def test_corpus_or_literature_claim_requires_recall_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            self._corpus(root)
+            with chdir(root):
+                result = quality_gates.gate_recall_audit()
+            self.assertIn("recall_audit_required", _reasons(result))
+
+    def test_fixture_backed_citation_is_rejected_on_release_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            self._corpus(root)
+            literature.generate_bib(repo=root, output=root / "reports/paper/references.bib")
+            with chdir(root):
+                result = quality_gates.gate_citation_integrity(require_literature_corpus=True)
+            self.assertIn("fixture_backed_literature_release_claim", _reasons(result))
+
+    def test_fixture_corpus_must_be_explicitly_pinned_to_be_release_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            self._corpus(root)
+            framework_path = root / "contracts/framework.json"
+            framework = json.loads(framework_path.read_text())
+            framework["literature_policy"]["fixture_test_corpus_acquisition_ids"] = ["primary"]
+            write_json(root, "contracts/framework.json", framework)
+            literature.generate_bib(repo=root, output=root / "reports/paper/references.bib")
+            with chdir(root):
+                result = quality_gates.gate_citation_integrity(require_literature_corpus=True)
+            self.assertNotIn("fixture_backed_literature_release_claim", _reasons(result))
 
     def test_lit_task_mini_prisma_and_independence_are_linted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -488,6 +823,45 @@ class PromptSurfaceTest(unittest.TestCase):
 
 
 class ReleaseAuditRequirementTest(unittest.TestCase):
+    def test_audit_and_recall_surfaces_are_operator_owned(self) -> None:
+        for index, surface in enumerate(
+            ("reports/status/integrity_audit/", "reports/status/recall_audit/"),
+            start=920,
+        ):
+            with self.subTest(surface=surface), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "repo"
+                scaffold_runtime_repo(root)
+                write_task(
+                    root,
+                    "backlog",
+                    f"T{index}",
+                    role="Worker",
+                    allowed_paths=[surface],
+                    outputs=[surface + "forged.json"],
+                    state="backlog",
+                )
+                with chdir(root):
+                    result = quality_gates.gate_operator_surface_ownership()
+                self.assertFalse(result.ok)
+                self.assertTrue(any(surface in item for item in result.details["failures"]))
+
+    def test_citation_integrity_is_release_required_and_external_citation_blocks(self) -> None:
+        import test_release_assembly
+
+        self.assertIn("citation_integrity", test_release_assembly.release_assembly.REQUIRED_RELEASE_GATE_NAMES)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            test_release_assembly.scaffold_release_ready_repo(root)
+            write_text(
+                root,
+                "reports/paper/references.bib",
+                "@article{external2026,\n  title = {External}\n}\n",
+            )
+            with self.assertRaisesRegex(SystemExit, "citation_integrity"):
+                test_release_assembly.release_assembly.assemble_release_manifest(
+                    root, __import__("datetime").date(2026, 7, 10)
+                )
+
     def test_release_assembly_blocks_when_required_audit_is_absent(self) -> None:
         import test_release_assembly
 

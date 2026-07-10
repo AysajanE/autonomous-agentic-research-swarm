@@ -70,6 +70,7 @@ ALL_STAGE4_GATE_NAMES = (
     "referee_report_validity",
     "referee_calibration",
     "referee_release_evidence",
+    "citation_integrity",
     "literature_corpus",
     "recall_audit",
     "prompt_surface",
@@ -339,7 +340,11 @@ def _collect_stage4_gate_results(repo_root: Path) -> dict[str, dict[str, Any]]:
     with _pushd(repo_root):
         for gate_name in ALL_STAGE4_GATE_NAMES:
             func = getattr(quality_gates, f"gate_{gate_name}")
-            result = func()
+            result = (
+                func(require_literature_corpus=True)
+                if gate_name == "citation_integrity"
+                else func()
+            )
             results[gate_name] = {
                 "ok": bool(result.ok),
                 "details": _json_safe(result.details),

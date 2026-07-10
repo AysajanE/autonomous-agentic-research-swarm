@@ -27,7 +27,18 @@ from typing import Any
 SCHEMA_VERSION = "research_swarm.integrity_audit.v1"
 MOCK_SCHEMA_VERSION = "research_swarm.mock_integrity_audit.v1"
 SAMPLE_SIZE = 3
-FORBIDDEN_COMMAND_TOKENS = {"git", "curl", "wget", "ssh", "scp"}
+FORBIDDEN_COMMAND_TOKENS = {
+    "git",
+    "curl",
+    "wget",
+    "ssh",
+    "scp",
+    "nc",
+    "netcat",
+    "ncat",
+    "socat",
+    "telnet",
+}
 
 
 def _utc_now() -> str:
@@ -78,21 +89,35 @@ def scratch_worktree_argv(repo: Path, destination: Path, revision: str = "HEAD")
     return ["git", "worktree", "add", "--detach", destination.as_posix(), revision]
 
 
-def claude_audit_argv(repo: Path) -> list[str]:
+def _audit_executor_contract(repo: Path) -> dict[str, str]:
     framework = _read_json(repo / "contracts/framework.json")
     executors = framework.get("executors")
     config = executors.get("integrity_audit") if isinstance(executors, dict) else None
-    if not isinstance(config, dict) or config.get("backend") != "claude":
+    if not isinstance(config, dict):
         raise ValueError("integrity_audit_backend_unavailable")
-    command = config.get("command", "claude")
+    backend = config.get("backend")
+    family = config.get("family")
     model = config.get("model")
-    if not isinstance(command, str) or not command.strip() or not isinstance(model, str) or not model.strip():
+    command = config.get("command", backend)
+    if not all(isinstance(value, str) and value.strip() for value in (backend, family, model, command)):
+        raise ValueError("integrity_audit_backend_unavailable")
+    return {
+        "backend": backend.strip().casefold(),
+        "family": family.strip().casefold(),
+        "model": model.strip(),
+        "command": command.strip(),
+    }
+
+
+def claude_audit_argv(repo: Path) -> list[str]:
+    config = _audit_executor_contract(repo)
+    if config["backend"] != "claude":
         raise ValueError("integrity_audit_backend_unavailable")
     return [
-        command.strip(),
+        config["command"],
         "-p",
         "--model",
-        model.strip(),
+        config["model"],
         "--tools",
         "Read,Glob,Grep",
         "--strict-mcp-config",
@@ -175,7 +200,7 @@ def _processed_rebuilds(scratch: Path) -> list[dict[str, Any]]:
     return sorted(grouped.values(), key=lambda item: (item["manifest"], item["command"]))
 
 
-def _command_violation(command: str) -> str | None:
+def _command_violation(command: str, *, repo: Path | None = None) -> str | None:
     try:
         argv = shlex.split(command)
     except ValueError:
@@ -188,6 +213,20 @@ def _command_violation(command: str) -> str | None:
         return "forbidden_token:" + ",".join(forbidden)
     if any(token in {"-c", "-m", "-"} for token in argv[1:]):
         return "inline_code_forbidden"
+    if repo is not None and argv[0] in {"python", "python3"}:
+        script_token = next((token for token in argv[1:] if not token.startswith("-")), None)
+        if script_token is not None:
+            script = (repo / script_token).resolve()
+            try:
+                script.relative_to(repo.resolve())
+            except ValueError:
+                return "script_outside_scratch"
+            if not script.is_file() or script.suffix != ".py":
+                return "python_script_invalid"
+            source = script.read_text(encoding="utf-8", errors="replace")
+            for token in sorted(FORBIDDEN_COMMAND_TOKENS):
+                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", source, re.IGNORECASE):
+                    return f"referenced_script_forbidden_token:{token}"
     return None
 
 
@@ -245,7 +284,7 @@ def _execute_rebuilds(scratch: Path, inventory: dict[str, Any]) -> tuple[list[di
     failures: list[str] = []
     for rebuild in _processed_rebuilds(scratch):
         command = rebuild["command"]
-        violation = _command_violation(command)
+        violation = _command_violation(command, repo=scratch)
         if violation is not None:
             failures.append(f"rebuild_command_violation:{rebuild['manifest']}:{violation}")
             continue
@@ -321,7 +360,7 @@ def _execute_declared_rerun(
     rel_manifest = manifest_path.relative_to(scratch).as_posix()
     record: dict[str, Any] = {"manifest": rel_manifest, "command": command, "status": "block", "outputs": []}
     failures: list[str] = []
-    if not isinstance(command, str) or (violation := _command_violation(command)) is not None:
+    if not isinstance(command, str) or (violation := _command_violation(command, repo=scratch)) is not None:
         failures.append(f"model_rerun_command_invalid:{rel_manifest}:{violation if isinstance(command, str) else 'missing'}")
         return record, failures
     try:
@@ -541,7 +580,10 @@ def _load_transcript(
 
 
 def _semantic_recomputation(
-    sampled: list[dict[str, Any]], transcript: dict[str, Any], mode: str
+    sampled: list[dict[str, Any]],
+    transcript: dict[str, Any],
+    mode: str,
+    source_artifacts: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[str]]:
     raw_results = transcript.get("claim_recomputations")
     indexed = {
@@ -575,6 +617,7 @@ def _semantic_recomputation(
             "recomputed_role_values": actual_roles,
             "expected_numeric_literals": literal_expected,
             "recomputed_numeric_literals": literal_actual,
+            "source_artifacts": source_artifacts,
             "passed": passed,
         }
         results.append(record)
@@ -607,27 +650,79 @@ def _semantic_recomputation(
     return results, failures
 
 
-def _builder_families(repo: Path, inventory: dict[str, Any], explicit: list[str]) -> tuple[list[str], list[dict[str, str]]]:
-    families = {item.strip().casefold() for item in explicit if item.strip()}
-    evidence: list[dict[str, str]] = []
+def _builder_families(
+    repo: Path, inventory: dict[str, Any]
+) -> tuple[list[str], list[dict[str, Any]], list[str]]:
+    families: set[str] = set()
+    evidence: list[dict[str, Any]] = []
+    failures: list[str] = []
     inventory_artifacts = _inventory_artifacts(inventory)
-    for relpath in sorted(inventory_artifacts):
-        if not relpath.startswith("reports/status/swarm_runs/") or not relpath.endswith(".json"):
-            continue
-        path = repo / relpath
+    for path in sorted((repo / "reports/status/swarm_runs").glob("*.json")):
+        relpath = path.relative_to(repo).as_posix()
         if not path.is_file():
             continue
         try:
             payload = _read_json(path)
         except (OSError, ValueError, json.JSONDecodeError):
             continue
+        ownership = payload.get("ownership")
+        changed_paths = ownership.get("changed_paths") if isinstance(ownership, dict) else None
+        produced: list[dict[str, str]] = []
+        for changed in changed_paths if isinstance(changed_paths, list) else []:
+            if not isinstance(changed, str) or changed.startswith("reports/status/"):
+                continue
+            expected = inventory_artifacts.get(changed)
+            artifact_path = repo / changed
+            if expected is None or not artifact_path.is_file():
+                continue
+            actual = _sha256(artifact_path)
+            if actual == expected:
+                produced.append({"path": changed, "sha256": actual})
+        if not produced:
+            continue
         executor = payload.get("executor")
-        family = executor.get("family", executor.get("tool")) if isinstance(executor, dict) else None
-        if isinstance(family, str) and family.strip() and family not in {"manual", "operator_backfill"}:
-            normalized = family.strip().casefold()
-            families.add(normalized)
-            evidence.append({"run_manifest": relpath, "family": normalized})
-    return sorted(families), evidence
+        tool = executor.get("tool") if isinstance(executor, dict) else None
+        normalized = tool.strip().casefold() if isinstance(tool, str) and tool.strip() else None
+        if normalized in {None, "manual", "operator_backfill", "legacy_backfill"}:
+            failures.append(f"builder_family_unverified:{relpath}")
+            family = None
+        else:
+            family = normalized
+            families.add(family)
+        evidence.append(
+            {
+                "run_manifest": relpath,
+                "family": family,
+                "family_source": "executor.tool",
+                "artifacts": produced,
+            }
+        )
+    if not evidence:
+        failures.append("builder_family_unverified:no_hash_bound_builder_runs")
+    return sorted(families), evidence, failures
+
+
+def _repo_snapshot(repo: Path) -> dict[str, str]:
+    snapshot: dict[str, str] = {}
+    excluded = (repo / "reports/status/integrity_audit").resolve()
+    for path in sorted(repo.rglob("*")):
+        if ".git" in path.relative_to(repo).parts:
+            continue
+        try:
+            path.resolve().relative_to(excluded)
+            continue
+        except ValueError:
+            pass
+        relpath = path.relative_to(repo).as_posix()
+        if path.is_symlink():
+            snapshot[relpath] = "symlink:" + os.readlink(path)
+        elif path.is_file():
+            snapshot[relpath] = _sha256(path)
+    return snapshot
+
+
+def _snapshot_changes(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
 
 
 def run_audit(args: argparse.Namespace) -> dict[str, Any]:
@@ -646,13 +741,22 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("audit_output_outside_integrity_surface") from exc
     inventory_path = args.release_inventory if args.release_inventory.is_absolute() else repo / args.release_inventory
     inventory = _read_json(inventory_path)
-    audit_family = args.audit_family.strip().casefold()
-    builders, builder_evidence = _builder_families(repo, inventory, args.builder_family)
+    executor_contract = _audit_executor_contract(repo)
+    audit_family = executor_contract["family"]
+    requested_family = args.audit_family.strip().casefold()
+    builders, builder_evidence, builder_failures = _builder_families(repo, inventory)
     failures: list[str] = []
+    failures.extend(builder_failures)
+    if requested_family != audit_family:
+        failures.append("integrity_audit_family_override_refused")
+    if getattr(args, "builder_family", []):
+        failures.append("builder_family_override_refused")
     if not builders:
         failures.append("builder_family_unavailable")
     if audit_family in builders:
         failures.append("integrity_audit_family_of_builder")
+
+    repo_before = _repo_snapshot(repo)
 
     scratch_parent = Path(tempfile.mkdtemp(prefix="research-swarm-integrity-"))
     scratch = scratch_parent / "worktree"
@@ -682,10 +786,37 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             failures.extend(model_failures)
         else:
             experiment_results, seams = [], []
-        # The adversarial family cannot echo the ledger or manuscript answers:
-        # retain them only in kernel memory for the post-response comparison.
+        source_artifacts = [
+            {
+                "path": output.get("path"),
+                "asserted_sha256": output.get("recomputed_sha256"),
+                "release_inventory_sha256": output.get("release_inventory_sha256"),
+            }
+            for rebuild in rebuilds
+            for output in rebuild.get("outputs", [])
+            if isinstance(rebuild, dict) and isinstance(output, dict)
+        ]
+        if not source_artifacts:
+            source_artifacts = [
+                {
+                    "path": item.get("path"),
+                    "asserted_sha256": item.get("scratch_sha256"),
+                    "release_inventory_sha256": item.get("release_inventory_sha256"),
+                }
+                for item in inventory_checks
+                if isinstance(item, dict)
+            ]
+        # The adversarial family cannot echo the ledger, manuscript, or any
+        # pre-rendered answer surface. Retain registered answers only in kernel
+        # memory for the post-response comparison.
         (scratch / "contracts/claims.yaml").unlink(missing_ok=True)
-        shutil.rmtree(scratch / "reports/paper", ignore_errors=True)
+        for answer_surface in (
+            "reports/paper",
+            "reports/tables",
+            "reports/figures",
+            "reports/validation",
+        ):
+            shutil.rmtree(scratch / answer_surface, ignore_errors=True)
         context = {
             "mode": args.mode,
             "audit_family": audit_family,
@@ -708,13 +839,19 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         returned_family = transcript.get("audit_family")
         if not isinstance(returned_family, str) or returned_family.strip().casefold() != audit_family:
             failures.append("integrity_audit_family_transcript_mismatch")
-        claim_results, semantic_failures = _semantic_recomputation(sampled, transcript, args.mode)
+        claim_results, semantic_failures = _semantic_recomputation(
+            sampled, transcript, args.mode, source_artifacts
+        )
         failures.extend(semantic_failures)
         etl_samples = transcript.get("etl_decision_samples", [])
         derivations = transcript.get("theoretical_rederivations", [])
     finally:
         _remove_scratch(repo, scratch, scratch_kind)
         shutil.rmtree(scratch_parent, ignore_errors=True)
+
+    repo_changes = _snapshot_changes(repo_before, _repo_snapshot(repo))
+    if repo_changes:
+        failures.append("main_repo_mutated_during_audit:" + ",".join(repo_changes))
 
     try:
         audited_git_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -733,6 +870,7 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         },
         "executor": {
             "backend": args.backend,
+            "model": executor_contract["model"] if args.backend == executor_contract["backend"] else None,
             "audit_family": audit_family,
             "builder_families": builders,
             "builder_run_manifest_evidence": builder_evidence,
@@ -740,6 +878,12 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             "network": "off",
             "commit_push_allowed": False,
             "scratch_kind": scratch_kind,
+        },
+        "repo_confinement": {
+            "excluded_prefixes": [".git/", "reports/status/integrity_audit/"],
+            "changed_paths": repo_changes,
+            "passed": not repo_changes,
+            "enforcement": "detect-and-reject",
         },
         "sampling": {"seed_path": args.seed_path.as_posix(), "non_headline_sample_size": SAMPLE_SIZE},
         "surface_rebuilds": rebuilds,
@@ -764,9 +908,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--release-inventory", required=True, type=Path)
     parser.add_argument("--mode", choices=["empirical", "modeling", "hybrid"], required=True)
-    parser.add_argument("--audit-family", required=True)
+    parser.add_argument(
+        "--audit-family",
+        required=True,
+        help="Expected audit family; must match the executor contract and cannot override it",
+    )
     parser.add_argument("--task-id", help="Numbered integrity_audit task id used to recognize evidence-persistence commits")
-    parser.add_argument("--builder-family", action="append", default=[])
+    parser.add_argument(
+        "--builder-family",
+        action="append",
+        default=[],
+        help="Deprecated assertion; rejected because builder families are derived from hash-bound runs",
+    )
     parser.add_argument("--backend", choices=["mock", "claude"], default="claude")
     parser.add_argument("--mock-transcript", type=Path)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())

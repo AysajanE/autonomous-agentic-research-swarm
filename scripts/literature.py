@@ -71,7 +71,13 @@ def _validate_strategy(payload: dict[str, Any]) -> dict[str, Any]:
     return strategy
 
 
-def _fetch(entry: dict[str, Any], fixture_dir: Path | None, allow_network: bool) -> bytes:
+def _fetch(
+    entry: dict[str, Any], fixture_dir: Path | None, allow_network: bool
+) -> tuple[bytes, dict[str, Any]]:
+    requested_url = entry.get("url")
+    if not isinstance(requested_url, str) or not requested_url.strip():
+        doi = entry.get("doi")
+        requested_url = f"https://doi.org/{doi.strip()}" if isinstance(doi, str) and doi.strip() else None
     fixture = entry.get("fixture")
     if fixture_dir is not None:
         if not isinstance(fixture, str) or not fixture.strip():
@@ -81,14 +87,33 @@ def _fetch(entry: dict[str, Any], fixture_dir: Path | None, allow_network: bool)
             path.relative_to(fixture_dir.resolve())
         except ValueError as exc:
             raise ValueError(f"fixture_outside_root:{fixture}") from exc
-        return path.read_bytes()
+        raw = path.read_bytes()
+        return raw, {
+            "acquisition_method": "fixture",
+            "resolved_url": requested_url,
+            "response_metadata": {
+                "status": None,
+                "content_type": "application/octet-stream",
+                "fixture_path": path.relative_to(fixture_dir.resolve()).as_posix(),
+                "response_bytes": len(raw),
+            },
+        }
     if not allow_network:
         raise ValueError("network_fetch_requires_explicit_allow_network")
-    url = entry.get("url")
+    url = requested_url
     if not isinstance(url, str) or not url.startswith(("https://", "http://")):
         raise ValueError(f"invalid_fetch_url:{entry.get('citekey')}")
     with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310 - explicit opt-in
-        return response.read()
+        raw = response.read()
+        return raw, {
+            "acquisition_method": "live",
+            "resolved_url": response.geturl(),
+            "response_metadata": {
+                "status": response.status,
+                "content_type": response.headers.get_content_type(),
+                "response_bytes": len(raw),
+            },
+        }
 
 
 def acquire(
@@ -125,7 +150,7 @@ def acquire(
         if not any(isinstance(item.get(field), str) and item.get(field).strip() for field in ("url", "doi")):
             raise ValueError(f"missing_url_or_doi:{citekey}")
         seen.add(citekey)
-        raw = _fetch(item, fixture_dir, allow_network)
+        raw, provenance = _fetch(item, fixture_dir, allow_network)
         extension = item.get("format", "txt")
         if extension not in {"txt", "pdf", "json", "html"}:
             raise ValueError(f"invalid_snapshot_format:{citekey}:{extension}")
@@ -139,8 +164,11 @@ def acquire(
                 "title": title,
                 "authors": item.get("authors", []),
                 "year": item.get("year"),
-                "url": item.get("url"),
+                "url": provenance["resolved_url"] if not isinstance(item.get("url"), str) else item.get("url"),
+                "resolved_url": provenance["resolved_url"],
                 "doi": item.get("doi"),
+                "acquisition_method": provenance["acquisition_method"],
+                "response_metadata": provenance["response_metadata"],
                 "retrieved_on": retrieval_date.isoformat(),
                 "snapshot_path": relpath.as_posix(),
                 "snapshot_sha256": _sha256(raw),
@@ -152,6 +180,7 @@ def acquire(
         "schema_version": CORPUS_SCHEMA_VERSION,
         "acquisition_id": acquisition_id,
         "retrieved_on": retrieval_date.isoformat(),
+        "acquisition_method": "fixture" if fixture_dir is not None else "live",
         "search_strategy": strategy,
         "entries": sorted(manifest_entries, key=lambda item: item["citekey"]),
     }
@@ -242,13 +271,44 @@ def recall_audit(
     primary = payload.get("primary_search_strategy")
     if not isinstance(primary, dict):
         raise ValueError("missing_primary_search_strategy")
-    primary_family = primary.get("executor_family")
+    try:
+        framework = _read_json(repo / "contracts/framework.json")
+        pinned_threshold = framework["literature_policy"]["recall_uncovered_cluster_threshold"]
+    except (KeyError, TypeError):
+        pinned_threshold = 2
+    if not isinstance(pinned_threshold, int) or isinstance(pinned_threshold, bool) or pinned_threshold < 1:
+        raise ValueError("invalid_recall_threshold_contract")
+    if cluster_threshold != pinned_threshold:
+        raise ValueError(f"recall_threshold_not_contract_pinned:{cluster_threshold}!={pinned_threshold}")
+
+    def run_binding(field: str) -> tuple[str, str, str]:
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"missing_{field}")
+        candidate = (repo / value).resolve()
+        try:
+            relpath = candidate.relative_to(repo.resolve()).as_posix()
+        except ValueError as exc:
+            raise ValueError(f"{field}_outside_repo") from exc
+        run = _read_json(candidate)
+        run_id = run.get("run_id")
+        executor = run.get("executor")
+        family = executor.get("tool") if isinstance(executor, dict) else None
+        if not isinstance(run_id, str) or not run_id.strip() or not isinstance(family, str) or not family.strip():
+            raise ValueError(f"invalid_{field}")
+        return relpath, _sha256(candidate.read_bytes()), family.strip().casefold()
+
+    primary_run_path, primary_run_sha, primary_family = run_binding("primary_run_manifest")
+    recall_run_path, recall_run_sha, recall_family = run_binding("recall_run_manifest")
     independent = (
-        strategy.get("executor_family") != primary_family
+        primary_run_path != recall_run_path
+        and recall_family != primary_family
+        and str(strategy.get("executor_family", "")).casefold() == recall_family
+        and str(primary.get("executor_family", "")).casefold() == primary_family
         and set(strategy.get("queries", [])) != set(primary.get("queries", []))
         and set(strategy.get("databases", [])) != set(primary.get("databases", []))
     )
-    corpus, _ = load_corpus(repo)
+    corpus, corpus_manifests = load_corpus(repo)
     retrieved = payload.get("retrieved")
     if not isinstance(retrieved, list):
         raise ValueError("invalid_recall_retrieved")
@@ -269,7 +329,18 @@ def recall_audit(
         "schema_version": RECALL_SCHEMA_VERSION,
         "generated_at_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "primary_family": primary_family,
-        "recall_family": strategy.get("executor_family"),
+        "recall_family": recall_family,
+        "primary_run_manifest": {"path": primary_run_path, "sha256": primary_run_sha},
+        "recall_run_manifest": {"path": recall_run_path, "sha256": recall_run_sha},
+        "primary_query_database_manifests": [
+            {"path": path.relative_to(repo).as_posix(), "sha256": _sha256(path.read_bytes())}
+            for path in corpus_manifests
+        ],
+        "recall_query_database_manifest": {
+            "path": search_path.resolve().relative_to(repo.resolve()).as_posix(),
+            "sha256": _sha256(search_path.read_bytes()),
+        },
+        "uncovered_cluster_threshold": pinned_threshold,
         "primary_search_strategy": primary,
         "recall_search_strategy": strategy,
         "independent_search": independent,

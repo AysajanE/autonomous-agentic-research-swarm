@@ -119,6 +119,8 @@ DEFAULT_OPERATOR_OWNED_SHARED_SURFACES = (
     "reports/status/referee_calibration.json",
     "reports/status/referee_calibration_runs/",
     "reports/status/events/",
+    "reports/status/integrity_audit/",
+    "reports/status/recall_audit/",
 )
 FORBIDDEN_INTEGRATION_READY_OUTPUT_PREFIXES = (
     "data/raw/",
@@ -5183,6 +5185,8 @@ def _literature_corpus_entries() -> tuple[dict[str, dict[str, object]], list[dic
                     actual=payload.get("schema_version"),
                 )
             )
+        acquisition_id = payload.get("acquisition_id")
+        manifest_method = payload.get("acquisition_method")
         strategy = payload.get("search_strategy")
         if not isinstance(strategy, dict):
             failures.append(_science_failure("literature_search_strategy_missing", subject=subject))
@@ -5258,7 +5262,19 @@ def _literature_corpus_entries() -> tuple[dict[str, dict[str, object]], list[dic
                 )
             if not any(isinstance(entry.get(field), str) and entry.get(field, "").strip() for field in ("url", "doi")):
                 failures.append(_science_failure("literature_url_or_doi_missing", subject=citekey))
-            entries[citekey] = dict(entry)
+            if (
+                entry.get("acquisition_method") not in {"live", "fixture"}
+                or entry.get("acquisition_method") != manifest_method
+                or not isinstance(entry.get("resolved_url"), str)
+                or not entry.get("resolved_url", "").strip()
+                or not isinstance(entry.get("response_metadata"), dict)
+            ):
+                failures.append(_science_failure("literature_acquisition_provenance_invalid", subject=citekey))
+            entries[citekey] = {
+                **entry,
+                "_acquisition_id": acquisition_id,
+                "_manifest_path": subject,
+            }
     return entries, failures
 
 
@@ -5295,11 +5311,35 @@ def gate_literature_corpus() -> GateResult:
 def gate_recall_audit() -> GateResult:
     paths = sorted(Path("reports/status/recall_audit").glob("*.json"))
     if not paths:
+        corpus_entries, _corpus_failures = _literature_corpus_entries()
+        ledger, ledger_error = _load_json_file(Path("contracts/claims.yaml"))
+        claims = ledger.get("claims") if ledger_error is None and isinstance(ledger, dict) else []
+        has_literature_claim = any(
+            isinstance(claim, dict) and claim.get("type") == "literature"
+            for claim in claims if isinstance(claims, list)
+        )
+        if corpus_entries or has_literature_claim:
+            return GateResult(
+                ok=False,
+                details={
+                    "status": "missing",
+                    "failures": [_science_failure("recall_audit_required", subject="W-Lit")],
+                },
+            )
         return GateResult(
             ok=True,
             details={"status": "no_recall_audit", "skipped": True, "failures": []},
         )
     failures: list[dict[str, object]] = []
+    try:
+        framework = json.loads(Path("contracts/framework.json").read_text(encoding="utf-8"))
+        threshold = framework["literature_policy"]["recall_uncovered_cluster_threshold"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        threshold = None
+    corpus_manifest_paths = {
+        path.as_posix(): _sha256_and_bytes(path)[0]
+        for path in sorted(Path("data/raw/literature").glob("????-??-??/manifest_*.json"))
+    }
     for path in paths:
         payload, error = _load_json_file(path)
         subject = path.as_posix()
@@ -5312,6 +5352,102 @@ def gate_recall_audit() -> GateResult:
             failures.append(_science_failure("recall_audit_not_independent", subject=subject))
         if payload.get("primary_family") == payload.get("recall_family"):
             failures.append(_science_failure("recall_audit_family_of_primary", subject=subject))
+        if not isinstance(threshold, int) or isinstance(threshold, bool) or threshold < 1 or payload.get("uncovered_cluster_threshold") != threshold:
+            failures.append(_science_failure("recall_audit_threshold_not_contract_pinned", subject=subject))
+
+        derived_families: dict[str, str] = {}
+        derived_run_ids: dict[str, str] = {}
+        for field in ("primary_run_manifest", "recall_run_manifest"):
+            binding = payload.get(field)
+            bound_path = _safe_repo_relative_path(binding.get("path")) if isinstance(binding, dict) else None
+            run, run_error = _load_json_file(bound_path) if bound_path is not None and bound_path.is_file() else (None, "missing")
+            executor = run.get("executor") if isinstance(run, dict) else None
+            tool = executor.get("tool") if isinstance(executor, dict) else None
+            if (
+                run_error is not None
+                or not isinstance(binding, dict)
+                or not isinstance(tool, str)
+                or binding.get("sha256") != _sha256_and_bytes(bound_path)[0]
+            ):
+                failures.append(_science_failure("recall_audit_executor_run_unverified", subject=f"{subject}:{field}"))
+                continue
+            derived_families[field] = tool.casefold()
+            derived_run_ids[field] = str(run.get("run_id"))
+        if (
+            len(set(derived_run_ids.values())) != 2
+            or derived_families.get("primary_run_manifest") != str(payload.get("primary_family", "")).casefold()
+            or derived_families.get("recall_run_manifest") != str(payload.get("recall_family", "")).casefold()
+        ):
+            failures.append(_science_failure("recall_audit_executor_independence_unverified", subject=subject))
+
+        primary_bindings = payload.get("primary_query_database_manifests")
+        bound_primary = {
+            item.get("path"): item.get("sha256")
+            for item in primary_bindings
+            if isinstance(item, dict)
+        } if isinstance(primary_bindings, list) else {}
+        if bound_primary != corpus_manifest_paths:
+            failures.append(_science_failure("recall_audit_primary_query_manifest_unverified", subject=subject))
+        recall_binding = payload.get("recall_query_database_manifest")
+        recall_path = _safe_repo_relative_path(recall_binding.get("path")) if isinstance(recall_binding, dict) else None
+        recall_search, recall_error = _load_json_file(recall_path) if recall_path is not None and recall_path.is_file() else (None, "missing")
+        if (
+            recall_path is None
+            or not recall_path.is_file()
+            or recall_binding.get("sha256") != _sha256_and_bytes(recall_path)[0]
+            or recall_error is not None
+        ):
+            failures.append(_science_failure("recall_audit_query_manifest_unverified", subject=subject))
+        else:
+            primary_strategy = recall_search.get("primary_search_strategy")
+            recall_strategy = recall_search.get("search_strategy")
+            primary_run = recall_search.get("primary_run_manifest")
+            recall_run = recall_search.get("recall_run_manifest")
+            report_primary_run = payload.get("primary_run_manifest")
+            report_recall_run = payload.get("recall_run_manifest")
+            primary_manifest_strategies: list[object] = []
+            for manifest_path in corpus_manifest_paths:
+                manifest, manifest_error = _load_json_file(Path(manifest_path))
+                if manifest_error is None and isinstance(manifest, dict):
+                    primary_manifest_strategies.append(manifest.get("search_strategy"))
+            recomputed_independence = (
+                isinstance(primary_strategy, dict)
+                and isinstance(recall_strategy, dict)
+                and primary_strategy in primary_manifest_strategies
+                and isinstance(report_primary_run, dict)
+                and isinstance(report_recall_run, dict)
+                and primary_run == report_primary_run.get("path")
+                and recall_run == report_recall_run.get("path")
+                and len(set(derived_run_ids.values())) == 2
+                and derived_families.get("primary_run_manifest") != derived_families.get("recall_run_manifest")
+                and str(primary_strategy.get("executor_family", "")).casefold() == derived_families.get("primary_run_manifest")
+                and str(recall_strategy.get("executor_family", "")).casefold() == derived_families.get("recall_run_manifest")
+                and set(primary_strategy.get("queries", [])) != set(recall_strategy.get("queries", []))
+                and set(primary_strategy.get("databases", [])) != set(recall_strategy.get("databases", []))
+            )
+            if (
+                payload.get("primary_search_strategy") != primary_strategy
+                or payload.get("recall_search_strategy") != recall_strategy
+                or payload.get("independent_search") is not recomputed_independence
+                or not recomputed_independence
+            ):
+                failures.append(_science_failure("recall_audit_independence_unverified", subject=subject))
+            corpus_entries, _corpus_failures = _literature_corpus_entries()
+            by_cluster: dict[str, list[str]] = {}
+            retrieved = recall_search.get("retrieved")
+            for item in retrieved if isinstance(retrieved, list) else []:
+                if not isinstance(item, dict) or not isinstance(item.get("citekey"), str) or item["citekey"] in corpus_entries:
+                    continue
+                cluster = item.get("cluster")
+                label = cluster.strip() if isinstance(cluster, str) and cluster.strip() else "unclustered"
+                by_cluster.setdefault(label, []).append(item["citekey"])
+            expected_uncovered = [
+                {"cluster": cluster, "citekeys": sorted(keys), "count": len(keys)}
+                for cluster, keys in sorted(by_cluster.items())
+                if isinstance(threshold, int) and not isinstance(threshold, bool) and len(keys) >= threshold
+            ]
+            if payload.get("uncovered_clusters") != expected_uncovered:
+                failures.append(_science_failure("recall_audit_uncovered_clusters_mismatch", subject=subject))
         uncovered = payload.get("uncovered_clusters")
         if not isinstance(uncovered, list):
             failures.append(_science_failure("recall_audit_uncovered_clusters_invalid", subject=subject))
@@ -5468,6 +5604,124 @@ def _post_audit_commit_failures(payload: dict[str, object], path: Path) -> list[
     return failures
 
 
+def _integrity_inventory_artifacts(inventory: dict[str, object]) -> dict[str, str]:
+    artifacts: dict[str, str] = {}
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            path = value.get("path")
+            digest = value.get("sha256")
+            if isinstance(path, str) and isinstance(digest, str):
+                artifacts[path] = digest.casefold()
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(inventory.get("artifacts", inventory))
+    return artifacts
+
+
+def _authoritative_integrity_audit_path(paths: list[Path]) -> Path | None:
+    by_relpath = {path.as_posix(): path for path in paths}
+    events, _malformed = _read_swarm_events(Path.cwd())
+    for event in reversed(events):
+        if event.get("event") != "integrity_audit_recorded":
+            continue
+        raw_path = event.get("report_path")
+        digest = event.get("report_sha256")
+        candidate = by_relpath.get(raw_path) if isinstance(raw_path, str) else None
+        if candidate is not None and isinstance(digest, str) and _sha256_and_bytes(candidate)[0] == digest:
+            return candidate
+    if _repo_has_git_worktree(Path.cwd()):
+        cp = subprocess.run(
+            ["git", "ls-files", "--", "reports/status/integrity_audit/*.json"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        committed = sorted(by_relpath[path] for path in cp.stdout.splitlines() if path in by_relpath)
+        if committed:
+            return committed[-1]
+    return paths[-1] if paths else None
+
+
+def _configured_integrity_executor() -> dict[str, str] | None:
+    try:
+        framework = json.loads(Path("contracts/framework.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    executors = framework.get("executors") if isinstance(framework, dict) else None
+    config = executors.get("integrity_audit") if isinstance(executors, dict) else None
+    if not isinstance(config, dict):
+        return None
+    values = {key: config.get(key) for key in ("backend", "family", "model")}
+    if not all(isinstance(value, str) and value.strip() for value in values.values()):
+        return None
+    return {key: str(value).strip() for key, value in values.items()}
+
+
+def _integrity_builder_evidence_failures(
+    payload: dict[str, object], inventory_hashes: dict[str, str], subject: str
+) -> tuple[set[str], list[dict[str, object]]]:
+    failures: list[dict[str, object]] = []
+    derived: set[str] = set()
+    executor = payload.get("executor")
+    evidence = executor.get("builder_run_manifest_evidence") if isinstance(executor, dict) else None
+    if not isinstance(evidence, list) or not evidence:
+        return derived, [_science_failure("builder_family_unverified", subject=subject)]
+    reported = {
+        item.get("run_manifest"): item
+        for item in evidence
+        if isinstance(item, dict) and isinstance(item.get("run_manifest"), str)
+    }
+    expected_runs: set[str] = set()
+    for run_path in sorted(Path("reports/status/swarm_runs").glob("*.json")):
+        run, error = _load_json_file(run_path)
+        if error is not None or run is None:
+            continue
+        ownership = run.get("ownership")
+        changed = ownership.get("changed_paths") if isinstance(ownership, dict) else None
+        produced: list[dict[str, str]] = []
+        for raw_path in changed if isinstance(changed, list) else []:
+            path = _safe_repo_relative_path(raw_path)
+            expected = inventory_hashes.get(path.as_posix()) if path is not None else None
+            if (
+                path is not None
+                and not path.as_posix().startswith("reports/status/")
+                and path.is_file()
+                and expected is not None
+                and _sha256_and_bytes(path)[0] == expected
+            ):
+                produced.append({"path": path.as_posix(), "sha256": expected})
+        if not produced:
+            continue
+        relpath = run_path.as_posix()
+        expected_runs.add(relpath)
+        run_executor = run.get("executor")
+        tool = run_executor.get("tool") if isinstance(run_executor, dict) else None
+        family = tool.strip().casefold() if isinstance(tool, str) and tool.strip() else None
+        if family in {None, "manual", "operator_backfill", "legacy_backfill"}:
+            failures.append(_science_failure("builder_family_unverified", subject=relpath))
+            continue
+        derived.add(family)
+        item = reported.get(relpath)
+        reported_artifacts = item.get("artifacts") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or item.get("family") != family
+            or item.get("family_source") != "executor.tool"
+            or reported_artifacts != produced
+        ):
+            failures.append(_science_failure("builder_family_evidence_mismatch", subject=relpath))
+    if not expected_runs:
+        failures.append(_science_failure("builder_family_unverified", subject=subject))
+    if set(reported) != expected_runs:
+        failures.append(_science_failure("builder_family_evidence_mismatch", subject=subject))
+    return derived, failures
+
+
 def gate_integrity_audit() -> GateResult:
     paths = sorted(Path("reports/status/integrity_audit").glob("*.json"))
     if not paths:
@@ -5475,54 +5729,80 @@ def gate_integrity_audit() -> GateResult:
             ok=True,
             details={"status": "no_integrity_audit", "skipped": True, "failures": []},
         )
-    loaded: list[tuple[str, Path, dict[str, object]]] = []
     failures: list[dict[str, object]] = []
-    for path in paths:
-        payload, error = _load_json_file(path)
-        if error is not None or payload is None:
-            failures.append(_science_failure("invalid_integrity_audit_report", subject=path.as_posix(), actual=error))
-            continue
-        loaded.append((str(payload.get("generated_at_utc", "")), path, payload))
-    if not loaded:
+    path = _authoritative_integrity_audit_path(paths)
+    if path is None:
         return GateResult(ok=False, details={"status": "invalid", "failures": failures})
-    _, path, payload = sorted(loaded)[-1]
+    payload, error = _load_json_file(path)
+    if error is not None or payload is None:
+        failures.append(_science_failure("invalid_integrity_audit_report", subject=path.as_posix(), actual=error))
+        return GateResult(ok=False, details={"status": "invalid", "failures": failures})
     subject = path.as_posix()
-    if payload.get("schema_version") != INTEGRITY_AUDIT_SCHEMA_VERSION:
-        failures.append(_science_failure("invalid_integrity_audit_schema", subject=subject))
+    schema_issues = _schema_failures(payload, Path("contracts/schemas/integrity_audit_v1.json"))
+    for issue in schema_issues:
+        failures.append(_science_failure("invalid_integrity_audit_schema", subject=subject, actual=issue))
     if payload.get("status") != "pass":
         failures.append(_science_failure("integrity_audit_blocked", subject=subject, actual=payload.get("failures")))
-    if payload.get("mode") not in {"empirical", "modeling", "hybrid"}:
-        failures.append(_science_failure("integrity_audit_mode_invalid", subject=subject))
+    project_mode = _parse_project_mode(Path("contracts/project.yaml")) or "empirical"
+    if payload.get("mode") != project_mode:
+        failures.append(_science_failure("integrity_audit_mode_mismatch", subject=subject, expected=project_mode, actual=payload.get("mode")))
     executor = payload.get("executor")
+    configured_executor = _configured_integrity_executor()
     if not isinstance(executor, dict):
         failures.append(_science_failure("integrity_audit_executor_missing", subject=subject))
     else:
         audit_family = executor.get("audit_family")
         builders = executor.get("builder_families")
+        if configured_executor is None:
+            failures.append(_science_failure("integrity_audit_executor_contract_missing", subject=subject))
+        elif (
+            executor.get("backend") != configured_executor["backend"]
+            or executor.get("model") != configured_executor["model"]
+            or audit_family != configured_executor["family"]
+        ):
+            failures.append(_science_failure("integrity_audit_executor_contract_mismatch", subject=subject))
         if not isinstance(audit_family, str) or not isinstance(builders, list) or not builders:
             failures.append(_science_failure("integrity_audit_family_evidence_missing", subject=subject))
-        elif audit_family.casefold() in {str(item).casefold() for item in builders}:
-            failures.append(_science_failure("integrity_audit_family_of_builder", subject=subject))
         if executor.get("profile") != "scratch-worktree" or executor.get("network") != "off":
             failures.append(_science_failure("integrity_audit_profile_invalid", subject=subject))
         if executor.get("commit_push_allowed") is not False:
             failures.append(_science_failure("integrity_audit_commit_push_enabled", subject=subject))
     inventory = payload.get("release_inventory")
+    inventory_payload: dict[str, object] = {}
+    inventory_hashes: dict[str, str] = {}
     if isinstance(inventory, dict) and isinstance(inventory.get("path"), str):
         inventory_path = _safe_repo_relative_path(inventory["path"])
         if inventory_path is None or not inventory_path.is_file():
             failures.append(_science_failure("integrity_audit_inventory_missing", subject=subject))
         elif inventory.get("sha256") != _sha256_and_bytes(inventory_path)[0]:
             failures.append(_science_failure("integrity_audit_inventory_hash_mismatch", subject=subject))
+        else:
+            loaded_inventory, inventory_error = _load_json_file(inventory_path)
+            if inventory_error is not None or loaded_inventory is None:
+                failures.append(_science_failure("integrity_audit_inventory_invalid", subject=subject))
+            else:
+                inventory_payload = loaded_inventory
+                inventory_hashes = _integrity_inventory_artifacts(inventory_payload)
     else:
         failures.append(_science_failure("integrity_audit_inventory_binding_missing", subject=subject))
     rebuilds = payload.get("surface_rebuilds")
     inventory_checks = payload.get("inventory_hash_checks")
-    if not isinstance(inventory_checks, list) or not inventory_checks or any(
-        not isinstance(item, dict) or item.get("passed") is not True
-        for item in inventory_checks
-    ):
+    if not isinstance(inventory_checks, list) or not inventory_checks:
         failures.append(_science_failure("integrity_audit_inventory_surface_mismatch", subject=subject))
+    else:
+        for item in inventory_checks:
+            check_path = _safe_repo_relative_path(item.get("path")) if isinstance(item, dict) else None
+            expected = inventory_hashes.get(check_path.as_posix()) if check_path is not None else None
+            actual = _sha256_and_bytes(check_path)[0] if check_path is not None and check_path.is_file() else None
+            if (
+                check_path is None
+                or actual is None
+                or actual != expected
+                or item.get("release_inventory_sha256") != expected
+                or item.get("scratch_sha256") != actual
+                or item.get("passed") is not True
+            ):
+                failures.append(_science_failure("integrity_audit_inventory_surface_mismatch", subject=subject))
     if payload.get("mode") in {"empirical", "hybrid"} and (
         not isinstance(rebuilds, list) or not rebuilds
     ):
@@ -5530,20 +5810,51 @@ def gate_integrity_audit() -> GateResult:
     elif isinstance(rebuilds, list):
         for rebuild in rebuilds:
             outputs = rebuild.get("outputs") if isinstance(rebuild, dict) else None
-            if not isinstance(outputs, list) or not outputs or any(
-                not isinstance(item, dict)
-                or item.get("matches_manifest") is not True
-                or item.get("matches_release_inventory") is not True
-                for item in outputs
-            ):
+            manifest_path = _safe_repo_relative_path(rebuild.get("manifest")) if isinstance(rebuild, dict) else None
+            manifest_payload, manifest_error = _load_json_file(manifest_path) if manifest_path is not None and manifest_path.is_file() else (None, "missing")
+            manifest_outputs = {
+                item.get("path"): item.get("sha256")
+                for item in manifest_payload.get("outputs", [])
+                if isinstance(item, dict)
+            } if manifest_error is None and isinstance(manifest_payload, dict) and isinstance(manifest_payload.get("outputs"), list) else {}
+            invalid_output = not isinstance(outputs, list) or not outputs
+            for item in outputs if isinstance(outputs, list) else []:
+                output_path = _safe_repo_relative_path(item.get("path")) if isinstance(item, dict) else None
+                actual = _sha256_and_bytes(output_path)[0] if output_path is not None and output_path.is_file() else None
+                expected_inventory = inventory_hashes.get(output_path.as_posix()) if output_path is not None else None
+                expected_manifest = manifest_outputs.get(output_path.as_posix()) if output_path is not None else None
+                if (
+                    actual is None
+                    or actual != expected_inventory
+                    or actual != expected_manifest
+                    or item.get("recomputed_sha256") != actual
+                    or item.get("release_inventory_sha256") != expected_inventory
+                    or item.get("expected_manifest_sha256") != expected_manifest
+                    or item.get("matches_manifest") is not True
+                    or item.get("matches_release_inventory") is not True
+                ):
+                    invalid_output = True
+            if invalid_output:
                 failures.append(_science_failure("integrity_audit_recompute_mismatch", subject=subject))
     claims = payload.get("claim_recomputations")
-    if not isinstance(claims, list) or not claims or any(
-        not isinstance(item, dict) or item.get("passed") is not True for item in claims
-    ):
+    if not isinstance(claims, list) or not claims or any(not isinstance(item, dict) or item.get("passed") is not True for item in claims):
         failures.append(_science_failure("integrity_audit_claim_recomputation_failed", subject=subject))
     elif not any(item.get("headline") is True for item in claims if isinstance(item, dict)):
         failures.append(_science_failure("integrity_audit_headline_recomputation_missing", subject=subject))
+    else:
+        for claim in claims:
+            if not isinstance(claim, dict) or claim.get("headline") is not True:
+                continue
+            sources = claim.get("source_artifacts")
+            if not isinstance(sources, list) or not sources:
+                failures.append(_science_failure("integrity_audit_claim_source_unbound", subject=str(claim.get("claim_id"))))
+                continue
+            for source in sources:
+                source_path = _safe_repo_relative_path(source.get("path")) if isinstance(source, dict) else None
+                actual = _sha256_and_bytes(source_path)[0] if source_path is not None and source_path.is_file() else None
+                expected = inventory_hashes.get(source_path.as_posix()) if source_path is not None else None
+                if not isinstance(source, dict) or actual is None or actual != expected or source.get("asserted_sha256") != actual or source.get("release_inventory_sha256") != expected:
+                    failures.append(_science_failure("integrity_audit_claim_source_hash_mismatch", subject=str(claim.get("claim_id"))))
     decisions = payload.get("etl_decision_samples")
     if not isinstance(decisions, list) or not decisions or any(
         not isinstance(item, dict)
@@ -5571,6 +5882,17 @@ def gate_integrity_audit() -> GateResult:
         or any(not isinstance(item, dict) or item.get("status") != "pass" for item in seams)
     ):
         failures.append(_science_failure("integrity_audit_seam_failed", subject=subject))
+    derived_builders, builder_failures = _integrity_builder_evidence_failures(payload, inventory_hashes, subject)
+    failures.extend(builder_failures)
+    reported_builders = {str(item).casefold() for item in executor.get("builder_families", [])} if isinstance(executor, dict) and isinstance(executor.get("builder_families"), list) else set()
+    if derived_builders != reported_builders:
+        failures.append(_science_failure("builder_family_evidence_mismatch", subject=subject))
+    audit_family = executor.get("audit_family") if isinstance(executor, dict) else None
+    if isinstance(audit_family, str) and audit_family.casefold() in derived_builders:
+        failures.append(_science_failure("integrity_audit_family_of_builder", subject=subject))
+    confinement = payload.get("repo_confinement")
+    if not isinstance(confinement, dict) or confinement.get("passed") is not True or confinement.get("changed_paths") != []:
+        failures.append(_science_failure("integrity_audit_repo_confinement_failed", subject=subject))
     failures.extend(_post_audit_commit_failures(payload, path))
     return GateResult(
         ok=not failures,
@@ -5578,7 +5900,7 @@ def gate_integrity_audit() -> GateResult:
     )
 
 
-def gate_citation_integrity() -> GateResult:
+def gate_citation_integrity(*, require_literature_corpus: bool = False) -> GateResult:
     """Check bibliography keys against committed, fresh, clean offline snapshots."""
     manuscript = Path("reports/paper/index.qmd")
     manuscript_bibliography = manuscript.parent / "references.bib"
@@ -5821,7 +6143,7 @@ def gate_citation_integrity() -> GateResult:
                 _science_failure("citation_url_unresolved", subject=subject, field="url_resolves")
             )
 
-    if corpus_entries:
+    if corpus_entries or require_literature_corpus:
         for citekey in sorted(remote_keys - set(corpus_entries)):
             failures.append(
                 _science_failure(
@@ -5854,6 +6176,16 @@ def gate_citation_integrity() -> GateResult:
                 failures.append(
                     _science_failure("literature_bib_corpus_identity_mismatch", subject=citekey, field="title")
                 )
+    if require_literature_corpus:
+        try:
+            framework = json.loads(Path("contracts/framework.json").read_text(encoding="utf-8"))
+            allowed_fixture_ids = set(framework.get("literature_policy", {}).get("fixture_test_corpus_acquisition_ids", []))
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+            allowed_fixture_ids = set()
+        for citekey in sorted(remote_keys & set(corpus_entries)):
+            entry = corpus_entries[citekey]
+            if entry.get("acquisition_method") == "fixture" and entry.get("_acquisition_id") not in allowed_fixture_ids:
+                failures.append(_science_failure("fixture_backed_literature_release_claim", subject=citekey))
     ledger, ledger_error = _load_json_file(Path("contracts/claims.yaml"))
     raw_claims = ledger.get("claims") if ledger_error is None and isinstance(ledger, dict) else []
     for index, claim in enumerate(raw_claims if isinstance(raw_claims, list) else []):

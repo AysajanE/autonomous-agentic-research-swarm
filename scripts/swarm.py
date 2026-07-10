@@ -107,6 +107,8 @@ EXECUTOR_FORBIDDEN_CONTROL_PLANE_PATHS = (
     "reports/status/referee_calibration.json",
     "reports/status/referee_calibration_runs/",
     "reports/status/events/",
+    "reports/status/integrity_audit/",
+    "reports/status/recall_audit/",
 )
 
 GATE_OUTPUT_SEGMENT_BYTES = 8 * 1024

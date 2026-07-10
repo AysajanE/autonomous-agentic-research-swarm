@@ -187,7 +187,13 @@ def _default_framework_json(mode: str) -> dict[str, Any]:
             "reports/status/referee_calibration.json",
             "reports/status/referee_calibration_runs/",
             "reports/status/events/",
+            "reports/status/integrity_audit/",
+            "reports/status/recall_audit/",
         ],
+        "literature_policy": {
+            "recall_uncovered_cluster_threshold": 2,
+            "fixture_test_corpus_acquisition_ids": [],
+        },
         "referee_panel": {
             "required_non_authoring_families": 2,
             "owner_waiver": None,
@@ -209,6 +215,13 @@ def _default_framework_json(mode: str) -> dict[str, Any]:
             ],
         },
         "executors": {
+            "integrity_audit": {
+                "backend": "claude",
+                "family": "claude",
+                "command": "claude",
+                "model": "fixture-auditor",
+                "profile": "scratch-worktree",
+            },
             "planner": {
                 "backend": "claude",
                 "command": "claude",
