@@ -21,6 +21,13 @@ inputs:
     sha256: "<64-character manifest sha256>"
     comparison_basis: false  # validation tasks need at least one true, disjoint from construction inputs
 allow_network: false  # true requires a framework-allowlisted network workstream
+# W-Lit only: uncomment the full mini-PRISMA block; recall audits also set recall_audit_of and must use a different family/query/database mix.
+# search_phase: acquisition  # acquisition|recall_audit
+# search_family: "<model family>"
+# search_databases: ["<database>"]
+# search_queries: ["<exact query>"]
+# inclusion_criteria: ["<criterion>"]
+# recall_audit_of: "T___"
 role: Worker
 priority: medium
 dependencies: []

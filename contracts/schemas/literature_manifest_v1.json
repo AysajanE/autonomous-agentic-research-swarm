@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "research_swarm.literature_manifest.v1",
+  "type": "object",
+  "required": ["schema_version", "acquisition_id", "retrieved_on", "search_strategy", "entries"],
+  "properties": {
+    "schema_version": {"const": "research_swarm.literature_manifest.v1"},
+    "acquisition_id": {"type": "string", "minLength": 1},
+    "retrieved_on": {"type": "string", "format": "date"},
+    "search_strategy": {
+      "type": "object",
+      "required": ["databases", "queries", "inclusion_criteria", "executor_family"]
+    },
+    "entries": {"type": "array", "minItems": 1}
+  }
+}

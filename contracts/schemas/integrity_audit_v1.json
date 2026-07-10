@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "research_swarm.integrity_audit.v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at_utc",
+    "status",
+    "mode",
+    "audited_git_sha",
+    "release_inventory",
+    "executor",
+    "sampling",
+    "surface_rebuilds",
+    "inventory_hash_checks",
+    "claim_recomputations",
+    "etl_decision_samples",
+    "failures"
+  ],
+  "properties": {
+    "schema_version": {"const": "research_swarm.integrity_audit.v1"},
+    "status": {"enum": ["pass", "block"]},
+    "mode": {"enum": ["empirical", "modeling", "hybrid"]},
+    "audit_task_id": {"type": ["string", "null"], "pattern": "^T[0-9]{3,}$"},
+    "audited_git_sha": {"type": "string"},
+    "release_inventory": {"type": "object"},
+    "executor": {"type": "object"},
+    "sampling": {"type": "object"},
+    "surface_rebuilds": {"type": "array"},
+    "inventory_hash_checks": {"type": "array", "minItems": 1},
+    "claim_recomputations": {"type": "array"},
+    "etl_decision_samples": {"type": "array"},
+    "experiment_recomputations": {"type": "array"},
+    "theoretical_rederivations": {"type": "array"},
+    "seam_audits": {"type": "array"},
+    "authorized_post_audit_repairs": {"type": "array"},
+    "failures": {"type": "array", "items": {"type": "string"}}
+  }
+}

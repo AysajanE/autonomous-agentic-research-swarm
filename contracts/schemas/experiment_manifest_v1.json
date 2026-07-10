@@ -25,6 +25,22 @@
     "solver_version": {"type": "string", "minLength": 1},
     "optimality_gap": {"type": "number", "minimum": 0},
     "converged": {"type": "boolean"},
-    "outputs": {"type": ["array", "object"]}
+    "outputs": {"type": ["array", "object"]},
+    "reproduction_command": {"type": "string", "minLength": 1},
+    "audit_outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "comparison"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "comparison": {"enum": ["sha256", "numeric_json"]},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "json_key": {"type": "string", "minLength": 1},
+          "expected": {"type": "number"},
+          "tolerance": {"type": "number", "minimum": 0}
+        }
+      }
+    }
   }
 }

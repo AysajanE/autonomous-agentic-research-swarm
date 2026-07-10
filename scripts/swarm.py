@@ -55,6 +55,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import swarm_claims
 import swarm_events
 import sweep_tasks
+import literature
 from calibrate_referee import calibration_report_failures
 from generate_revision_tasks import generate_revision_tasks
 from swarm_taskfile import WorktreeCollisionError
@@ -875,9 +876,18 @@ def _referee_task_in_scope(task: Task) -> bool:
         "writing",
     }
     return bool(
-        tiered_scientific
+        kind == "lit_review"
+        or tiered_scientific
         or task.workstream in {"W6", "W7"}
         or any(_path_matches_prefix(output, "reports/paper/") for output in task.outputs)
+    )
+
+
+def _referee_finding_is_advisory(task_kind: str | None, item: object) -> bool:
+    return bool(
+        task_kind == "lit_review"
+        and isinstance(item, dict)
+        and item.get("check_id") == "LIT_CITATION_ALIGNMENT"
     )
 
 
@@ -1221,10 +1231,21 @@ def _referee_required_verdicts(
 
 
 def _render_referee_prompt(repo: Path, context: dict[str, object]) -> str:
-    prompt_path = repo / "docs" / "prompts" / "referee.md"
     try:
+        framework = json.loads(_read_text(repo / "contracts/framework.json"))
+        executors = framework.get("executors") if isinstance(framework, dict) else None
+        panel = executors.get("referee_panel") if isinstance(executors, dict) else None
+        configured = next(
+            (
+                item.get("prompt_path")
+                for item in panel
+                if isinstance(item, dict) and isinstance(item.get("prompt_path"), str)
+            ),
+            "contracts/prompts/referee.md",
+        ) if isinstance(panel, list) else "contracts/prompts/referee.md"
+        prompt_path = repo / configured
         base_prompt = _read_text(prompt_path).strip()
-    except OSError as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("referee_prompt_unreadable") from exc
     return "\n".join(
         [
@@ -4308,6 +4329,53 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_lit_review(args: argparse.Namespace) -> int:
+    """Route the operator-facing command to the provenance-bounded W-Lit CLI."""
+    repo = _repo_root()
+    forwarded = [args.literature_command]
+    if args.literature_command == "acquire":
+        forwarded.extend(["--request", args.request, "--retrieval-date", args.retrieval_date])
+        if args.fixture_dir:
+            forwarded.extend(["--fixture-dir", args.fixture_dir])
+        if args.allow_network:
+            forwarded.append("--allow-network")
+    elif args.literature_command == "generate-bib":
+        forwarded.extend(["--output", args.output])
+    else:
+        forwarded.extend(
+            [
+                "--search",
+                args.search,
+                "--output",
+                args.output,
+                "--cluster-threshold",
+                str(args.cluster_threshold),
+            ]
+        )
+    forwarded.extend(["--repo-root", str(repo)])
+    returncode = literature.main(forwarded)
+    if args.literature_command == "recall-audit":
+        report_path = Path(args.output)
+        if not report_path.is_absolute():
+            report_path = repo / report_path
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            report = None
+        if isinstance(report, dict) and report.get("requires_human_escalation") is True:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "recall_audit_uncovered_cluster",
+                    "report": report_path.relative_to(repo).as_posix(),
+                    "clusters": report.get("uncovered_clusters"),
+                    "required_gate": "@human",
+                },
+                escalation=True,
+            )
+    return returncode
+
+
 def _new_cost_bucket() -> dict[str, object]:
     return {
         "run_count": 0,
@@ -4704,9 +4772,22 @@ def cmd_referee_task(args: argparse.Namespace) -> int:
     major_not_supported = [
         item
         for item in verdicts
-        if item.get("severity") == "major" and item.get("verdict") == "not_supported"
+        if item.get("severity") == "major"
+        and item.get("verdict") == "not_supported"
+        and not _referee_finding_is_advisory(task.task_kind, item)
     ]
-    cannot_verify = [item for item in verdicts if item.get("verdict") == "cannot_verify"]
+    cannot_verify = [
+        item
+        for item in verdicts
+        if item.get("verdict") == "cannot_verify"
+        and not _referee_finding_is_advisory(task.task_kind, item)
+    ]
+    advisory_findings = [
+        item
+        for item in verdicts
+        if item.get("verdict") in {"not_supported", "cannot_verify"}
+        and _referee_finding_is_advisory(task.task_kind, item)
+    ]
     blocking = [*major_not_supported, *cannot_verify]
     unregistered = [
         item
@@ -4739,7 +4820,7 @@ def cmd_referee_task(args: argparse.Namespace) -> int:
         )
 
     revision_paths: list[Path] = []
-    if blocking:
+    if blocking or advisory_findings:
         try:
             revision_paths = generate_revision_tasks(repo=output_repo, report_path=report_path)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -4758,6 +4839,7 @@ def cmd_referee_task(args: argparse.Namespace) -> int:
             "report": report_relpath,
             "referee_family": outcome.referee_family,
             "overall": overall,
+            "advisory_findings": [item.get("check_id") for item in advisory_findings],
             "revision_tasks": [path.relative_to(output_repo).as_posix() for path in revision_paths],
         },
     )
@@ -5056,11 +5138,12 @@ def _referee_review_failures(
                 continue
             verdict = item.get("verdict")
             identifier = item.get("success_criterion_id", item.get("check_id", "unknown"))
-            if verdict == "cannot_verify":
+            if verdict == "cannot_verify" and not _referee_finding_is_advisory(task.task_kind, item):
                 failures.append(f"referee_cannot_verify:{identifier}")
             if (
                 verdict == "not_supported"
                 and _referee_report_severity(evidence_repo, report, item) == "major"
+                and not _referee_finding_is_advisory(task.task_kind, item)
             ):
                 failures.append(f"referee_not_supported:{identifier}")
             if (
@@ -9541,6 +9624,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             "role": task.role,
             "runner": "local_swarm",
             "tool": executor_backend if not args.skip_executor else "manual",
+            "family": executor_backend if not args.skip_executor else "manual",
             "model": args.codex_model,
             "sandbox": args.codex_sandbox,
             "allow_network": task.allow_network,
@@ -10022,6 +10106,25 @@ def build_parser() -> argparse.ArgumentParser:
     costs = subparsers.add_parser("costs", help="Aggregate executor usage and estimated spend")
     costs.add_argument("--json", action="store_true")
     costs.set_defaults(func=cmd_costs)
+
+    lit_review = subparsers.add_parser(
+        "lit-review", help="Acquire, audit, or synthesize the manifested W-Lit corpus"
+    )
+    lit_sub = lit_review.add_subparsers(dest="literature_command", required=True)
+    lit_acquire = lit_sub.add_parser("acquire", help="Snapshot literature sources")
+    lit_acquire.add_argument("--request", required=True)
+    lit_acquire.add_argument("--retrieval-date", required=True)
+    lit_acquire.add_argument("--fixture-dir")
+    lit_acquire.add_argument("--allow-network", action="store_true")
+    lit_acquire.set_defaults(func=cmd_lit_review)
+    lit_bib = lit_sub.add_parser("generate-bib", help="Generate BibTeX from the corpus")
+    lit_bib.add_argument("--output", default="reports/paper/references.bib")
+    lit_bib.set_defaults(func=cmd_lit_review)
+    lit_recall = lit_sub.add_parser("recall-audit", help="Diff an independent search against the corpus")
+    lit_recall.add_argument("--search", required=True)
+    lit_recall.add_argument("--output", required=True)
+    lit_recall.add_argument("--cluster-threshold", type=int, default=2)
+    lit_recall.set_defaults(func=cmd_lit_review)
 
     referee_task = subparsers.add_parser(
         "referee-task",

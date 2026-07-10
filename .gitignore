@@ -99,6 +99,10 @@ __pypackages__/
 
 # Data artifacts (keep schemas tracked)
 data/raw/
+!data/raw/
+data/raw/*
+!data/raw/literature/
+!data/raw/literature/**
 data/processed/
 data/tmp/
 data/cache/

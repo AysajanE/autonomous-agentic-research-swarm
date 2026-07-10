@@ -8,6 +8,7 @@
 |---|---|---|---|
 | `contracts/project.yaml` | Current project instance contract | W0 reviewed change only | current mode, artifact DAG, battle-test queue, release outputs |
 | `contracts/framework.json` | Framework policy contract | W0 reviewed change only | allowed roles/states, prompt paths, network allowlists, review-bundle policy |
+| `contracts/prompts/` | Versioned truth-seeking role prompts | W0 reviewed change only | hash-pinned by `manifest.json`; wording is owner-reviewed |
 | `contracts/hybrid_interface_v1.yaml` | Only allowed empirical-to-modeling boundary | W0 reviewed change only | hybrid stays contract-ready until a real hybrid project is executed |
 | `contracts/data_dictionary.md` | Canonical table/field definitions | W0 reviewed change only | keep aligned with protocol and schemas |
 | `contracts/decisions.md` | Decision log for result-affecting choices | W0 reviewed change only | record rationale and blast radius |

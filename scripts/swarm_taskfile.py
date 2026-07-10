@@ -746,6 +746,86 @@ def lint_task_files(
                 diagnostics, task, "task_kind", "invalid_task_kind", list(TASK_KIND_VALUES), fields.task_kind
             )
 
+        if fields.task_kind == "lit_review":
+            allow_network = frontmatter.get("allow_network")
+            if allow_network not in {True, "true", "True"}:
+                _diagnostic(
+                    diagnostics,
+                    task,
+                    "allow_network",
+                    "lit_review_requires_network",
+                    True,
+                    allow_network,
+                )
+            phase = _string(frontmatter.get("search_phase"))
+            if phase not in {"acquisition", "recall_audit"}:
+                _diagnostic(
+                    diagnostics,
+                    task,
+                    "search_phase",
+                    "invalid_literature_search_phase",
+                    "acquisition or recall_audit",
+                    phase,
+                )
+            for field in ("search_databases", "search_queries", "inclusion_criteria"):
+                value = frontmatter.get(field)
+                if not isinstance(value, list) or not value or not all(
+                    isinstance(item, str) and item.strip() for item in value
+                ):
+                    _diagnostic(
+                        diagnostics,
+                        task,
+                        field,
+                        "literature_search_strategy_missing",
+                        "non-empty list of strings",
+                        value,
+                    )
+            family = _string(frontmatter.get("search_family"))
+            if family is None:
+                _diagnostic(
+                    diagnostics,
+                    task,
+                    "search_family",
+                    "literature_search_family_missing",
+                    "non-empty model family",
+                    family,
+                )
+            if phase == "recall_audit":
+                primary_id = _string(frontmatter.get("recall_audit_of"))
+                primary = tasks_by_id.get(primary_id or "")
+                if primary_id is None or primary is None:
+                    _diagnostic(
+                        diagnostics,
+                        task,
+                        "recall_audit_of",
+                        "recall_primary_task_missing",
+                        "existing lit_review task id",
+                        primary_id,
+                    )
+                else:
+                    primary_family = _string(primary.get("search_family"))
+                    if family is not None and family == primary_family:
+                        _diagnostic(
+                            diagnostics,
+                            task,
+                            "search_family",
+                            "recall_audit_family_of_primary",
+                            f"different from {primary_family}",
+                            family,
+                        )
+                    for field in ("search_databases", "search_queries"):
+                        current = frontmatter.get(field)
+                        original = primary.get(field)
+                        if isinstance(current, list) and isinstance(original, list) and set(current) == set(original):
+                            _diagnostic(
+                                diagnostics,
+                                task,
+                                field,
+                                "recall_audit_search_not_independent",
+                                "different set from primary search",
+                                current,
+                            )
+
         if fields.complexity_tier not in COMPLEXITY_TIER_VALUES:
             _diagnostic(
                 diagnostics,

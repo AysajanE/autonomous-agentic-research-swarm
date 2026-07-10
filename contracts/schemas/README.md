@@ -13,6 +13,8 @@ Canonical schemas for this project:
 - `experiment_spec_v1.json` (Lock A experiment-design surface)
 - `experiment_manifest_v1.json` (solver-run registration surface)
 - `referee_report_v1.json` (cross-family per-criterion/check findings surface)
+- `integrity_audit_v1.json` (scratch-worktree recomputation and family-separation report)
+- `literature_manifest_v1.json` (append-only W-Lit snapshot provenance and mini-PRISMA strategy)
 
 The three M3a JSON Schemas above are loaded directly by
 `scripts/quality_gates.py`; do not duplicate their required-field lists in
