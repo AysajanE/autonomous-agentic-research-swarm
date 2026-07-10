@@ -1282,6 +1282,20 @@ def _validate_swarm_run_manifest(path: Path, contract: FrameworkContract) -> lis
         if executor.get("role") not in set(contract.task_execution_roles):
             failures.append(f"{path}:invalid_executor_role:{executor.get('role')}")
 
+    if "usage" in payload:
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            failures.append(f"{path}:usage:not_object")
+        else:
+            wall_clock_seconds = usage.get("wall_clock_seconds")
+            if not isinstance(wall_clock_seconds, (int, float)) or isinstance(
+                wall_clock_seconds, bool
+            ):
+                failures.append(f"{path}:usage:invalid_wall_clock_seconds")
+            source = usage.get("source")
+            if not isinstance(source, str):
+                failures.append(f"{path}:usage:invalid_source")
+
     commands = payload.get("commands")
     command_keys = {"executor", "gates"}
     if schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION:

@@ -64,10 +64,14 @@ from swarm_taskfile import update_task_status_and_notes as _shared_update_task_s
 
 
 SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
 JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
+MOCK_TRANSCRIPT_SCHEMA_VERSION = "research_swarm.mock_transcript.v1"
+EXECUTOR_SESSION_SCHEMA_VERSION = "research_swarm.executor_session.v1"
 
 EXECUTOR_LOG_MAX_BYTES = 128 * 1024
 EXECUTOR_LOG_SEGMENT_BYTES = 64 * 1024
+EXECUTOR_SESSION_SEGMENT_BYTES = 16 * 1024
 
 DEFAULT_REVIEW_MIN_SEPARATION_SECONDS = 60
 DEFAULT_REPAIR_MAX_ATTEMPTS = 2
@@ -188,6 +192,15 @@ class Task:
     last_updated: str
 
 
+@dataclasses.dataclass(frozen=True)
+class ExecutorOutcome:
+    returncode: int
+    stdout: str
+    wall_clock_seconds: float
+    usage: dict[str, object] | None
+    transcript_path: str | None
+
+
 def _utc_now_iso() -> str:
     return dt.datetime.now(tz=dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -296,6 +309,191 @@ def _invoke_executor(
     )
 
 
+def _parse_codex_usage(stdout: str) -> dict[str, object] | None:
+    """Best-effort parser for token splits printed by the Codex CLI.
+
+    A total-only ``tokens used`` line is deliberately not attributed to either
+    input or output: doing so would make cost estimation look more precise than
+    the executor output permits.
+    """
+    if not isinstance(stdout, str) or not stdout:
+        return None
+
+    number = r"(\d[\d,_]*)"
+    input_matches = re.findall(
+        rf"\binput(?:\s+tokens?)?\s*[:=]\s*{number}",
+        stdout,
+        flags=re.IGNORECASE,
+    )
+    output_matches = re.findall(
+        rf"\boutput(?:\s+tokens?)?\s*[:=]\s*{number}",
+        stdout,
+        flags=re.IGNORECASE,
+    )
+    if not input_matches and not output_matches:
+        return None
+
+    usage: dict[str, object] = {"source": "parsed"}
+    if input_matches:
+        usage["input_tokens"] = int(input_matches[-1].replace(",", "").replace("_", ""))
+    if output_matches:
+        usage["output_tokens"] = int(output_matches[-1].replace(",", "").replace("_", ""))
+    return usage
+
+
+def _mock_transcript_relpath(task_id: str) -> str:
+    return f".orchestrator/mock_transcripts/{task_id}.json"
+
+
+def _safe_mock_action_path(repo: Path, raw_path: object) -> Path:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError("mock_action_path_invalid")
+    normalized = raw_path.replace("\\", "/")
+    if (
+        Path(raw_path).is_absolute()
+        or re.match(r"^[A-Za-z]:/", normalized)
+        or any(part == ".." for part in normalized.split("/"))
+    ):
+        raise ValueError(f"mock_action_path_forbidden:{raw_path}")
+    candidate = (repo / raw_path).resolve()
+    try:
+        candidate.relative_to(repo.resolve())
+    except ValueError as exc:
+        raise ValueError(f"mock_action_path_forbidden:{raw_path}") from exc
+    return candidate
+
+
+def _mock_usage(raw_usage: object) -> dict[str, object] | None:
+    if raw_usage is None:
+        return None
+    if not isinstance(raw_usage, dict):
+        raise ValueError("mock_usage_invalid")
+    usage: dict[str, object] = {"source": "mock_transcript"}
+    for key in ("input_tokens", "output_tokens"):
+        value = raw_usage.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"mock_usage_invalid:{key}")
+        usage[key] = value
+    return usage
+
+
+def _run_mock_transcript(*, repo: Path, task: Task) -> tuple[int, str, dict[str, object] | None, str]:
+    transcript_relpath = _mock_transcript_relpath(task.task_id)
+    transcript_path = repo / transcript_relpath
+    if not transcript_path.is_file():
+        return 1, f"mock_transcript_missing:{transcript_relpath}", None, transcript_relpath
+
+    try:
+        payload = json.loads(_read_text(transcript_path))
+        if not isinstance(payload, dict):
+            raise ValueError("mock_transcript_not_object")
+        if payload.get("schema_version") != MOCK_TRANSCRIPT_SCHEMA_VERSION:
+            raise ValueError(f"mock_transcript_schema_invalid:{payload.get('schema_version')}")
+        actions = payload.get("actions")
+        if not isinstance(actions, list):
+            raise ValueError("mock_transcript_actions_invalid")
+
+        for index, action in enumerate(actions):
+            if not isinstance(action, dict):
+                raise ValueError(f"mock_transcript_action_invalid:{index}")
+            action_keys = [
+                key for key in ("write", "append", "set_task_state", "note") if key in action
+            ]
+            if len(action_keys) != 1:
+                raise ValueError(f"mock_transcript_action_invalid:{index}")
+            action_key = action_keys[0]
+            if action_key in {"write", "append"}:
+                target = _safe_mock_action_path(repo, action[action_key])
+                content = action.get("content")
+                if not isinstance(content, str):
+                    raise ValueError(f"mock_transcript_content_invalid:{index}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                mode = "a" if action_key == "append" else "w"
+                with target.open(mode, encoding="utf-8") as handle:
+                    handle.write(content)
+            elif action_key == "set_task_state":
+                new_state = action[action_key]
+                if not isinstance(new_state, str):
+                    raise ValueError(f"mock_transcript_state_invalid:{index}")
+                _update_task_status_and_notes(
+                    task_path=task.path,
+                    new_state=new_state,
+                    note_line=f"Mock transcript set task state to {new_state}.",
+                )
+            else:
+                note = action[action_key]
+                if not isinstance(note, str):
+                    raise ValueError(f"mock_transcript_note_invalid:{index}")
+                current_state = _parse_status_value(_read_text(task.path), "State")
+                if current_state is None:
+                    raise ValueError("mock_transcript_task_state_missing")
+                _update_task_status_and_notes(
+                    task_path=task.path,
+                    new_state=current_state,
+                    note_line=note,
+                )
+
+        returncode = payload.get("returncode")
+        stdout = payload.get("stdout")
+        if not isinstance(returncode, int) or isinstance(returncode, bool):
+            raise ValueError("mock_transcript_returncode_invalid")
+        if not isinstance(stdout, str):
+            raise ValueError("mock_transcript_stdout_invalid")
+        usage = _mock_usage(payload.get("usage"))
+        return returncode, stdout, usage, transcript_relpath
+    except Exception as exc:
+        detail = str(exc).replace("\n", " ").strip()
+        return (
+            1,
+            f"mock_transcript_error:{type(exc).__name__}:{detail}",
+            None,
+            transcript_relpath,
+        )
+
+
+def _execute_task(
+    *,
+    backend: str,
+    task: Task,
+    prompt: str,
+    args: argparse.Namespace,
+    repo: Path,
+    timeout_seconds: int | None,
+) -> ExecutorOutcome:
+    started = time.perf_counter()
+    if backend == "mock":
+        returncode, stdout, usage, transcript_path = _run_mock_transcript(repo=repo, task=task)
+    elif backend == "codex":
+        prepared_command = getattr(args, "_executor_command", None)
+        command = (
+            list(prepared_command)
+            if isinstance(prepared_command, list)
+            else _codex_exec_cmd(
+                prompt=prompt,
+                model=getattr(args, "codex_model", None),
+                sandbox=getattr(args, "codex_sandbox", "workspace-write"),
+                unattended=bool(getattr(args, "unattended", False)),
+                allow_network=task.allow_network,
+                workdir=repo,
+            )
+        )
+        cp = _invoke_executor(command=command, cwd=repo, timeout_seconds=timeout_seconds)
+        returncode = cp.returncode
+        stdout = cp.stdout or ""
+        usage = _parse_codex_usage(stdout)
+        transcript_path = None
+    else:
+        raise ValueError(f"unsupported_executor_backend:{backend}")
+
+    return ExecutorOutcome(
+        returncode=returncode,
+        stdout=stdout,
+        wall_clock_seconds=max(0.0, time.perf_counter() - started),
+        usage=usage,
+        transcript_path=transcript_path,
+    )
+
+
 def _executor_output_bytes(output: object) -> bytes:
     if isinstance(output, bytes):
         return output
@@ -315,6 +513,107 @@ def _write_executor_log(*, repo: Path, run_id: str, output: object) -> tuple[str
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_bytes(raw)
     return log_path.relative_to(repo).as_posix(), hashlib.sha256(raw).hexdigest()
+
+
+def _redact_argv_env_values(argv: list[str]) -> list[str]:
+    sensitive_fragments = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH", "API_KEY")
+    environment = [(key, value) for key, value in os.environ.items() if value]
+    redacted: list[str] = []
+    for raw_arg in argv:
+        arg = str(raw_arg)
+        for key, value in environment:
+            marker = f"<redacted-env:{key}>"
+            if arg == value:
+                arg = marker
+            elif arg == f"{key}={value}":
+                arg = f"{key}={marker}"
+            elif any(fragment in key.upper() for fragment in sensitive_fragments) and value in arg:
+                arg = arg.replace(value, marker)
+        redacted.append(arg)
+    return redacted
+
+
+def _write_executor_session(
+    *,
+    repo: Path,
+    run_id: str,
+    backend: str,
+    argv: list[str],
+    returncode: int | None,
+    wall_clock_seconds: float,
+    stdout: object,
+    usage: dict[str, object],
+) -> str:
+    raw = _executor_output_bytes(stdout)
+    head = raw[:EXECUTOR_SESSION_SEGMENT_BYTES].decode("utf-8", errors="replace")
+    tail = raw[-EXECUTOR_SESSION_SEGMENT_BYTES:].decode("utf-8", errors="replace")
+    session_path = repo / "reports" / "status" / "swarm_runs" / "sessions" / f"{run_id}.json"
+    _write_json(
+        session_path,
+        {
+            "schema_version": EXECUTOR_SESSION_SCHEMA_VERSION,
+            "run_id": run_id,
+            "backend": backend,
+            "argv": _redact_argv_env_values(argv),
+            "returncode": returncode,
+            "wall_clock_seconds": wall_clock_seconds,
+            "stdout_head": head,
+            "stdout_tail": tail,
+            "stdout_sha256": hashlib.sha256(raw).hexdigest(),
+            "usage": usage,
+        },
+    )
+    return session_path.relative_to(repo).as_posix()
+
+
+def _usage_with_cost_estimate(
+    *,
+    repo: Path,
+    model: object,
+    wall_clock_seconds: float,
+    captured_usage: dict[str, object] | None,
+) -> dict[str, object]:
+    usage: dict[str, object] = {
+        "wall_clock_seconds": round(max(0.0, wall_clock_seconds), 6),
+        "source": "unavailable",
+    }
+    if captured_usage is not None:
+        usage.update(captured_usage)
+
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    if not (
+        isinstance(model, str)
+        and model
+        and isinstance(input_tokens, int)
+        and not isinstance(input_tokens, bool)
+        and isinstance(output_tokens, int)
+        and not isinstance(output_tokens, bool)
+    ):
+        return usage
+
+    try:
+        framework = json.loads(_read_text(repo / "contracts" / "framework.json"))
+    except (OSError, json.JSONDecodeError):
+        return usage
+    pricing = framework.get("pricing") if isinstance(framework, dict) else None
+    model_pricing = pricing.get(model) if isinstance(pricing, dict) else None
+    if not isinstance(model_pricing, dict):
+        return usage
+    input_rate = model_pricing.get("input_per_mtok_usd")
+    output_rate = model_pricing.get("output_per_mtok_usd")
+    if not (
+        isinstance(input_rate, (int, float))
+        and not isinstance(input_rate, bool)
+        and isinstance(output_rate, (int, float))
+        and not isinstance(output_rate, bool)
+    ):
+        return usage
+
+    estimated = ((input_tokens * float(input_rate)) + (output_tokens * float(output_rate))) / 1_000_000
+    usage["estimated_cost_usd"] = round(estimated, 4)
+    usage["pricing_source"] = "framework_contract"
+    return usage
 
 
 def _task_frontmatter_snapshot(path: Path) -> tuple[str, dict[str, object]]:
@@ -2120,6 +2419,153 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _new_cost_bucket() -> dict[str, object]:
+    return {
+        "run_count": 0,
+        "wall_clock_seconds": 0.0,
+        "runs_without_usage": 0,
+        "_input_tokens": 0,
+        "_input_seen": False,
+        "_output_tokens": 0,
+        "_output_seen": False,
+        "_estimated_cost_usd": 0.0,
+        "_cost_seen": False,
+    }
+
+
+def _add_cost_record(bucket: dict[str, object], usage: object) -> None:
+    bucket["run_count"] = int(bucket["run_count"]) + 1
+    if not isinstance(usage, dict):
+        bucket["runs_without_usage"] = int(bucket["runs_without_usage"]) + 1
+        return
+
+    wall_clock = usage.get("wall_clock_seconds")
+    source = usage.get("source")
+    if isinstance(wall_clock, (int, float)) and not isinstance(wall_clock, bool):
+        bucket["wall_clock_seconds"] = float(bucket["wall_clock_seconds"]) + float(wall_clock)
+    if not isinstance(source, str) or source == "unavailable":
+        bucket["runs_without_usage"] = int(bucket["runs_without_usage"]) + 1
+
+    input_tokens = usage.get("input_tokens")
+    if isinstance(input_tokens, int) and not isinstance(input_tokens, bool):
+        bucket["_input_tokens"] = int(bucket["_input_tokens"]) + input_tokens
+        bucket["_input_seen"] = True
+    output_tokens = usage.get("output_tokens")
+    if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+        bucket["_output_tokens"] = int(bucket["_output_tokens"]) + output_tokens
+        bucket["_output_seen"] = True
+    estimated_cost = usage.get("estimated_cost_usd")
+    if isinstance(estimated_cost, (int, float)) and not isinstance(estimated_cost, bool):
+        bucket["_estimated_cost_usd"] = float(bucket["_estimated_cost_usd"]) + float(estimated_cost)
+        bucket["_cost_seen"] = True
+
+
+def _finalize_cost_bucket(bucket: dict[str, object]) -> dict[str, object]:
+    result: dict[str, object] = {
+        "run_count": int(bucket["run_count"]),
+        "wall_clock_seconds": round(float(bucket["wall_clock_seconds"]), 6),
+        "runs_without_usage": int(bucket["runs_without_usage"]),
+    }
+    if bucket["_input_seen"]:
+        result["input_tokens"] = int(bucket["_input_tokens"])
+    if bucket["_output_seen"]:
+        result["output_tokens"] = int(bucket["_output_tokens"])
+    if bucket["_cost_seen"]:
+        result["estimated_cost_usd"] = round(float(bucket["_estimated_cost_usd"]), 4)
+    return result
+
+
+def _costs_payload(run_manifest_dir: Path) -> dict[str, object]:
+    total = _new_cost_bucket()
+    dimensions: dict[str, dict[str, dict[str, object]]] = {
+        "by_task_id": {},
+        "by_workstream": {},
+        "by_model": {},
+    }
+    if run_manifest_dir.exists():
+        for path in sorted(run_manifest_dir.glob("*.json")):
+            try:
+                manifest = json.loads(_read_text(path))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(manifest, dict) or manifest.get("schema_version") not in {
+                SWARM_RUN_MANIFEST_SCHEMA_VERSION,
+                SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1,
+            }:
+                continue
+            task = manifest.get("task") if isinstance(manifest.get("task"), dict) else {}
+            executor = (
+                manifest.get("executor") if isinstance(manifest.get("executor"), dict) else {}
+            )
+            keys = {
+                "by_task_id": task.get("task_id"),
+                "by_workstream": task.get("workstream"),
+                "by_model": executor.get("model"),
+            }
+            usage = manifest.get("usage")
+            _add_cost_record(total, usage)
+            for dimension, raw_key in keys.items():
+                key = raw_key if isinstance(raw_key, str) and raw_key else "unknown"
+                bucket = dimensions[dimension].setdefault(key, _new_cost_bucket())
+                _add_cost_record(bucket, usage)
+
+    return {
+        dimension: {
+            key: _finalize_cost_bucket(bucket)
+            for key, bucket in sorted(buckets.items())
+        }
+        for dimension, buckets in dimensions.items()
+    } | {"total": _finalize_cost_bucket(total)}
+
+
+def _render_costs_text(payload: dict[str, object]) -> str:
+    lines = [
+        "Swarm costs",
+        "dimension        group                 runs   wall_s       input      output     cost_usd  missing",
+    ]
+    for dimension in ("by_task_id", "by_workstream", "by_model"):
+        buckets = payload.get(dimension)
+        if not isinstance(buckets, dict):
+            continue
+        for key, bucket in buckets.items():
+            if not isinstance(bucket, dict):
+                continue
+            lines.append(
+                f"{dimension.removeprefix('by_'):<16} {str(key):<21} "
+                f"{int(bucket.get('run_count', 0)):>5} "
+                f"{float(bucket.get('wall_clock_seconds', 0.0)):>9.3f} "
+                f"{str(bucket.get('input_tokens', '-')):>11} "
+                f"{str(bucket.get('output_tokens', '-')):>11} "
+                f"{str(bucket.get('estimated_cost_usd', '-')):>12} "
+                f"{int(bucket.get('runs_without_usage', 0)):>8}"
+            )
+    total = payload.get("total") if isinstance(payload.get("total"), dict) else {}
+    lines.append(
+        f"{'total':<16} {'all':<21} "
+        f"{int(total.get('run_count', 0)):>5} "
+        f"{float(total.get('wall_clock_seconds', 0.0)):>9.3f} "
+        f"{str(total.get('input_tokens', '-')):>11} "
+        f"{str(total.get('output_tokens', '-')):>11} "
+        f"{str(total.get('estimated_cost_usd', '-')):>12} "
+        f"{int(total.get('runs_without_usage', 0)):>8}"
+    )
+    return "\n".join(lines)
+
+
+def cmd_costs(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    try:
+        run_manifest_dir = load_framework_contract(repo).run_manifest_dir
+    except (OSError, SystemExit):
+        run_manifest_dir = repo / "reports" / "status" / "swarm_runs"
+    payload = _costs_payload(run_manifest_dir)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(_render_costs_text(payload))
+    return 0
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     repo = _repo_root()
     contract = load_framework_contract(repo)
@@ -2321,10 +2767,12 @@ def _supervisor_run_namespace(args: argparse.Namespace, task_id: str, repair_con
         task_id=task_id,
         remote=args.remote,
         base_branch=args.base_branch,
+        executor_backend=getattr(args, "executor_backend", "codex"),
         codex_model=getattr(args, "codex_model", None),
         codex_sandbox=getattr(args, "codex_sandbox", "workspace-write"),
         unattended=bool(getattr(args, "unattended", False)),
         skip_executor=False,
+        record_session=False,
         force_deps=False,
         max_worker_seconds=int(getattr(args, "max_worker_seconds", 0)),
         repair_context=repair_context,
@@ -2534,6 +2982,8 @@ def cmd_tick(args: argparse.Namespace) -> int:
             args.remote,
             "--base-branch",
             args.base_branch,
+            "--executor-backend",
+            getattr(args, "executor_backend", "codex"),
             "--codex-sandbox",
             args.codex_sandbox,
             "--final-state",
@@ -4163,6 +4613,10 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     executor_error: str | None = None
     executor_log_relpath: str | None = None
     executor_log_sha256: str | None = None
+    executor_wall_clock_seconds: float | None = None
+    executor_usage: dict[str, object] | None = None
+    executor_session_relpath: str | None = None
+    executor_backend = getattr(args, "executor_backend", "codex")
 
     if task.allow_network and task.workstream not in set(contract.network_workstreams):
         blocked_reasons.append("network_policy_violation")
@@ -4180,28 +4634,41 @@ def cmd_run_task(args: argparse.Namespace) -> int:
 
     if not args.skip_executor and not blocked_reasons:
         executor_output: object = None
+        executor_started: float | None = None
         try:
             prompt_path = _executor_prompt_path(task, contract)
             prompt = load_prompt(
                 prompt_path,
                 _build_prompt_context(task, repo, args.repair_context),
             )
-            executor_command = _codex_exec_cmd(
+            if executor_backend == "codex":
+                executor_command = _codex_exec_cmd(
+                    prompt=prompt,
+                    model=args.codex_model,
+                    sandbox=args.codex_sandbox,
+                    unattended=args.unattended,
+                    allow_network=task.allow_network,
+                    workdir=repo,
+                )
+            else:
+                executor_command = ["mock", _mock_transcript_relpath(task.task_id)]
+            executor_started = time.perf_counter()
+            execution_values = dict(vars(args))
+            execution_values["_executor_command"] = executor_command
+            execution_args = argparse.Namespace(**execution_values)
+            outcome = _execute_task(
+                backend=executor_backend,
+                task=task,
                 prompt=prompt,
-                model=args.codex_model,
-                sandbox=args.codex_sandbox,
-                unattended=args.unattended,
-                allow_network=task.allow_network,
-                workdir=repo,
-            )
-            cp = _invoke_executor(
-                command=executor_command,
-                cwd=repo,
+                args=execution_args,
+                repo=repo,
                 timeout_seconds=int(args.max_worker_seconds) if args.max_worker_seconds else None,
             )
-            executor_returncode = cp.returncode
-            executor_output = cp.stdout
-            if cp.returncode != 0:
+            executor_returncode = outcome.returncode
+            executor_output = outcome.stdout
+            executor_wall_clock_seconds = outcome.wall_clock_seconds
+            executor_usage = outcome.usage
+            if outcome.returncode != 0:
                 blocked_reasons.append("executor_failed")
         except subprocess.TimeoutExpired as exc:
             executor_output = exc.stdout
@@ -4215,11 +4682,32 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             executor_error = str(exc)
             blocked_reasons.append("executor_unavailable")
         finally:
+            if executor_started is not None and executor_wall_clock_seconds is None:
+                executor_wall_clock_seconds = max(0.0, time.perf_counter() - executor_started)
+            if executor_wall_clock_seconds is not None:
+                executor_usage = _usage_with_cost_estimate(
+                    repo=repo,
+                    model=args.codex_model,
+                    wall_clock_seconds=executor_wall_clock_seconds,
+                    captured_usage=executor_usage,
+                )
             executor_log_relpath, executor_log_sha256 = _write_executor_log(
                 repo=repo,
                 run_id=run_id,
                 output=executor_output,
             )
+            if bool(getattr(args, "record_session", False)) and executor_wall_clock_seconds is not None:
+                assert executor_usage is not None
+                executor_session_relpath = _write_executor_session(
+                    repo=repo,
+                    run_id=run_id,
+                    backend=executor_backend,
+                    argv=executor_command,
+                    returncode=executor_returncode,
+                    wall_clock_seconds=executor_usage["wall_clock_seconds"],
+                    stdout=executor_output,
+                    usage=executor_usage,
+                )
     elif args.skip_executor:
         executor_error = "executor_skipped"
 
@@ -4345,6 +4833,15 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     run_manifest_path = _next_json_artifact_path(contract.run_manifest_dir, task.task_id, run_timestamp)
     run_manifest_relpath = run_manifest_path.relative_to(repo).as_posix()
 
+    commands_block: dict[str, object] = {
+        "executor": executor_command,
+        "executor_log_path": executor_log_relpath,
+        "executor_log_sha256": executor_log_sha256,
+        "gates": list(task.gates),
+    }
+    if executor_session_relpath is not None:
+        commands_block["session_path"] = executor_session_relpath
+
     run_manifest = {
         "schema_version": SWARM_RUN_MANIFEST_SCHEMA_VERSION,
         "run_id": run_id,
@@ -4375,7 +4872,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         "executor": {
             "role": task.role,
             "runner": "local_swarm",
-            "tool": "codex" if not args.skip_executor else "manual",
+            "tool": executor_backend if not args.skip_executor else "manual",
             "model": args.codex_model,
             "sandbox": args.codex_sandbox,
             "allow_network": task.allow_network,
@@ -4383,12 +4880,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             "returncode": executor_returncode,
             "error": executor_error,
         },
-        "commands": {
-            "executor": executor_command,
-            "executor_log_path": executor_log_relpath,
-            "executor_log_sha256": executor_log_sha256,
-            "gates": list(task.gates),
-        },
+        "commands": commands_block,
         "frontmatter": {
             "pinned_sha256": pinned_frontmatter_sha256,
             "tampered": frontmatter_tampered,
@@ -4422,6 +4914,8 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         run_manifest["quarantined_tasks"] = quarantined
     if claim_stamp is not None:
         run_manifest["claim"] = claim_stamp
+    if executor_usage is not None:
+        run_manifest["usage"] = executor_usage
     _write_json(run_manifest_path, run_manifest)
     _record_swarm_event(
         repo,
@@ -4488,6 +4982,8 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         control_plane_paths = {task_file_rel, run_manifest_relpath}
         if executor_log_relpath is not None:
             control_plane_paths.add(executor_log_relpath)
+        if executor_session_relpath is not None:
+            control_plane_paths.add(executor_session_relpath)
 
         final_path_sources, _ = _collect_changed_paths_with_sources(repo=repo, base_ref=base_ref)
         for violating_path in sorted(set(uncommitted_violations)):
@@ -4792,6 +5288,10 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=cmd_status)
 
+    costs = subparsers.add_parser("costs", help="Aggregate executor usage and estimated spend")
+    costs.add_argument("--json", action="store_true")
+    costs.set_defaults(func=cmd_costs)
+
     plan = subparsers.add_parser("plan", help="Print done/claimed/ready task status as JSON")
     plan.add_argument("--remote", default="origin")
     plan.add_argument("--base-branch", default="main")
@@ -4805,6 +5305,7 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--worktree-parent", default=None)
     tick.add_argument("--remote", default="origin")
     tick.add_argument("--base-branch", default="main")
+    tick.add_argument("--executor-backend", choices=["codex", "mock"], default="codex")
     tick.add_argument("--codex-model", default=None)
     tick.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
     tick.add_argument("--unattended", action="store_true")
@@ -4825,6 +5326,7 @@ def build_parser() -> argparse.ArgumentParser:
     supervise.add_argument("--worktree-parent", default=None)
     supervise.add_argument("--remote", default="origin")
     supervise.add_argument("--base-branch", default="main")
+    supervise.add_argument("--executor-backend", choices=["codex", "mock"], default="codex")
     supervise.add_argument("--codex-model", default=None)
     supervise.add_argument(
         "--codex-sandbox",
@@ -4874,10 +5376,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_task.add_argument("--task-id", required=True)
     run_task.add_argument("--remote", default="origin")
     run_task.add_argument("--base-branch", default="main")
+    run_task.add_argument("--executor-backend", choices=["codex", "mock"], default="codex")
     run_task.add_argument("--codex-model", default=None)
     run_task.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
     run_task.add_argument("--unattended", action="store_true")
     run_task.add_argument("--skip-executor", action="store_true")
+    run_task.add_argument("--record-session", action="store_true")
     run_task.add_argument("--force-deps", action="store_true")
     run_task.add_argument("--max-worker-seconds", type=int, default=0)
     run_task.add_argument("--repair-context", default=None)

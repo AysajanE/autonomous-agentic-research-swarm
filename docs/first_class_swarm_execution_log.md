@@ -10,7 +10,25 @@ Delivery: one branch per milestone (`milestone/<id>-<slug>`), red/green-tested b
 
 ---
 
-## M0 — Stop the bleeding (branch: `milestone/m0-stop-the-bleeding`) — IN PROGRESS
+## M1 — Supervisor (branch: `milestone/m1-supervisor`) — IN PROGRESS
+
+Scope: plan §4.1 + §9.4 M1 items + §9.1 basic usage capture + mock executor (§9.3 tier-a precondition).
+
+Batch record:
+
+- **M1-A** (claim refs) — LANDED (owner-implemented; concurrency-protocol invariant). `scripts/swarm_claims.py`: claims are empty-tree commit chains under `refs/swarm/claims/<task_id>`; CAS create via non-ff push rejection (cross-clone race test: exactly one winner, blind-race rollback), monotonic lease renewal under `--force-with-lease`, guarded release, expiry → orphaned reap planning, honest `local` transport labeling without a remote.
+- **M1-B** (event journal + escalation + status) — LANDED (Codex workhorse; first dispatch killed by machine interruption with zero partial work — verified clean, re-run). `scripts/swarm_events.py` (fsync'd append-only JSONL, torn-tail tolerant; file/command escalation sinks, webhook parsed-but-deferred, shell-free), runtime event wiring (`run_started/run_finished/human_question/review_recorded/judge_block/tick_completed/loop_iteration_failed`), `swarm.py status` dashboard. Journal ownership-exempt by exact path only; journal records are ADVISORY per plan precedence.
+- **M1-C** (supervise state machine) — LANDED (Codex workhorse; mid-run kill left +1,826 unverified lines — preserved, compile-checked, completed by a re-run against the same frozen contract, then owner-reviewed in full). The 11-step crash-only cycle; claim-first TICK with WIP/backpressure/budget blocks; subprocess JUDGE with per-invocation actor sessions honoring the separation window (defers, never waives); serial MERGE queue binding approval to the exact reviewed manifest with lease fencing, operator-surface enforcement, post-merge quality+pinned-gate verification, and guarded revert (deviation recorded: revert preserves a durable blocked-state control-plane commit rather than byte-identical base reset); REAP → orphaned-never-blocked; bounded REPAIR refusing integrity blocks; `judge-task --approve-only` moves done-promotion into the merge queue. 10 integration tests incl. full happy path with journal-order assertion and idempotent second cycle. 147/147 tests, 19/19 gates.
+
+Design decisions:
+
+- **D-M1-1 (claim payload).** Claim = commit chain; message carries `research_swarm.claim.v1` JSON (`lease_id` monotonic = chain length; `claim_id` naming reserved for the §6.2 ledger per plan). Fencing at merge: manifest `claim.lease_id` must equal the live claim tip.
+- **D-M1-2 (actor sessions).** Supervisor process = worker session; judging always a subprocess with fresh `SWARM_ACTOR_SESSION` — actor separation is real in single-bot deployments (resolves the M0 Claude-adversary observation).
+- **D-M1-3 (journal commit semantics).** The journal is durable-on-disk, ownership-exempt by exact path, and never committed by task runs; supervisor-side committing deferred to operational policy. Journal-only records remain advisory (plan §4.1 precedence).
+
+---
+
+## M0 — Stop the bleeding (branch: `milestone/m0-stop-the-bleeding`) — COMPLETE (merged to main via PR #1, squash `376ba67`)
 
 Scope: plan §4.0 items 1–18, historical-record remediation, golden-suite harness seeded with 10 tasks.
 

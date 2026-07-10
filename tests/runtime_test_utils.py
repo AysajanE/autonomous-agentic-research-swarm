@@ -455,6 +455,7 @@ def write_run_manifest(
     git_sha: str | None = None,
     actor_session_id: str = "fixture-worker-session",
     generated_at_utc: str = "2026-03-29T00:00:00Z",
+    usage: dict[str, object] | None = None,
 ) -> Path:
     task_disk_path = root / task_path
     pinned_frontmatter_sha = "0" * 64
@@ -563,6 +564,8 @@ def write_run_manifest(
             "tampered_keys": [],
         }
         payload["ownership"]["uncommitted_violations"] = []
+        if usage is not None:
+            payload["usage"] = copy.deepcopy(usage)
     return write_json(root, rel, payload)
 
 
