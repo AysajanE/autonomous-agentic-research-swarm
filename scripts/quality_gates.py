@@ -18,6 +18,7 @@ import difflib
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -3268,12 +3269,25 @@ def _outcome_reported_anchor_failure(
             expected="manuscript/deviations path that reports this outcome",
         )
     base, _, fragment = reported.partition("#")
-    safe = _safe_repo_relative_path(base.strip())
-    if safe is None or not safe.is_file():
+    base = base.strip()
+    safe = _safe_repo_relative_path(base)
+    # The anchor must live on the manuscript/deviations surface (reports/ or
+    # docs/prereg/) and be a non-symlink git-tracked file — an outcome cannot be
+    # "reported" by pointing at an arbitrary or untracked working-tree file that
+    # merely happens to contain the id string.
+    on_report_surface = base.startswith("reports/") or base.startswith("docs/prereg/")
+    if (
+        safe is None
+        or not safe.is_file()
+        or safe.is_symlink()
+        or not on_report_surface
+        or not _git_path_is_tracked(safe.as_posix(), Path.cwd().resolve())
+    ):
         return _science_failure(
             "outcome_reported_in_unresolvable",
             subject=subject,
             field="reported_in",
+            expected="tracked reports/ or docs/prereg/ file",
             actual=reported,
         )
     text = _read_text(safe)
@@ -3588,6 +3602,19 @@ def gate_prereg_lock_coverage() -> GateResult:
     # cap is two amendments PER PROGRAM, and per-phase amendment versions are
     # strictly increasing in journal order — a rolled-back header + re-amend is
     # caught here even if the CLI guard was bypassed or the journal hand-edited.
+    # A corrupted (malformed) append-only journal is not auditable — silently
+    # skipping a malformed amendment line would lower the program count and let
+    # a third amendment through. Fail closed on any malformed event so the
+    # amendment cap can't be laundered by hand-corrupting an earlier line.
+    if malformed:
+        failures.append(
+            _science_failure(
+                "prereg_journal_malformed",
+                subject="reports/status/events",
+                expected="0 malformed journal events (append-only integrity)",
+                actual=malformed,
+            )
+        )
     program_amendment_count = 0
     amendment_versions_by_phase: dict[str, list[int]] = {}
     for event in events:
@@ -3840,14 +3867,15 @@ def gate_claim_evidence_ledger() -> GateResult:
             command_tokens = normalized_command.split()
             # Self-referential by parsed semantics, not three literal strings:
             # any `make gate` target or any invocation of the gate runner itself
-            # (with or without flags like --json/--gate) cannot be a claim's
+            # (with or without flags like --json/--gate, and with the path in any
+            # spelling such as ./scripts/quality_gates.py) cannot be a claim's
             # independent verification.
             is_self_referential = (
                 command_tokens[:2] == ["make", "gate"]
                 or (
                     len(command_tokens) >= 2
                     and command_tokens[0] in {"python", "python3"}
-                    and command_tokens[1] == "scripts/quality_gates.py"
+                    and os.path.normpath(command_tokens[1]) == "scripts/quality_gates.py"
                 )
             )
             if is_self_referential:
@@ -4105,15 +4133,31 @@ def gate_claim_evidence_ledger() -> GateResult:
 
 _REPORTABLE_UNIT_RE = re.compile(
     r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
-    r"(?:\s*%(?!\w)|\s*-?\s*(?:ETH|USD|EUR|GBP|bps?|basis\s+points?|days?|weeks?|months?|years?|"
-    r"rollups?|observations?|rows?|dates?|instances?|seeds?|runs?|x)\b)",
+    r"(?:"
+    r"\s*%(?!\w)"
+    r"|\s*-?\s*(?:ETH|USD|EUR|GBP|bps?|basis\s+points?|days?|weeks?|months?|years?|"
+    r"instances?|seeds?|runs?|x)\b"
+    # count nouns tolerate ONE optional descriptor word ("12,563 rent-component
+    # rows", "12,434 panel rows") so a reported count can't dodge the ledger by
+    # inserting an adjective between the number and the noun.
+    r"|\s+(?:[A-Za-z][\w-]*\s+)?(?:rollup-days?|rollups?|observations?|rows?|dates?)\b"
+    r")",
     flags=re.IGNORECASE,
 )
 _REPORTABLE_DECIMAL_RE = re.compile(r"(?<![\w.])[-+]?\d+\.\d+(?![\w.])")
 
 
 def _normalize_reportable_numeric(value: object) -> str:
-    return re.sub(r"\s+", "", str(value)).replace(",", "").casefold()
+    """Reduce a reportable literal to its numeric core (sign + digits + optional
+    decimal + optional %), dropping thousands separators and any trailing
+    unit/descriptor words — so `1,559 dates`, `1,559 daily observations`, and
+    `1559` all register as the same value, and a claim's declared literal need
+    not match the manuscript's exact phrasing."""
+    text = str(value)
+    match = re.match(r"\s*([-+]?\d[\d,]*(?:\.\d+)?)\s*(%?)", text)
+    if match is None:
+        return re.sub(r"\s+", "", text).replace(",", "").casefold()
+    return match.group(1).replace(",", "") + match.group(2)
 
 
 _CITATION_KEY_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9_:.\-]*)")
@@ -6449,7 +6493,9 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="quality_gates.py")
+    # allow_abbrev=False so a gate command cannot smuggle the kernel-injected
+    # --task-kind via a unique prefix like --task-k (verification-pass bypass).
+    parser = argparse.ArgumentParser(prog="quality_gates.py", allow_abbrev=False)
     parser.add_argument("--json", action="store_true", help="Print machine-readable output")
     parser.add_argument(
         "--task-kind",

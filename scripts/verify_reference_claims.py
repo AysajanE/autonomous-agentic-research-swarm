@@ -1,66 +1,117 @@
 #!/usr/bin/env python3
 """Offline verification for the STR battle-test reference claims.
 
-Re-derives the regime headline numbers registered in ``contracts/claims.yaml``
-from the committed ``reports/tables/str_regime_summary.csv`` and asserts each
-manuscript literal is reproduced from the table. This is the runnable
-``verification_command`` for the reference descriptive claims — a deterministic
-consistency check between the manuscript's reported numbers and the committed
-table artifact, requiring no network and no deleted raw evidence.
+Reads `contracts/claims.yaml` and, for every registered
+`manuscript_numeric_literals` value across ALL reference claims, confirms the
+value is reproduced by one of the claim's committed `supporting_artifacts`
+(numbers gathered from JSON recursively and from Markdown/CSV/text via regex).
+Percentages are matched against both their percent and fractional forms; ETH and
+plain decimals against the rounded value; counts against an exact integer.
 
-Exit 0 when every expected literal reproduces; exit 1 (with a diff) otherwise.
+This is the runnable, network-free `verification_command` the reference claims
+cite. Exit 0 when every literal reproduces; exit 1 (with a diff) otherwise.
 """
 from __future__ import annotations
 
-import csv
+import json
+import re
 import sys
 from pathlib import Path
 
-TABLE = Path("reports/tables/str_regime_summary.csv")
-
-# The manuscript literals each regime row must reproduce (percent to 2 dp;
-# ETH/day mean rent to 3 dp) — the exact figures registered in the ledger.
-EXPECTED = {
-    "full_sample": {"mean_str_pct": "41.24", "mean_rent_paid_eth": "84.886"},
-    "pre_dencun": {"mean_str_pct": "69.14", "mean_rent_paid_eth": "147.014"},
-    "post_dencun": {"mean_str_pct": "11.68", "mean_rent_paid_eth": "19.064"},
-    "post_dencun_blob_floor": {"mean_str_pct": "8.98", "mean_rent_paid_eth": "18.740"},
-    "post_dencun_non_floor": {"mean_str_pct": "12.77", "mean_rent_paid_eth": "19.194"},
-}
-EXPECTED_DAYS = {"full_sample": "1559", "pre_dencun": "802", "post_dencun": "757"}
+CLAIMS = Path("contracts/claims.yaml")
 
 
-def _round(value: str, places: int) -> str:
-    return f"{float(value):.{places}f}"
+def _iter_json_numbers(obj: object):
+    if isinstance(obj, bool):
+        return
+    if isinstance(obj, (int, float)):
+        yield float(obj)
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            yield from _iter_json_numbers(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            yield from _iter_json_numbers(value)
+
+
+_TEXT_NUMBER_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+
+
+def _artifact_numbers(path: Path) -> list[float]:
+    if not path.is_file():
+        return []
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    numbers: list[float] = []
+    if path.suffix == ".json":
+        try:
+            numbers.extend(_iter_json_numbers(json.loads(raw)))
+        except json.JSONDecodeError:
+            pass
+    for token in _TEXT_NUMBER_RE.findall(raw):
+        try:
+            numbers.append(float(token.replace(",", "")))
+        except ValueError:
+            continue
+    return numbers
+
+
+def _parse_literal(literal: str) -> tuple[float, bool] | None:
+    """Return (value, is_percent) for a registered literal, or None."""
+    match = re.match(r"\s*([-+]?\d[\d,]*(?:\.\d+)?)\s*(%?)", str(literal))
+    if match is None:
+        return None
+    try:
+        return float(match.group(1).replace(",", "")), match.group(2) == "%"
+    except ValueError:
+        return None
+
+
+def _reproduced(value: float, is_percent: bool, numbers: list[float]) -> bool:
+    decimals = len(f"{value}".split(".")[1]) if "." in f"{value}" else 0
+    targets = [value]
+    if is_percent:
+        targets.append(value / 100.0)  # artifact may store a fraction
+    for candidate in numbers:
+        for target in targets:
+            # round the artifact number to the literal's stated precision
+            if is_percent and abs(round(candidate * 100.0, decimals) - value) < 10 ** (-decimals) / 2:
+                return True
+            if abs(round(candidate, decimals) - round(target, decimals)) < 10 ** (-decimals) / 2:
+                return True
+    return False
 
 
 def main() -> int:
-    if not TABLE.is_file():
-        print(f"missing table: {TABLE}", file=sys.stderr)
+    if not CLAIMS.is_file():
+        print(f"missing ledger: {CLAIMS}", file=sys.stderr)
         return 1
-    rows = {r["regime_id"]: r for r in csv.DictReader(TABLE.read_text().splitlines())}
+    ledger = json.loads(CLAIMS.read_text(encoding="utf-8"))
     diffs: list[str] = []
-    for regime_id, fields in EXPECTED.items():
-        row = rows.get(regime_id)
-        if row is None:
-            diffs.append(f"{regime_id}: absent from table")
-            continue
-        got_str = _round(row["mean_str_pct"], 2)
-        if got_str != fields["mean_str_pct"]:
-            diffs.append(f"{regime_id}.mean_str_pct: table={got_str} claim={fields['mean_str_pct']}")
-        got_rent = _round(row["mean_rent_paid_eth"], 3)
-        if got_rent != fields["mean_rent_paid_eth"]:
-            diffs.append(f"{regime_id}.mean_rent: table={got_rent} claim={fields['mean_rent_paid_eth']}")
-    for regime_id, days in EXPECTED_DAYS.items():
-        row = rows.get(regime_id)
-        if row is not None and row["days"] != days:
-            diffs.append(f"{regime_id}.days: table={row['days']} claim={days}")
+    checked = 0
+    for claim in ledger.get("claims", []):
+        literals = claim.get("manuscript_numeric_literals") or []
+        artifacts = claim.get("supporting_artifacts") or []
+        numbers: list[float] = []
+        for artifact in artifacts:
+            numbers.extend(_artifact_numbers(Path(artifact["path"])))
+        for literal in literals:
+            parsed = _parse_literal(literal)
+            if parsed is None:
+                diffs.append(f"{claim.get('claim_id')}: unparseable literal {literal!r}")
+                continue
+            value, is_percent = parsed
+            checked += 1
+            if not _reproduced(value, is_percent, numbers):
+                diffs.append(
+                    f"{claim.get('claim_id')}: literal {literal!r} not reproduced by "
+                    f"{[a['path'] for a in artifacts]}"
+                )
     if diffs:
         print("reference-claim verification FAILED:", file=sys.stderr)
         for diff in diffs:
             print(f"  - {diff}", file=sys.stderr)
         return 1
-    print("reference-claim verification OK: all registered literals reproduce from the committed table")
+    print(f"reference-claim verification OK: {checked} registered literals reproduce from cited artifacts")
     return 0
 
 

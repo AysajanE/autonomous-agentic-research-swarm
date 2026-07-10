@@ -200,6 +200,7 @@ class GoldenM3aTest(unittest.TestCase):
                 "docs/prereg/outcomes.yaml",
                 {"schema_version": "research_swarm.prereg_outcomes.v1", "outcomes": [{"hypothesis_id": "H1", "outcome": "not_supported", "reported_in": "reports/paper/deviations.md"}]},
             )
+            repo.git("add", "-A")  # the reported_in anchor must be git-tracked
             with chdir(repo.root):
                 self.assertTrue(quality_gates.gate_prereg_conformance().ok)
 

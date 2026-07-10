@@ -135,9 +135,10 @@ def gate_command_violation(gate: str) -> str | None:
         if token in ("-c", "-m", "-"):
             return f"gate_code_execution_forbidden:{token}"
         # --task-kind is kernel-injected authority (the Judge/merge queue supply
-        # the frontmatter-authoritative kind); a task that authors it into its
-        # own gate command is attempting to select a weaker science-gate form.
-        if token == "--task-kind" or token.startswith("--task-kind="):
+        # the frontmatter-authoritative kind); a task that authors it — or any
+        # abbreviated prefix argparse would resolve to it (--task-k...) — into
+        # its own gate command is attempting to select a weaker science-gate form.
+        if token.startswith("--task-k"):
             return "gate_task_kind_author_supplied"
     script = next((token for token in rest if not token.startswith("-")), None)
     if script is None:

@@ -135,8 +135,11 @@ def evaluate_numeric_expression(expression: str, point: Mapping[str, float]) -> 
         raise NumericExpressionError("expression must be a non-empty string")
     try:
         tree = ast.parse(expression, mode="eval")
-    except SyntaxError as exc:
-        raise NumericExpressionError(f"invalid expression syntax: {exc.msg}") from exc
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: source with a NUL byte; Recursion/MemoryError: pathological
+        # nesting — all must degrade to a clean falsification error, never an
+        # uncaught traceback out of main().
+        raise NumericExpressionError(f"invalid expression: {exc}") from exc
     try:
         value = _evaluate_node(tree, point)
     except (ArithmeticError, OverflowError, ValueError, TypeError) as exc:
@@ -177,6 +180,19 @@ def _sign_holds(value: float, expected: str, tolerance: float) -> bool:
     raise NumericExpressionError(f"unknown comparative-statics sign: {expected}")
 
 
+def _as_finite_float(value: object) -> float | None:
+    """`float(value)` when it is a finite real number, else None. A huge JSON
+    integer (e.g. 10**400) raises OverflowError under `float()`; catching it
+    here keeps spec parsing from crashing the whole gate suite."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
 def _kernel_sample_points(
     domain: object,
     seed: object,
@@ -201,24 +217,21 @@ def _kernel_sample_points(
 
     bounds: dict[str, tuple[float, float]] = {}
     for name, raw_bounds in sorted(domain.items()):
+        lo = hi = None
         if (
-            not isinstance(name, str)
-            or not name.isidentifier()
-            or not isinstance(raw_bounds, list)
-            or len(raw_bounds) != 2
-            or any(
-                not isinstance(value, (int, float))
-                or isinstance(value, bool)
-                or not math.isfinite(float(value))
-                for value in raw_bounds
-            )
-            or float(raw_bounds[0]) >= float(raw_bounds[1])
+            isinstance(name, str)
+            and name.isidentifier()
+            and isinstance(raw_bounds, list)
+            and len(raw_bounds) == 2
         ):
+            lo = _as_finite_float(raw_bounds[0])
+            hi = _as_finite_float(raw_bounds[1])
+        if lo is None or hi is None or lo >= hi:
             failures.append(
                 {"reason": "falsification_domain_invalid", "name": name, "bounds": raw_bounds}
             )
             continue
-        bounds[name] = (float(raw_bounds[0]), float(raw_bounds[1]))
+        bounds[name] = (lo, hi)
     if failures:
         return [], failures
 
@@ -280,13 +293,8 @@ def evaluate_falsification_spec(spec: object) -> list[dict[str, object]]:
         point: dict[str, float] = {}
         invalid = False
         for name, value in raw_point.items():
-            if (
-                not isinstance(name, str)
-                or not name.isidentifier()
-                or not isinstance(value, (int, float))
-                or isinstance(value, bool)
-                or not math.isfinite(float(value))
-            ):
+            coordinate = _as_finite_float(value) if isinstance(name, str) and name.isidentifier() else None
+            if coordinate is None:
                 failures.append(
                     {
                         "reason": "invalid_sample_coordinate",
@@ -297,7 +305,7 @@ def evaluate_falsification_spec(spec: object) -> list[dict[str, object]]:
                 )
                 invalid = True
                 continue
-            point[name] = float(value)
+            point[name] = coordinate
         if not invalid:
             points.append(point)
 
@@ -349,12 +357,8 @@ def evaluate_falsification_spec(spec: object) -> list[dict[str, object]]:
             )
             continue
         tolerance_value = entry.get("tolerance", spec.get("tolerance", 1e-7))
-        tolerance = (
-            float(tolerance_value)
-            if isinstance(tolerance_value, (int, float)) and not isinstance(tolerance_value, bool)
-            else -1.0
-        )
-        if tolerance < 0 or not math.isfinite(tolerance):
+        tolerance = _as_finite_float(tolerance_value)
+        if tolerance is None or tolerance < 0:
             failures.append(
                 {
                     "reason": "invalid_comparative_static_tolerance",
@@ -384,14 +388,8 @@ def evaluate_falsification_spec(spec: object) -> list[dict[str, object]]:
                     if parameter not in point:
                         raise NumericExpressionError(f"parameter absent from point: {parameter}")
                     base = point[parameter]
-                    raw_step = entry.get("step")
-                    step = (
-                        float(raw_step)
-                        if isinstance(raw_step, (int, float))
-                        and not isinstance(raw_step, bool)
-                        and float(raw_step) > 0
-                        else 1e-6 * (1.0 + abs(base))
-                    )
+                    step_value = _as_finite_float(entry.get("step"))
+                    step = step_value if step_value is not None and step_value > 0 else 1e-6 * (1.0 + abs(base))
                     plus = dict(point)
                     minus = dict(point)
                     plus[parameter] = base + step

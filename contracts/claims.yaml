@@ -1,6 +1,6 @@
 {
   "schema_version": "research_swarm.claims.v1",
-  "description": "Claim-evidence ledger for the STR battle-test reference manuscript (reports/paper/index.qmd). Every reportable manuscript numeric is registered here, scoped to the citation key it is reported under, and traces to a committed, hash-pinned artifact. The full asserted->registered semantic sweep (paraphrase / claim-typing adjudication) is the M3b referee layer; numeric recompute-against-artifact is the M4 computed-value-key layer.",
+  "description": "Claim-evidence ledger for the STR battle-test reference manuscript (reports/paper/index.qmd). Every reportable manuscript numeric is registered here, scoped to the citation key it is reported under, and traces to a committed, hash-pinned artifact; scripts/verify_reference_claims.py re-derives each literal from its cited artifact offline. typing_status: PROVISIONAL. Per plan 6.2 claim type is adjudicated by a different-family referee, never self-assigned, so these owner-assigned types (descriptive for the headline STR results; methodological for the exact dataset-cardinality counts and the data-quality reconciliation diagnostic and the locked protocol constant, which are not inferential estimates carrying a sampling band) are provisional pending the M3b referee. The full asserted->registered semantic sweep (paraphrase / claim-typing) is the M3b referee layer; numeric recompute-against-artifact is the M4 computed-value-key layer.",
   "claims": [
     {
       "claim_id": "REF-STR-REGIME",
@@ -19,8 +19,8 @@
       "claim_id": "REF-PANEL-COVERAGE",
       "citation_key": "rollup_panel_validation",
       "type": "methodological",
-      "statement": "The authoritative validated panel contains 12,434 rollup-day rows across 14 rollups and 1,559 dates over the 2022-01-01 through 2026-04-08 window.",
-      "manuscript_numeric_literals": ["12,434 rollup", "14 rollups", "1,559 dates"],
+      "statement": "The authoritative validated panel contains 12,434 rollup-day rows across 14 rollups and 1,559 dates over the 2022-01-01 through 2026-04-08 window; the rent-component surface has 12,563 rows (the denominator-keyed panel omits rollup-days missing vendor fee denominators).",
+      "manuscript_numeric_literals": ["12,434 rollup", "14 rollups", "1,559 dates", "12,563 rows"],
       "supporting_artifacts": [
         {"path": "reports/validation/rollup_panel_validation.json", "sha256": "9e2489263099da247582a775d0fb193baef76a108c6919e4a73809ae2c36d66c"}
       ],

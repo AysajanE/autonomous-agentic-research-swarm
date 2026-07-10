@@ -1504,35 +1504,40 @@ def _task_registered_claim_types(repo: Path, task: Task) -> set[str]:
     return claim_types
 
 
-_PREREG_PHASE_RANK = {"2a": 1, "2b": 2, "lock_a": 1, "lock_b": 2}
+_PREREG_PHASE_ORDER = {"2a": 0, "2b": 1, "lock_a": 2, "lock_b": 3}
 
 
-def _more_advanced_phase(a: str | None, b: str | None) -> str | None:
-    """The later of two same-family prereg phases (2a<2b, lock_a<lock_b)."""
-    if a is None:
-        return b
-    if b is None:
-        return a
-    return a if _PREREG_PHASE_RANK.get(a, 0) >= _PREREG_PHASE_RANK.get(b, 0) else b
+def _effective_required_active_locks(
+    task: Task, contract: FrameworkContract
+) -> tuple[str, ...]:
+    """ALL prereg phases that must be ACTIVE before this task may claim (§6.1).
+    Claim-type requirements are ADDITIVE to the base phase, never a same-rank
+    substitution — a hybrid `analysis` task (base 2b) registering a
+    `counterfactual` claim requires BOTH 2b AND lock_b, so lock_b can never be
+    collapsed onto 2b by a rank tie. A registered `computational` claim requires
+    the experiment lock (Lock A) regardless of task_kind, so a modeling `proof`
+    task cannot register one pre-experiment-lock."""
+    mode = contract.project_mode or "empirical"
+    required: list[str] = []
+    base = _required_active_lock(task, mode)
+    if base is not None:
+        required.append(base)
+    claim_types = _task_registered_claim_types(contract.repo_root, task)
+    if mode == "hybrid" and "counterfactual" in claim_types and "lock_b" not in required:
+        required.append("lock_b")
+    if mode in {"modeling", "hybrid"} and "computational" in claim_types and "lock_a" not in required:
+        required.append("lock_a")
+    return tuple(sorted(set(required), key=lambda phase: _PREREG_PHASE_ORDER.get(phase, 99)))
 
 
 def _effective_required_active_lock(
     task: Task, contract: FrameworkContract
 ) -> str | None:
-    """The most-advanced prereg phase that must be ACTIVE before this task may
-    claim, accounting for the claim types it registers (§6.1). A registered
-    `counterfactual` claim requires Lock B; a registered `computational` claim
-    requires the experiment lock (Lock A in modeling/hybrid) regardless of
-    task_kind — so a modeling `proof` task cannot register a computational
-    claim pre-experiment-lock."""
-    mode = contract.project_mode or "empirical"
-    required = _required_active_lock(task, mode)
-    claim_types = _task_registered_claim_types(contract.repo_root, task)
-    if mode == "hybrid" and "counterfactual" in claim_types:
-        required = _more_advanced_phase(required, "lock_b")
-    if mode in {"modeling", "hybrid"} and "computational" in claim_types:
-        required = _more_advanced_phase(required, "lock_a")
-    return required
+    """Back-compat single-phase view: the FIRST (lowest-order) required-active
+    phase, or None. Callers that must enforce every requirement use
+    `_effective_required_active_locks`."""
+    phases = _effective_required_active_locks(task, contract)
+    return phases[0] if phases else None
 
 
 def _prereg_phase_is_active(repo: Path, phase: str) -> bool:
@@ -1570,16 +1575,19 @@ def ready_backlog_tasks(tasks: dict[str, Task], claimed_ids: set[str], contract:
             continue
         if task.task_id in claimed_ids:
             continue
-        required_lock = _effective_required_active_lock(task, contract)
-        if required_lock is not None and not _prereg_phase_is_active(
-            contract.repo_root, required_lock
-        ):
+        inactive_required = [
+            phase
+            for phase in _effective_required_active_locks(task, contract)
+            if not _prereg_phase_is_active(contract.repo_root, phase)
+        ]
+        if inactive_required:
             _record_swarm_event(
                 contract.repo_root,
                 {
                     "event": "blocked_on_prereg_lock",
                     "task_id": task.task_id,
-                    "required_phase": required_lock,
+                    "required_phase": inactive_required[0],
+                    "inactive_required_phases": inactive_required,
                 },
             )
             continue
@@ -2848,7 +2856,7 @@ def _run_gates(
         if (
             len(argv) >= 2
             and argv[0] in {"python", "python3", sys.executable}
-            and argv[1] == "scripts/quality_gates.py"
+            and os.path.normpath(argv[1]) == "scripts/quality_gates.py"
         ):
             # --task-kind is kernel-injected AUTHORITY, never author-supplied:
             # strip any value the task frontmatter smuggled in (which would let
@@ -7381,18 +7389,25 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     # funnel and Judge enforce, applied to the direct run-task entrypoint so a
     # manual claim cannot bypass the lock (force_deps overrides dependency
     # ordering only, never the prereg gate). Fails closed on claim AND resume.
-    required_lock = _effective_required_active_lock(task, contract)
-    if required_lock is not None and not _prereg_phase_is_active(repo, required_lock):
+    inactive_required = [
+        phase
+        for phase in _effective_required_active_locks(task, contract)
+        if not _prereg_phase_is_active(repo, phase)
+    ]
+    if inactive_required:
         _record_swarm_event(
             repo,
             {
                 "event": "blocked_on_prereg_lock",
                 "task_id": task.task_id,
-                "phase": required_lock,
+                "phase": inactive_required[0],
+                "inactive_required_phases": inactive_required,
                 "entrypoint": "run-task",
             },
         )
-        raise SystemExit(f"blocked_on_prereg_lock:{task.task_id}:{required_lock}")
+        raise SystemExit(
+            f"blocked_on_prereg_lock:{task.task_id}:{inactive_required[0]}"
+        )
 
     _require_git_identity(cwd=repo, reason="runtime")
     _preflight_strict_sync_requirements(
@@ -7937,17 +7952,17 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
         path for path, _ in matching_v2_manifests if _is_valid_run_manifest(path, task.task_id)
     ]
     review_bundle_failures: list[str] = []
-    required_lock = _effective_required_active_lock(task, contract)
-    if required_lock is not None and not _prereg_phase_is_active(repo, required_lock):
-        review_bundle_failures.append(f"inactive_prereg_lock:{required_lock}")
-        _record_swarm_event(
-            repo,
-            {
-                "event": "judge_prereg_lock_rejected",
-                "task_id": task.task_id,
-                "required_phase": required_lock,
-            },
-        )
+    for required_lock in _effective_required_active_locks(task, contract):
+        if not _prereg_phase_is_active(repo, required_lock):
+            review_bundle_failures.append(f"inactive_prereg_lock:{required_lock}")
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "judge_prereg_lock_rejected",
+                    "task_id": task.task_id,
+                    "required_phase": required_lock,
+                },
+            )
     if not valid_run_manifests:
         passing_v2_manifests = [
             (path, data)
