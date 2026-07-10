@@ -10,16 +10,38 @@
     "paper": true,
     "release": true
   },
-  "supported_modes": ["empirical", "modeling", "hybrid"],
+  "supported_modes": [
+    "empirical",
+    "modeling",
+    "hybrid"
+  ],
   "roles": {
-    "allowed": ["Planner", "Worker", "Judge", "Operator"],
+    "allowed": [
+      "Planner",
+      "Worker",
+      "Judge",
+      "Operator"
+    ],
     "default_if_unspecified": "Worker",
-    "task_execution_roles": ["Worker", "Operator"],
+    "task_execution_roles": [
+      "Worker",
+      "Operator"
+    ],
     "scientific_review_role": "Judge",
-    "folder_projection_roles": ["Planner", "Operator"]
+    "folder_projection_roles": [
+      "Planner",
+      "Operator"
+    ]
   },
   "states": {
-    "allowed": ["backlog", "active", "integration_ready", "ready_for_review", "blocked", "done"],
+    "allowed": [
+      "backlog",
+      "active",
+      "integration_ready",
+      "ready_for_review",
+      "blocked",
+      "done"
+    ],
     "authoritative_field": "State",
     "projection_dirs": [
       ".orchestrator/backlog",
@@ -56,7 +78,10 @@
   "task_file_policy": {
     "status_section": "## Status",
     "notes_section": "## Notes / Decisions",
-    "editable_sections_by_executor": ["## Status", "## Notes / Decisions"],
+    "editable_sections_by_executor": [
+      "## Status",
+      "## Notes / Decisions"
+    ],
     "handoff_dir": ".orchestrator/handoff/"
   },
   "execution_engines": {
@@ -70,7 +95,11 @@
       "owner_role": "Operator"
     }
   },
-  "network_workstreams": ["W1", "W2", "W3"],
+  "network_workstreams": [
+    "W1",
+    "W2",
+    "W3"
+  ],
   "prompt_templates": {
     "planner": "docs/prompts/planner.md",
     "worker": "docs/prompts/worker.md",
@@ -81,8 +110,19 @@
     "require_explicit_downstream_allowlist": true,
     "require_interface_outputs": true,
     "default_dependency_state": "done",
-    "eligible_workstreams": ["W0", "W3", "W8", "W9"],
-    "eligible_task_kinds": ["protocol", "registry", "bridge", "model", "ops"],
+    "eligible_workstreams": [
+      "W0",
+      "W3",
+      "W8",
+      "W9"
+    ],
+    "eligible_task_kinds": [
+      "protocol",
+      "registry",
+      "bridge",
+      "model",
+      "ops"
+    ],
     "forbid_unvalidated_empirical_data_outputs": true
   },
   "required_paths": {
@@ -119,12 +159,22 @@
     ]
   },
   "review_bundle": {
-    "required_components": ["task_markdown", "run_manifest", "judge_review_log"],
-    "optional_components": ["handoff_note"],
+    "required_components": [
+      "task_markdown",
+      "run_manifest",
+      "judge_review_log"
+    ],
+    "optional_components": [
+      "handoff_note"
+    ],
     "run_manifest_dir": "reports/status/swarm_runs",
     "judge_review_dir": "reports/status/reviews",
-    "run_manifest_required_for_states": ["ready_for_review", "done"],
-    "review_log_required_for_state": "done"
+    "run_manifest_required_for_states": [
+      "ready_for_review",
+      "done"
+    ],
+    "review_log_required_for_state": "done",
+    "min_separation_seconds": 60
   },
   "operator_owned_shared_surfaces": [
     "reports/catalog.yaml",
@@ -138,5 +188,14 @@
     "catalog_compiler_role": "Operator",
     "release_manifest_pattern": "reports/status/releases/release_<YYYY-MM-DD>.json",
     "release_assembly_command": "python scripts/release_assembly.py --release-date <YYYY-MM-DD> --check"
+  },
+  "historical_artifact_policy": {
+    "exemption_list": "contracts/historical_exemptions.json",
+    "strict_schema_rule": "strict v2+ checks apply to schema_version >= 2 artifacts; v1 artifacts must be listed on the hash-pinned exemption list and (run manifests) carry provenance annotations",
+    "provenance_annotation_dir": "reports/status/swarm_runs/annotations/",
+    "rebaseline_dirs": [
+      "data/processed_manifest/rebaselines/",
+      "data/raw_manifest/rebaselines/"
+    ]
   }
 }

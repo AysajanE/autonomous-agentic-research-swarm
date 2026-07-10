@@ -1934,6 +1934,106 @@ def gate_judge_review_log_validity() -> GateResult:
     return GateResult(ok=len(failures) == 0, details={"count": len(review_paths), "failures": failures})
 
 
+HISTORICAL_EXEMPTIONS_SCHEMA_VERSION = "research_swarm.historical_exemptions.v1"
+PROVENANCE_ANNOTATION_SCHEMA_VERSION = "research_swarm.provenance_annotation.v1"
+VALID_PROVENANCE_CLASSES = {"executor_run", "manual_operator", "backfill"}
+
+
+def gate_historical_exemptions() -> GateResult:
+    """Gate-scoping rule (plan §4.0 remediation): strict checks apply to
+    schema_version >= 2 artifacts; v1 artifacts must sit on the checked-in,
+    hash-pinned exemption list, and every exempted run manifest must carry a
+    provenance annotation that still matches the untouched original."""
+    try:
+        contract = load_framework_contract()
+    except ValueError as exc:
+        return GateResult(ok=False, details={"failures": [str(exc)]})
+
+    failures: list[str] = []
+    exempted: dict[str, dict[str, str]] = {"run_manifests": {}, "review_logs": {}}
+    exemptions_path = Path("contracts/historical_exemptions.json")
+
+    if exemptions_path.exists():
+        payload, error = _load_json_file(exemptions_path)
+        if error is not None or not isinstance(payload, dict):
+            return GateResult(ok=False, details={"failures": [f"{exemptions_path}:{error}"]})
+        if payload.get("schema_version") != HISTORICAL_EXEMPTIONS_SCHEMA_VERSION:
+            failures.append(f"{exemptions_path}:invalid_schema_version")
+        for kind in ("run_manifests", "review_logs"):
+            for item in payload.get(kind, []):
+                if not isinstance(item, dict):
+                    failures.append(f"{exemptions_path}:{kind}:invalid_entry")
+                    continue
+                rel = item.get("path")
+                expected_sha = item.get("sha256")
+                if not isinstance(rel, str) or not isinstance(expected_sha, str):
+                    failures.append(f"{exemptions_path}:{kind}:invalid_entry:{rel}")
+                    continue
+                artifact = Path(rel)
+                if not artifact.is_file():
+                    failures.append(f"exemption_list_drift:missing_file:{rel}")
+                    continue
+                actual_sha, _ = _sha256_and_bytes(artifact)
+                if actual_sha != expected_sha:
+                    failures.append(f"exemption_list_drift:sha256_mismatch:{rel}")
+                    continue
+                exempted[kind][rel] = expected_sha
+
+    def sweep_v1(directory: Path, kind: str, v1_version: str) -> int:
+        count = 0
+        if not directory.exists():
+            return count
+        for path in sorted(directory.glob("*.json")):
+            payload, error = _load_json_file(path)
+            if error is not None or not isinstance(payload, dict):
+                continue  # shape gates own malformed artifacts
+            if payload.get("schema_version") != v1_version:
+                continue
+            count += 1
+            rel = path.as_posix()
+            if rel not in exempted[kind]:
+                failures.append(f"unexempted_v1_artifact:{rel}")
+        return count
+
+    v1_runs = sweep_v1(Path(contract.run_manifest_dir), "run_manifests", SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1)
+    v1_reviews = sweep_v1(Path(contract.judge_review_dir), "review_logs", JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1)
+
+    annotations_checked = 0
+    for rel in sorted(exempted["run_manifests"]):
+        manifest_path = Path(rel)
+        annotation_path = manifest_path.parent / "annotations" / f"{manifest_path.name}.provenance.json"
+        if not annotation_path.is_file():
+            failures.append(f"provenance_annotation_missing:{rel}")
+            continue
+        annotation, error = _load_json_file(annotation_path)
+        if error is not None or not isinstance(annotation, dict):
+            failures.append(f"provenance_annotation_invalid:{rel}:{error}")
+            continue
+        annotations_checked += 1
+        if annotation.get("schema_version") != PROVENANCE_ANNOTATION_SCHEMA_VERSION:
+            failures.append(f"provenance_annotation_invalid:{rel}:schema_version")
+        if annotation.get("annotates") != rel:
+            failures.append(f"provenance_annotation_invalid:{rel}:annotates_mismatch")
+        if annotation.get("provenance_class") not in VALID_PROVENANCE_CLASSES:
+            failures.append(f"provenance_annotation_invalid:{rel}:provenance_class")
+        annotated_sha = annotation.get("annotates_sha256")
+        if annotated_sha != exempted["run_manifests"][rel]:
+            failures.append(f"provenance_annotation_invalid:{rel}:annotates_sha256_mismatch")
+
+    return GateResult(
+        ok=len(failures) == 0,
+        details={
+            "exemptions_file": exemptions_path.exists(),
+            "exempted_run_manifests": len(exempted["run_manifests"]),
+            "exempted_review_logs": len(exempted["review_logs"]),
+            "v1_run_manifests": v1_runs,
+            "v1_review_logs": v1_reviews,
+            "annotations_checked": annotations_checked,
+            "failures": failures,
+        },
+    )
+
+
 def _parse_utc_iso(value: object) -> dt.datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -2071,6 +2171,7 @@ def _collect_gate_results() -> dict[str, GateResult]:
         "raw_manifest_hashes": gate_raw_manifest_hashes(),
         "validation_report_content_binding": gate_validation_report_content_binding(),
         "projection_drift": gate_projection_drift(),
+        "historical_exemptions": gate_historical_exemptions(),
     }
 
 
