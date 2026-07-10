@@ -12,6 +12,7 @@ Stage 4 scope:
 from __future__ import annotations
 
 import argparse
+import csv
 from dataclasses import dataclass
 import datetime as dt
 import difflib
@@ -60,6 +61,9 @@ INSTANCE_MANIFEST_SCHEMA_VERSION = "research_swarm.instance_manifest.v1"
 EXPERIMENT_SPEC_SCHEMA_VERSION = "research_swarm.experiment_spec.v1"
 EXPERIMENT_MANIFEST_SCHEMA_VERSION = "research_swarm.experiment_manifest.v1"
 SWEEP_ARTIFACT_SCHEMA_VERSION = "research_swarm.sweep_artifact.v1"
+REGIME_BREAKS_SCHEMA_VERSION = "research_swarm.regime_breaks.v1"
+SPEC_CURVE_SCHEMA_VERSION = "research_swarm.spec_curve.v1"
+HEADLINE_UNCERTAINTY_SCHEMA_VERSION = "research_swarm.headline_uncertainty.v1"
 REFEREE_REPORT_SCHEMA_VERSION = "research_swarm.referee_report.v1"
 REFEREE_CALIBRATION_SCHEMA_VERSION = "research_swarm.referee_calibration.v1"
 REFEREE_RUBRIC_SCHEMA_VERSION = "research_swarm.rubric.v1"
@@ -4117,6 +4121,540 @@ def _load_prereg_outcomes() -> tuple[dict[str, dict[str, object]], list[dict[str
     return out, []
 
 
+_STATISTICAL_JSON_FENCE_RE = re.compile(
+    r"```json\s*(\{.*?\})\s*```", flags=re.DOTALL | re.IGNORECASE
+)
+
+
+def _active_statistical_config() -> tuple[
+    dict[str, object] | None,
+    str | None,
+    list[dict[str, object]],
+]:
+    """Read the schema-frozen statistical_reporting object from active lock 2b."""
+    lock_path = Path(PREREG_PHASE_FILES["2b"])
+    lock, error = load_prereg_lock(lock_path, expected_phase="2b")
+    if error is not None or lock is None:
+        return None, None, [
+            _science_failure("invalid_analysis_prereg_lock", subject=lock_path.as_posix(), actual=error)
+        ]
+    if lock.get("status") == "locked" and lock.get("active") is not True:
+        return None, None, [
+            _science_failure(
+                "prereg_lock_hash_mismatch",
+                subject=lock_path.as_posix(),
+                field="locked_sha256",
+                expected=lock.get("body_sha256"),
+                actual=lock.get("locked_sha256"),
+            )
+        ]
+    if lock.get("active") is not True:
+        return None, None, []
+    body = str(lock.get("body", ""))
+    configs: list[dict[str, object]] = []
+    failures: list[dict[str, object]] = []
+    for match in _STATISTICAL_JSON_FENCE_RE.finditer(body):
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError as exc:
+            failures.append(
+                _science_failure(
+                    "invalid_statistical_reporting_json",
+                    subject=lock_path.as_posix(),
+                    actual=str(exc),
+                )
+            )
+            continue
+        config = payload.get("statistical_reporting") if isinstance(payload, dict) else None
+        if isinstance(config, dict):
+            configs.append(config)
+    if len(configs) != 1:
+        failures.append(
+            _science_failure(
+                "statistical_reporting_lock_object_required",
+                subject=lock_path.as_posix(),
+                expected="exactly one fenced JSON statistical_reporting object",
+                actual=len(configs),
+            )
+        )
+        return None, str(lock.get("body_sha256")), failures
+    config = configs[0]
+    allowed_vce = {"newey_west", "driscoll_kraay", "clustered", "two_way_clustered"}
+    if config.get("vce") not in allowed_vce:
+        failures.append(
+            _science_failure(
+                "invalid_prereg_vce",
+                subject=lock_path.as_posix(),
+                field="statistical_reporting.vce",
+                expected=sorted(allowed_vce),
+                actual=config.get("vce"),
+            )
+        )
+    regime = config.get("regime_breaks")
+    if not isinstance(regime, dict):
+        failures.append(
+            _science_failure(
+                "prereg_regime_break_config_required",
+                subject=lock_path.as_posix(),
+                field="statistical_reporting.regime_breaks",
+            )
+        )
+    else:
+        expected_method = "bai_perron_dynamic_programming_piecewise_constant"
+        if regime.get("method") != expected_method:
+            failures.append(
+                _science_failure(
+                    "invalid_prereg_regime_method",
+                    subject=lock_path.as_posix(),
+                    expected=expected_method,
+                    actual=regime.get("method"),
+                )
+            )
+        if regime.get("series") not in {"str", "rent_paid_eth", "l2_fees_eth"}:
+            failures.append(
+                _science_failure(
+                    "invalid_prereg_regime_series",
+                    subject=lock_path.as_posix(),
+                    actual=regime.get("series"),
+                )
+            )
+        for field in ("max_breaks", "min_segment"):
+            value = regime.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                failures.append(
+                    _science_failure(
+                        "invalid_prereg_regime_parameter",
+                        subject=lock_path.as_posix(),
+                        field=f"statistical_reporting.regime_breaks.{field}",
+                        actual=value,
+                    )
+                )
+    curve = config.get("specification_curve")
+    if not isinstance(curve, dict):
+        failures.append(
+            _science_failure(
+                "invalid_prereg_spec_curve",
+                subject=lock_path.as_posix(),
+                field="statistical_reporting.specification_curve",
+            )
+        )
+    else:
+        construction = curve.get("construction_variants")
+        keying = construction.get("keying") if isinstance(construction, dict) else None
+        missingness = construction.get("missingness") if isinstance(construction, dict) else None
+        variants = curve.get("analysis_variants")
+        threshold = curve.get("survival_threshold")
+        if not isinstance(keying, list) or len(set(map(str, keying))) < 2:
+            failures.append(
+                _science_failure(
+                    "prereg_keying_multiverse_incomplete",
+                    subject=lock_path.as_posix(),
+                    expected="at least two keying variants",
+                    actual=keying,
+                )
+            )
+        if not isinstance(missingness, list) or len(set(map(str, missingness))) < 2:
+            failures.append(
+                _science_failure(
+                    "prereg_missingness_multiverse_incomplete",
+                    subject=lock_path.as_posix(),
+                    expected="at least two missingness variants",
+                    actual=missingness,
+                )
+            )
+        if not isinstance(variants, list) or not variants:
+            failures.append(
+                _science_failure(
+                    "prereg_analysis_variants_missing",
+                    subject=lock_path.as_posix(),
+                    actual=variants,
+                )
+            )
+        if not isinstance(threshold, int) or isinstance(threshold, bool) or threshold < 1:
+            failures.append(
+                _science_failure(
+                    "invalid_prereg_survival_threshold",
+                    subject=lock_path.as_posix(),
+                    actual=threshold,
+                )
+            )
+    return config, str(lock.get("body_sha256")), failures
+
+
+def _table_rows(path: Path) -> tuple[list[dict[str, object]], str | None]:
+    """Load machine-readable table rows from CSV, JSON, or Markdown pipe tables."""
+    try:
+        if path.suffix == ".csv":
+            with path.open(newline="", encoding="utf-8") as handle:
+                return [dict(row) for row in csv.DictReader(handle)], None
+        if path.suffix == ".json":
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, list) and all(isinstance(row, dict) for row in payload):
+                return [dict(row) for row in payload], None
+            if isinstance(payload, dict) and isinstance(payload.get("rows"), list) and all(
+                isinstance(row, dict) for row in payload["rows"]
+            ):
+                return [dict(row) for row in payload["rows"]], None
+            return [], "expected a list of rows or an object with rows"
+        lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
+        rows: list[dict[str, object]] = []
+        for index in range(len(lines) - 1):
+            if not lines[index].startswith("|") or not lines[index + 1].startswith("|"):
+                continue
+            separator = [cell.strip() for cell in lines[index + 1].strip("|").split("|")]
+            if not separator or not all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator):
+                continue
+            headers = [cell.strip().lower().replace(" ", "_") for cell in lines[index].strip("|").split("|")]
+            cursor = index + 2
+            while cursor < len(lines) and lines[cursor].startswith("|"):
+                cells = [cell.strip() for cell in lines[cursor].strip("|").split("|")]
+                if len(cells) == len(headers):
+                    rows.append(dict(zip(headers, cells, strict=True)))
+                cursor += 1
+        return rows, None
+    except (OSError, json.JSONDecodeError, csv.Error) as exc:
+        return [], f"{type(exc).__name__}:{exc}"
+
+
+def _row_has_value(row: dict[str, object], *fields: str) -> bool:
+    return any(field in row and str(row[field]).strip() not in {"", "null", "None"} for field in fields)
+
+
+def _validate_regime_break_manifest(path: Path) -> list[dict[str, object]]:
+    payload, error = _load_json_file(path)
+    if error is not None or payload is None:
+        return [_science_failure("invalid_regime_break_manifest", subject=path.as_posix(), actual=error)]
+    failures: list[dict[str, object]] = []
+    if payload.get("schema_version") != REGIME_BREAKS_SCHEMA_VERSION:
+        failures.append(
+            _science_failure(
+                "invalid_regime_break_schema",
+                subject=path.as_posix(),
+                expected=REGIME_BREAKS_SCHEMA_VERSION,
+                actual=payload.get("schema_version"),
+            )
+        )
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, list) or not inputs:
+        failures.append(_science_failure("regime_break_inputs_required", subject=path.as_posix()))
+    else:
+        for entry in inputs:
+            for failure in _verify_hash_claim(manifest=path, entry=entry):
+                failures.append(
+                    _science_failure(
+                        "regime_break_input_hash_invalid",
+                        subject=path.as_posix(),
+                        actual=failure,
+                    )
+                )
+    for field in ("method", "max_breaks", "min_segment", "break_dates", "ssr", "git_sha"):
+        if field not in payload:
+            failures.append(
+                _science_failure("regime_break_field_missing", subject=path.as_posix(), field=field)
+            )
+    if not isinstance(payload.get("break_dates"), list) or not all(
+        isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)
+        for value in payload.get("break_dates", [])
+    ):
+        failures.append(
+            _science_failure("invalid_regime_break_dates", subject=path.as_posix(), actual=payload.get("break_dates"))
+        )
+    return failures
+
+
+def _validate_spec_curve(
+    path: Path,
+    *,
+    claim_id: str,
+    config: dict[str, object],
+    lock_sha: str,
+) -> list[dict[str, object]]:
+    payload, error = _load_json_file(path)
+    if error is not None or payload is None:
+        return [_science_failure("invalid_spec_curve_artifact", subject=claim_id, actual=error)]
+    failures: list[dict[str, object]] = []
+    expected = {
+        "schema_version": SPEC_CURVE_SCHEMA_VERSION,
+        "claim_id": claim_id,
+        "prereg_lock_sha256": lock_sha,
+        "declared_vce": config.get("vce"),
+    }
+    for field, value in expected.items():
+        if payload.get(field) != value:
+            failures.append(
+                _science_failure(
+                    "spec_curve_field_mismatch",
+                    subject=claim_id,
+                    field=field,
+                    expected=value,
+                    actual=payload.get(field),
+                )
+            )
+    curve = config.get("specification_curve")
+    construction = curve.get("construction_variants") if isinstance(curve, dict) else None
+    variants = curve.get("analysis_variants") if isinstance(curve, dict) else None
+    expected_grid = {
+        "keying": list(construction.get("keying", [])) if isinstance(construction, dict) else [],
+        "missingness": list(construction.get("missingness", [])) if isinstance(construction, dict) else [],
+        "analysis_variant": [
+            item.get("id") for item in variants if isinstance(item, dict)
+        ] if isinstance(variants, list) else [],
+    }
+    if payload.get("grid_dimensions") != expected_grid:
+        failures.append(
+            _science_failure(
+                "spec_curve_grid_mismatch",
+                subject=claim_id,
+                expected=expected_grid,
+                actual=payload.get("grid_dimensions"),
+            )
+        )
+    specs = payload.get("specs")
+    expected_count = math.prod(len(values) for values in expected_grid.values())
+    if not isinstance(specs, list) or len(specs) != expected_count:
+        failures.append(
+            _science_failure(
+                "spec_curve_cell_count_mismatch",
+                subject=claim_id,
+                expected=expected_count,
+                actual=len(specs) if isinstance(specs, list) else specs,
+            )
+        )
+    else:
+        seen: set[str] = set()
+        for index, spec in enumerate(specs):
+            if not isinstance(spec, dict):
+                failures.append(_science_failure("invalid_spec_curve_cell", subject=f"{claim_id}:{index}"))
+                continue
+            spec_id = spec.get("spec_id")
+            if not isinstance(spec_id, str) or not spec_id or spec_id in seen:
+                failures.append(
+                    _science_failure("invalid_spec_curve_spec_id", subject=f"{claim_id}:{index}", actual=spec_id)
+                )
+            else:
+                seen.add(spec_id)
+            for field in ("construction_variant", "analysis_variant", "estimate", "se", "ci", "n", "vce"):
+                if field not in spec:
+                    failures.append(
+                        _science_failure("spec_curve_cell_field_missing", subject=f"{claim_id}:{index}", field=field)
+                    )
+            if spec.get("vce") != config.get("vce"):
+                failures.append(
+                    _science_failure(
+                        "spec_curve_vce_mismatch",
+                        subject=f"{claim_id}:{index}",
+                        expected=config.get("vce"),
+                        actual=spec.get("vce"),
+                    )
+                )
+    locked_threshold = curve.get("survival_threshold") if isinstance(curve, dict) else None
+    if payload.get("survival_threshold") != locked_threshold:
+        failures.append(
+            _science_failure(
+                "spec_curve_threshold_mismatch",
+                subject=claim_id,
+                expected=locked_threshold,
+                actual=payload.get("survival_threshold"),
+            )
+        )
+    survival = payload.get("survival_count")
+    if not isinstance(survival, int) or not isinstance(locked_threshold, int) or survival < locked_threshold:
+        failures.append(
+            _science_failure(
+                "spec_curve_survival_below_threshold",
+                subject=claim_id,
+                expected=locked_threshold,
+                actual=survival,
+            )
+        )
+    if payload.get("headline_within_curve") is not True:
+        failures.append(_science_failure("headline_outside_spec_curve", subject=claim_id))
+    for entry in payload.get("inputs", []) if isinstance(payload.get("inputs"), list) else []:
+        for failure in _verify_hash_claim(manifest=path, entry=entry):
+            failures.append(
+                _science_failure("spec_curve_input_hash_invalid", subject=claim_id, actual=failure)
+            )
+    return failures
+
+
+def gate_statistical_reporting() -> GateResult:
+    """Enforce §5.2/§6.4 inference reporting against the active analysis lock."""
+    failures: list[dict[str, object]] = []
+    regime_path = Path("reports/analysis/regime_breaks.json")
+    if regime_path.is_file():
+        failures.extend(_validate_regime_break_manifest(regime_path))
+
+    config, lock_sha, config_failures = _active_statistical_config()
+    failures.extend(config_failures)
+    if config is None or lock_sha is None:
+        return GateResult(
+            ok=not failures,
+            details={
+                "status": "no_active_analysis_lock" if not config_failures else "invalid_analysis_lock",
+                "skipped": not config_failures,
+                "regime_manifest_checked": regime_path.is_file(),
+                "failures": failures,
+            },
+        )
+
+    if not regime_path.is_file():
+        failures.append(
+            _science_failure("regime_break_manifest_required", subject=regime_path.as_posix())
+        )
+    else:
+        regime_payload, regime_error = _load_json_file(regime_path)
+        if regime_error is None and regime_payload is not None:
+            locked_regime = config.get("regime_breaks")
+            if isinstance(locked_regime, dict):
+                expected_regime_fields = {
+                    "method": locked_regime.get("method"),
+                    "series": locked_regime.get("series"),
+                    "max_breaks": locked_regime.get("max_breaks"),
+                    "min_segment": locked_regime.get("min_segment"),
+                    "prereg_lock_sha256": lock_sha,
+                    "parameter_source": "active_analysis_lock",
+                }
+                for field, expected in expected_regime_fields.items():
+                    if regime_payload.get(field) != expected:
+                        failures.append(
+                            _science_failure(
+                                "regime_break_prereg_mismatch",
+                                subject=regime_path.as_posix(),
+                                field=field,
+                                expected=expected,
+                                actual=regime_payload.get(field),
+                            )
+                        )
+    claims, claim_failures = _load_claim_ledger()
+    failures.extend(claim_failures)
+    registered = {
+        str(claim.get("claim_id")): claim
+        for claim in claims
+        if claim.get("type") in {"descriptive", "associational", "causal"}
+        and any(
+            isinstance(entry, dict)
+            and isinstance(entry.get("path"), str)
+            and entry["path"].startswith("reports/tables/")
+            for entry in claim.get("supporting_artifacts", [])
+        )
+    }
+    rows_by_claim: dict[str, list[tuple[Path, dict[str, object]]]] = {}
+    table_paths = sorted(
+        path
+        for suffix in ("*.md", "*.csv", "*.json")
+        for path in Path("reports/tables").glob(suffix)
+        if path.is_file()
+    )
+    for path in table_paths:
+        rows, error = _table_rows(path)
+        if error is not None:
+            failures.append(_science_failure("invalid_statistical_table", subject=path.as_posix(), actual=error))
+            continue
+        for index, row in enumerate(rows):
+            claim_id = str(row.get("claim_id", "")).strip()
+            marked_estimate = _row_has_value(row, "estimate") or str(row.get("headline", "")).lower() in {"true", "yes", "1"}
+            if not claim_id:
+                if marked_estimate:
+                    failures.append(
+                        _science_failure("unregistered_table_estimate", subject=f"{path.as_posix()}:{index + 1}")
+                    )
+                continue
+            if claim_id not in registered:
+                failures.append(
+                    _science_failure("table_claim_id_not_registered", subject=f"{path.as_posix()}:{index + 1}", actual=claim_id)
+                )
+                continue
+            rows_by_claim.setdefault(claim_id, []).append((path, row))
+            required_checks = {
+                "estimate": _row_has_value(row, "estimate"),
+                "se_or_ci": _row_has_value(row, "se", "standard_error")
+                or (_row_has_value(row, "ci_lower") and _row_has_value(row, "ci_upper"))
+                or _row_has_value(row, "ci"),
+                "n": _row_has_value(row, "n"),
+                "vce": str(row.get("vce", "")).strip() == str(config.get("vce")),
+            }
+            for rule, passed in required_checks.items():
+                if not passed:
+                    failures.append(
+                        _science_failure(
+                            f"statistical_table_{rule}_required",
+                            subject=f"{path.as_posix()}:{index + 1}",
+                            expected=config.get("vce") if rule == "vce" else True,
+                            actual=row.get("vce") if rule == "vce" else None,
+                        )
+                    )
+
+    for claim_id, claim in registered.items():
+        if claim_id not in rows_by_claim:
+            failures.append(_science_failure("registered_estimate_missing_table_row", subject=claim_id))
+            continue
+        if claim.get("headline") is True:
+            curve_path = Path("reports/analysis/spec_curve") / f"{claim_id}.json"
+            if not curve_path.is_file():
+                failures.append(_science_failure("headline_spec_curve_required", subject=claim_id))
+            else:
+                failures.extend(
+                    _validate_spec_curve(curve_path, claim_id=claim_id, config=config, lock_sha=lock_sha)
+                )
+            uncertainty = claim.get("uncertainty_artifact")
+            uncertainty_path = (
+                Path(str(uncertainty.get("path"))) if isinstance(uncertainty, dict) else None
+            )
+            payload, error = (
+                _load_json_file(uncertainty_path)
+                if uncertainty_path is not None
+                else (None, "missing uncertainty artifact")
+            )
+            if error is not None or payload is None:
+                failures.append(
+                    _science_failure("headline_uncertainty_artifact_invalid", subject=claim_id, actual=error)
+                )
+            elif (
+                payload.get("schema_version") != HEADLINE_UNCERTAINTY_SCHEMA_VERSION
+                or not isinstance(payload.get("confidence_interval"), dict)
+                or not isinstance(payload.get("measurement_uncertainty"), dict)
+            ):
+                failures.append(
+                    _science_failure("headline_measurement_uncertainty_required", subject=claim_id)
+                )
+        if claim.get("type") == "causal":
+            sensitivity = claim.get("sensitivity_artifact")
+            sensitivity_path = Path(str(sensitivity.get("path"))) if isinstance(sensitivity, dict) else None
+            payload, error = (
+                _load_json_file(sensitivity_path)
+                if sensitivity_path is not None
+                else (None, "missing sensitivity artifact")
+            )
+            if error is not None or payload is None:
+                failures.append(_science_failure("causal_sensitivity_artifact_invalid", subject=claim_id, actual=error))
+            elif (
+                payload.get("method") not in {"oster_delta", "cinelli_hazlett_rv"}
+                or not isinstance(payload.get("value"), (int, float))
+                or not isinstance(payload.get("benchmark"), (int, float))
+                or not isinstance(payload.get("threshold"), (int, float))
+                or not isinstance(payload.get("passes"), bool)
+            ):
+                failures.append(
+                    _science_failure(
+                        "causal_sensitivity_benchmark_threshold_required",
+                        subject=claim_id,
+                    )
+                )
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok" if not failures else "failed",
+            "active_lock_sha256": lock_sha,
+            "declared_vce": config.get("vce"),
+            "registered_estimate_count": len(registered),
+            "table_count": len(table_paths),
+            "regime_manifest_checked": regime_path.is_file(),
+            "failures": failures,
+        },
+    )
+
+
 def gate_prereg_conformance(*, form: str | None = None) -> GateResult:
     """Confirmatory claims bind to phase 2b and every locked hypothesis terminates."""
     claims, failures = _load_claim_ledger()
@@ -8004,6 +8542,7 @@ _EMPIRICAL_SCIENCE_GATES = (
     "prereg_conformance",
     "claim_evidence_ledger",
     "etl_decision_log",
+    "statistical_reporting",
 )
 _MODELING_SCIENCE_GATES = (
     "prereg_conformance",
@@ -8024,6 +8563,7 @@ _ALL_GATE_NAMES = _CORE_GATE_NAMES + (
     "integrity_audit",
     "prompt_surface",
     "etl_decision_log",
+    "statistical_reporting",
     "rigor_sections",
     "instance_manifest_conformance",
     "seed_budget_lock",
@@ -8097,6 +8637,7 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
         "recall_audit": gate_recall_audit,
         "integrity_audit": gate_integrity_audit,
         "prompt_surface": gate_prompt_surface,
+        "statistical_reporting": gate_statistical_reporting,
         "rigor_sections": gate_rigor_sections,
         "instance_manifest_conformance": gate_instance_manifest_conformance,
         "seed_budget_lock": gate_seed_budget_lock,
