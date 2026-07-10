@@ -1,0 +1,11 @@
+{
+  "schema_version": "research_swarm.rubric.v1",
+  "task_kind": "writing",
+  "checks": [
+    {"id": "WRITING_CLAIM_EVIDENCE_ALIGNMENT", "prompt": "Map each substantive statement to the specific registered claim whose semantic role and statement support it; same-unit or same-citation value membership is not sufficient.", "severity": "major", "evidence_required": true},
+    {"id": "WRITING_MECHANISM_CONSISTENCY", "prompt": "Check that stated mechanisms agree with the underlying data, code, logs, and identification design.", "severity": "major", "evidence_required": true},
+    {"id": "WRITING_CLAIM_TYPING", "prompt": "Adjudicate the substantive claim type, including paraphrased causal claims that avoid trigger words, and require the evidence appropriate to that type.", "severity": "major", "evidence_required": true},
+    {"id": "WRITING_LIMITATIONS", "prompt": "Verify balanced limitations, uncertainty, and alternative-explanation coverage.", "severity": "major", "evidence_required": true},
+    {"id": "WRITING_CLARITY", "prompt": "Flag wording whose ambiguity could change the scientific meaning.", "severity": "minor", "evidence_required": true}
+  ]
+}

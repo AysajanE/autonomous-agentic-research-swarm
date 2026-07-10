@@ -182,7 +182,16 @@ def _default_framework_json(mode: str) -> dict[str, Any]:
             "reports/catalog.yaml",
             "reports/paper/build/",
             "reports/status/releases/",
+            "reports/status/swarm_runs/",
+            "reports/status/referee_reports/",
+            "reports/status/referee_calibration.json",
+            "reports/status/referee_calibration_runs/",
+            "reports/status/events/",
         ],
+        "referee_panel": {
+            "required_non_authoring_families": 2,
+            "owner_waiver": None,
+        },
         "release_policy": {
             "release_manifest_pattern": "reports/status/releases/release_<YYYY-MM-DD>.json",
         },
@@ -197,6 +206,26 @@ def _default_framework_json(mode: str) -> dict[str, Any]:
                 "reports/figures/",
                 "reports/tables/",
                 "reports/paper/",
+            ],
+        },
+        "executors": {
+            "planner": {
+                "backend": "claude",
+                "command": "claude",
+                "model": "fixture-planner",
+                "profile": "read-only+backlog-write",
+            },
+            "referee_panel": [
+                {
+                    "backend": "claude",
+                    "family": "claude",
+                    "command": "claude",
+                    "model": "fixture-referee",
+                    "cli_version": "fixture-cli-1",
+                    "profile": "read-only",
+                    "prompt_path": "docs/prompts/referee.md",
+                    "tools": ["Read", "Glob", "Grep"],
+                }
             ],
         },
     }
@@ -280,6 +309,13 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
         },
     )
     write_text(root, "contracts/schemas/claims_v1.yaml", "type: object\n")
+    for rubric_path in sorted((REPO_ROOT / "contracts/rubrics").glob("*")):
+        if rubric_path.is_file():
+            write_text(
+                root,
+                f"contracts/rubrics/{rubric_path.name}",
+                rubric_path.read_text(encoding="utf-8"),
+            )
     write_project_yaml(root, mode=mode)
     write_framework_json(root, mode=mode)
 
@@ -326,6 +362,11 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     write_text(root, "docs/prompts/worker.md", "# worker prompt\n")
     write_text(root, "docs/prompts/judge.md", "# judge prompt\n")
     write_text(root, "docs/prompts/operator.md", "# operator prompt\n")
+    write_text(
+        root,
+        "docs/prompts/referee.md",
+        (REPO_ROOT / "docs/prompts/referee.md").read_text(encoding="utf-8"),
+    )
     write_text(
         root,
         "docs/prereg/data_construction.lock.md",
@@ -445,8 +486,33 @@ def init_git_fixture_repo(root: Path) -> None:
     subprocess.run(["git", "config", "gc.auto", "0"], cwd=root, check=True)
     subprocess.run(["git", "config", "gc.autoDetach", "false"], cwd=root, check=True)
     subprocess.run(["git", "config", "maintenance.auto", "false"], cwd=root, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
-    subprocess.run(["git", "commit", "-m", "initial fixture"], cwd=root, check=True, capture_output=True, text=True)
+    gold_key = root / "tests/gold_set/verdict_key.json"
+    if gold_key.is_file():
+        # Calibration authority requires the bar to be a proper ancestor of
+        # the first grading artifact. Keep that topology real in fixtures.
+        subprocess.run(
+            ["git", "add", "-A", "--", ".", ":(exclude)tests/gold_set/**"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "initial fixture with calibration bar"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(["git", "add", "-A", "--", "tests/gold_set"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "add grading artifacts"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    else:
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-m", "initial fixture"], cwd=root, check=True, capture_output=True, text=True)
 
     origin = Path(f"{root}.origin.git")
     subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True, text=True)

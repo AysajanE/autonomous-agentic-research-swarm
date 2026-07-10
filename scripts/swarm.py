@@ -55,6 +55,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import swarm_claims
 import swarm_events
 import sweep_tasks
+from calibrate_referee import calibration_report_failures
+from generate_revision_tasks import generate_revision_tasks
 from swarm_taskfile import WorktreeCollisionError
 from swarm_taskfile import PREREG_LOCK_SCHEMA_VERSION
 from swarm_taskfile import PREREG_PHASE_FILES
@@ -78,6 +80,9 @@ JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
 MOCK_TRANSCRIPT_SCHEMA_VERSION = "research_swarm.mock_transcript.v1"
 EXECUTOR_SESSION_SCHEMA_VERSION = "research_swarm.executor_session.v1"
 MOCK_PLANNER_SCHEMA_VERSION = "research_swarm.mock_planner.v1"
+MOCK_REFEREE_SCHEMA_VERSION = "research_swarm.mock_referee.v1"
+REFEREE_REPORT_SCHEMA_VERSION = "research_swarm.referee_report.v1"
+REFEREE_CALIBRATION_SCHEMA_VERSION = "research_swarm.referee_calibration.v1"
 PLAN_APPROVAL_PENDING_PATH = Path(".swarm/plan_approval_pending.json")
 PREREG_AMENDMENT_SCHEMA_VERSION = "research_swarm.prereg_amendment.v1"
 
@@ -89,6 +94,19 @@ DEFAULT_REVIEW_MIN_SEPARATION_SECONDS = 60
 DEFAULT_REPLAN_FAILURE_THRESHOLD = 2
 DEFAULT_REPAIR_MAX_ATTEMPTS = 2
 DEFAULT_MAX_READY_FOR_REVIEW = 4
+REFEREE_SAMPLE_SIZE = 3
+REFEREE_REPORT_DIR = Path("reports/status/referee_reports")
+REFEREE_CALIBRATION_PATH = Path("reports/status/referee_calibration.json")
+REFEREE_VERDICTS = {"supported", "not_supported", "cannot_verify"}
+REFEREE_WAIVER_EMITTER = "swarm.py referee-waiver"
+
+EXECUTOR_FORBIDDEN_CONTROL_PLANE_PATHS = (
+    "reports/status/swarm_runs/",
+    "reports/status/referee_reports/",
+    "reports/status/referee_calibration.json",
+    "reports/status/referee_calibration_runs/",
+    "reports/status/events/",
+)
 
 GATE_OUTPUT_SEGMENT_BYTES = 8 * 1024
 DEFAULT_GATE_INTERPRETER_ALLOWLIST = ("python", "python3", "make")
@@ -129,6 +147,11 @@ DEFAULT_OPERATOR_OWNED_SHARED_SURFACES = (
     "reports/catalog.yaml",
     "reports/paper/build/",
     "reports/status/releases/",
+    "reports/status/swarm_runs/",
+    "reports/status/referee_reports/",
+    "reports/status/referee_calibration.json",
+    "reports/status/referee_calibration_runs/",
+    "reports/status/events/",
 )
 FORBIDDEN_INTEGRATION_READY_OUTPUT_PREFIXES = (
     "data/raw/",
@@ -208,6 +231,14 @@ class PlannerOutcome:
     returncode: int
     stdout: str
     proposals: list[dict[str, object]]
+
+
+@dataclasses.dataclass(frozen=True)
+class RefereeOutcome:
+    returncode: int
+    stdout: str
+    referee_family: str
+    payload: dict[str, object]
 
 
 def _utc_now_iso() -> str:
@@ -752,6 +783,716 @@ def _extract_planner_proposals(stdout: str) -> list[dict[str, object]] | None:
     ):
         return None
     return [dict(item) for item in proposals]
+
+
+def _referee_family(tool: object) -> str | None:
+    if not isinstance(tool, str) or not tool.strip():
+        return None
+    normalized = tool.strip().lower()
+    if "claude" in normalized or "anthropic" in normalized:
+        return "claude"
+    if "codex" in normalized or "openai" in normalized:
+        return "codex"
+    if "gemini" in normalized or "google" in normalized:
+        return "gemini"
+    if normalized == "mock":
+        return "mock"
+    return normalized
+
+
+def _load_referee_rubric(repo: Path, task_kind: str, *, manuscript: bool = False) -> tuple[dict[str, object], Path]:
+    rubric_name = "manuscript" if manuscript else ("proof" if task_kind == "proof" else task_kind)
+    path = repo / "contracts" / "rubrics" / f"{rubric_name}.yaml"
+    try:
+        payload = json.loads(_read_text(path))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"referee_rubric_unreadable:{rubric_name}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != "research_swarm.rubric.v1":
+        raise ValueError(f"referee_rubric_schema_invalid:{rubric_name}")
+    expected_kind = "proof_review" if task_kind == "proof" and not manuscript else rubric_name
+    if payload.get("task_kind") != expected_kind:
+        raise ValueError(f"referee_rubric_task_kind_invalid:{rubric_name}:{payload.get('task_kind')}")
+    checks = payload.get("checks")
+    if not isinstance(checks, list) or not checks:
+        raise ValueError(f"referee_rubric_checks_invalid:{rubric_name}")
+    seen: set[str] = set()
+    for check in checks:
+        if not isinstance(check, dict):
+            raise ValueError(f"referee_rubric_check_invalid:{rubric_name}")
+        check_id = check.get("id")
+        if not isinstance(check_id, str) or not check_id.strip() or check_id in seen:
+            raise ValueError(f"referee_rubric_check_id_invalid:{rubric_name}:{check_id}")
+        seen.add(check_id)
+        if check.get("severity") not in {"major", "minor"}:
+            raise ValueError(f"referee_rubric_severity_invalid:{rubric_name}:{check_id}")
+        if not isinstance(check.get("prompt"), str) or not check["prompt"].strip():
+            raise ValueError(f"referee_rubric_prompt_invalid:{rubric_name}:{check_id}")
+        if not isinstance(check.get("evidence_required"), bool):
+            raise ValueError(f"referee_rubric_evidence_invalid:{rubric_name}:{check_id}")
+    return payload, path
+
+
+def _claim_ledger(repo: Path) -> list[dict[str, object]]:
+    path = repo / "contracts" / "claims.yaml"
+    try:
+        payload = json.loads(_read_text(path))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("referee_claim_ledger_unreadable") from exc
+    claims = payload.get("claims") if isinstance(payload, dict) else None
+    if not isinstance(claims, list):
+        raise ValueError("referee_claim_ledger_invalid")
+    return [dict(item) for item in claims if isinstance(item, dict)]
+
+
+def _safe_claim_ledger(repo: Path) -> tuple[list[dict[str, object]], str | None]:
+    try:
+        return _claim_ledger(repo), None
+    except ValueError as exc:
+        return [], str(exc)
+
+
+def _task_is_manuscript_surface(task: Task) -> bool:
+    return task.task_kind == "writing" or any(
+        _path_matches_prefix(output, "reports/paper/") for output in task.outputs
+    )
+
+
+def _referee_task_in_scope(task: Task) -> bool:
+    frontmatter = _task_frontmatter(task)
+    complexity = frontmatter.get("complexity_tier")
+    kind = task.task_kind
+    if kind == "repair":
+        source_kind = frontmatter.get("repair_source_task_kind")
+        source_complexity = frontmatter.get("repair_source_complexity_tier")
+        if isinstance(source_kind, str):
+            kind = source_kind
+        if isinstance(source_complexity, str):
+            complexity = source_complexity
+    tiered_scientific = complexity in {"M", "L"} and kind in {
+        "analysis",
+        "model",
+        "bridge",
+        "writing",
+    }
+    return bool(
+        tiered_scientific
+        or task.workstream in {"W6", "W7"}
+        or any(_path_matches_prefix(output, "reports/paper/") for output in task.outputs)
+    )
+
+
+def _repair_is_referee_reviewable(task: Task) -> bool:
+    if task.task_kind != "repair":
+        return False
+    frontmatter = _task_frontmatter(task)
+    return (
+        isinstance(frontmatter.get("repair_source_task"), str)
+        and frontmatter.get("repair_source_task_kind")
+        in {"analysis", "model", "bridge", "writing", "proof", "validation", "etl", "lit_review"}
+    )
+
+
+def _claim_is_bound_to_task(repo: Path, claim: dict[str, object], task: Task) -> bool:
+    owner = next(
+        (
+            claim.get(key)
+            for key in ("task_id", "registered_by_task", "source_task_id")
+            if isinstance(claim.get(key), str)
+        ),
+        None,
+    )
+    frontmatter = _task_frontmatter(task)
+    source_task = frontmatter.get("repair_source_task") if task.task_kind == "repair" else None
+    if owner in {task.task_id, source_task}:
+        return True
+    claim_ids = frontmatter.get("claim_ids")
+    if isinstance(claim_ids, list) and claim.get("claim_id") in claim_ids:
+        return True
+    artifacts = claim.get("supporting_artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
+            path = artifact.get("path") if isinstance(artifact, dict) else None
+            if not isinstance(path, str):
+                continue
+            if any(
+                _path_matches_prefix(path, output) or _path_matches_prefix(output, path)
+                for output in task.outputs
+            ):
+                return True
+    if not _task_is_manuscript_surface(task):
+        return False
+    manuscript_text = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in _declared_output_files(repo, task)
+        if path.suffix.lower() in _MANUSCRIPT_SUFFIXES
+    )
+    citation_key = claim.get("citation_key")
+    if isinstance(citation_key, str) and re.search(
+        rf"(?<![A-Za-z0-9_-])@{re.escape(citation_key)}(?![A-Za-z0-9_-])",
+        manuscript_text,
+    ):
+        return True
+    literals = claim.get("manuscript_numeric_literals")
+    return isinstance(literals, list) and any(
+        isinstance(value, str) and value in manuscript_text for value in literals
+    )
+
+
+def _task_scoped_claims(repo: Path, task: Task) -> tuple[list[dict[str, object]], str | None]:
+    claims, diagnostic = _safe_claim_ledger(repo)
+    if diagnostic is not None:
+        return [], diagnostic
+    return [claim for claim in claims if _claim_is_bound_to_task(repo, claim, task)], None
+
+
+def _referee_claim_context(claims: list[dict[str, object]]) -> list[dict[str, object]]:
+    sanitized: list[dict[str, object]] = []
+    for claim in claims:
+        item = dict(claim)
+        artifacts = claim.get("supporting_artifacts")
+        if isinstance(artifacts, list):
+            item["supporting_artifacts"] = [
+                {key: value for key, value in artifact.items() if key != "sha256"}
+                for artifact in artifacts
+                if isinstance(artifact, dict)
+            ]
+        sanitized.append(item)
+    return sanitized
+
+
+def _redact_sample_hashes(value: object, target_hashes: set[str]) -> object:
+    if isinstance(value, dict):
+        return {key: _redact_sample_hashes(item, target_hashes) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_sample_hashes(item, target_hashes) for item in value]
+    if isinstance(value, str):
+        redacted = value
+        for digest in target_hashes:
+            if digest:
+                redacted = redacted.replace(digest, "<kernel-redacted-sampled-sha256>")
+        return redacted
+    return value
+
+
+def _artifact_quote_challenge(
+    *,
+    raw: bytes,
+    seed: str,
+    task_id: str,
+    claim_id: str,
+    path: str,
+) -> tuple[int, str]:
+    """Choose a deterministic NON-BLANK line without exposing its contents. A
+    blank challenge is echo-satisfiable (a referee returns "" without reading),
+    so only lines with non-whitespace content are eligible; challenge_line 0
+    signals no challengeable line exists (binary/blank artifact) and the caller
+    fails closed rather than accepting an empty span."""
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    candidates = [(number, text) for number, text in enumerate(lines, start=1) if text.strip()]
+    if not candidates:
+        return 0, ""
+    selector = hashlib.sha256(
+        f"{seed}\0{task_id}\0{claim_id}\0{path}\0quoted-span".encode("utf-8")
+    ).digest()
+    index = int.from_bytes(selector[:8], "big") % len(candidates)
+    return candidates[index]
+
+
+def _public_sampled_artifact(item: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in item.items()
+        if key != "expected_quoted_span"
+    }
+
+
+def _kernel_sampled_artifacts(
+    repo: Path,
+    task_id: str,
+    *,
+    task: Task | None = None,
+) -> list[dict[str, object]]:
+    seed_path = repo / "contracts" / "rubrics" / "sampling_seed.txt"
+    try:
+        seed = seed_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError("referee_sampling_seed_missing") from exc
+    if not seed:
+        raise ValueError("referee_sampling_seed_empty")
+    if task is None:
+        try:
+            contract = load_framework_contract(repo)
+            tasks, quarantined = load_tasks_quarantined(contract)
+            task = _resolve_runtime_task(tasks, quarantined, task_id)
+        except (OSError, ValueError):
+            return []
+    scoped_claims, _ = _task_scoped_claims(repo, task)
+    candidates: list[tuple[str, dict[str, object]]] = []
+    for claim in scoped_claims:
+        claim_id = claim.get("claim_id")
+        artifacts = claim.get("supporting_artifacts")
+        if not isinstance(claim_id, str) or not isinstance(artifacts, list):
+            continue
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            path = artifact.get("path")
+            digest = artifact.get("sha256")
+            if not isinstance(path, str) or not isinstance(digest, str):
+                continue
+            artifact_path = (repo / path).resolve()
+            try:
+                artifact_path.relative_to(repo.resolve())
+            except ValueError:
+                raw = b""
+                disk_digest = ""
+            else:
+                raw = artifact_path.read_bytes() if artifact_path.is_file() else b""
+                disk_digest = hashlib.sha256(raw).hexdigest() if artifact_path.is_file() else ""
+            ledger_digest = digest.lower()
+            challenge_line, expected_quoted_span = _artifact_quote_challenge(
+                raw=raw,
+                seed=seed,
+                task_id=task_id,
+                claim_id=claim_id,
+                path=path,
+            )
+            item: dict[str, object] = {
+                "claim_id": claim_id,
+                "path": path,
+                "sha256": disk_digest,
+                "ledger_sha256": ledger_digest,
+                "tampered": disk_digest != ledger_digest,
+                "challenge_line": challenge_line,
+                "expected_quoted_span": expected_quoted_span,
+            }
+            score = hashlib.sha256(
+                f"{seed}\0{task_id}\0{claim_id}\0{path}".encode("utf-8")
+            ).hexdigest()
+            candidates.append((score, item))
+    candidates.sort(key=lambda item: (item[0], str(item[1]["path"])))
+    return [item for _, item in candidates[:REFEREE_SAMPLE_SIZE]]
+
+
+_ASSERTION_LEXICON = re.compile(
+    r"\b(?:caus\w*|because|therefore|due to|driv\w*|lead\w*|result\w* in|"
+    r"effect\w*|impact\w*|increase\w*|decrease\w*|higher|lower|greater|less|"
+    r"more than|fewer|improv\w*|wors\w*|outperform\w*|associated|correlat\w*)\b",
+    flags=re.IGNORECASE,
+)
+_MANUSCRIPT_SUFFIXES = {".md", ".qmd", ".txt", ".tex"}
+
+
+def _declared_output_files(repo: Path, task: Task) -> list[Path]:
+    files: list[Path] = []
+    for raw in task.outputs:
+        path = (repo / raw).resolve()
+        try:
+            path.relative_to(repo.resolve())
+        except ValueError:
+            continue
+        if path.is_file():
+            files.append(path)
+        elif path.is_dir():
+            files.extend(candidate for candidate in sorted(path.rglob("*")) if candidate.is_file())
+    return sorted(set(files))
+
+
+def _assertion_candidates(repo: Path, task: Task) -> list[dict[str, object]]:
+    claims, _ = _safe_claim_ledger(repo)
+    candidates: list[dict[str, object]] = []
+    for path in _declared_output_files(repo, task):
+        if path.suffix.lower() not in _MANUSCRIPT_SUFFIXES:
+            continue
+        text = _read_text(path)
+        # Sentence boundaries are deliberately an over-inclusive deterministic
+        # floor. The referee must still enumerate qualitative assertions that
+        # this lexical pre-filter misses.
+        for match in re.finditer(r"(?ms)(?P<sentence>[^.!?\n][^.!?]*[.!?]|[^\n]+$)", text):
+            sentence = re.sub(r"\s+", " ", match.group("sentence")).strip()
+            if not sentence or (re.search(r"\d", sentence) is None and _ASSERTION_LEXICON.search(sentence) is None):
+                continue
+            line = text.count("\n", 0, match.start()) + 1
+            literal_claim_ids: list[str] = []
+            for claim in claims:
+                literals = claim.get("manuscript_numeric_literals")
+                if not isinstance(literals, list):
+                    continue
+                if any(isinstance(value, str) and value in sentence for value in literals):
+                    claim_id = claim.get("claim_id")
+                    if isinstance(claim_id, str):
+                        literal_claim_ids.append(claim_id)
+            candidates.append(
+                {
+                    "check_id": f"ASSERTION-{len(candidates) + 1:03d}",
+                    "path": path.relative_to(repo.resolve()).as_posix(),
+                    "line": line,
+                    "sentence": sentence,
+                    "numeric_literal_claim_candidates": sorted(set(literal_claim_ids)),
+                    "instruction": (
+                        "Map this sentence to the specific claim whose statement and semantic role support it; "
+                        "not_supported if unmatched or if a registered value is assigned to the wrong role."
+                    ),
+                }
+            )
+    return candidates
+
+
+def _declared_output_context(repo: Path, task: Task) -> list[dict[str, object]]:
+    outputs: list[dict[str, object]] = []
+    for path in _declared_output_files(repo, task):
+        raw = path.read_bytes()
+        item: dict[str, object] = {
+            "path": path.relative_to(repo.resolve()).as_posix(),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "bytes": len(raw),
+        }
+        if path.suffix.lower() in _MANUSCRIPT_SUFFIXES or len(raw) <= 64 * 1024:
+            item["content"] = raw[:64 * 1024].decode("utf-8", errors="replace")
+            item["content_truncated"] = len(raw) > 64 * 1024
+        outputs.append(item)
+    return outputs
+
+
+def _referee_diff(repo: Path, base_branch: str, remote: str) -> str:
+    base_ref = _resolve_base_ref_for_diff(cwd=repo, base_branch=base_branch, remote=remote)
+    if base_ref is None:
+        return ""
+    cp = _run(
+        ["git", "diff", "--no-ext-diff", f"{base_ref}...HEAD", "--"],
+        cwd=repo,
+        capture=True,
+        check=False,
+    )
+    return (cp.stdout or "")[-512 * 1024 :]
+
+
+def _latest_referee_run_manifest(contract: FrameworkContract, task_id: str) -> tuple[Path, dict[str, object]]:
+    matches = _matching_v2_run_manifest_data(
+        _matching_task_jsons(contract.run_manifest_dir, task_id), task_id
+    )
+    passing = [
+        (path, payload)
+        for path, payload in matches
+        if isinstance(payload.get("result"), dict) and payload["result"].get("status") == "ok"
+    ]
+    if not passing:
+        raise ValueError(f"referee_missing_passing_run_manifest:{task_id}")
+    return passing[-1]
+
+
+def _referee_required_verdicts(
+    *,
+    task: Task,
+    frontmatter: dict[str, object],
+    rubrics: list[dict[str, object]],
+    assertions: list[dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    required: dict[str, dict[str, object]] = {}
+    fields = TaskV2Fields(frontmatter)
+    for criterion in fields.success_criteria or ():
+        criterion_id = criterion.get("id")
+        if isinstance(criterion_id, str):
+            required[criterion_id] = {
+                "identifier_key": "success_criterion_id",
+                "severity": "major",
+                "evidence_required": True,
+                "prompt": criterion.get("statement"),
+            }
+    for rubric in rubrics:
+        for check in rubric.get("checks", []):
+            if isinstance(check, dict) and isinstance(check.get("id"), str):
+                required[check["id"]] = {
+                    "identifier_key": "check_id",
+                    "severity": check.get("severity"),
+                    "evidence_required": check.get("evidence_required"),
+                    "prompt": check.get("prompt"),
+                }
+    for assertion in assertions:
+        check_id = assertion.get("check_id")
+        if isinstance(check_id, str):
+            required[check_id] = {
+                "identifier_key": "check_id",
+                "severity": "major",
+                "evidence_required": True,
+                "prompt": assertion.get("instruction"),
+            }
+    return required
+
+
+def _render_referee_prompt(repo: Path, context: dict[str, object]) -> str:
+    prompt_path = repo / "docs" / "prompts" / "referee.md"
+    try:
+        base_prompt = _read_text(prompt_path).strip()
+    except OSError as exc:
+        raise ValueError("referee_prompt_unreadable") from exc
+    return "\n".join(
+        [
+            base_prompt,
+            "",
+            "CONTEXT:",
+            json.dumps(context, indent=2, sort_keys=True, default=str),
+            "",
+            "Return no edits. End with exactly one fenced JSON object containing:",
+            "```json",
+            '{"referee_family":"...","verdicts":[{"success_criterion_id":"SC1","verdict":"supported|not_supported|cannot_verify","evidence_pointer":"path:line","note":"..."},{"check_id":"...","verdict":"...","evidence_pointer":"...","note":"..."}],"opened_artifacts":[{"path":"...","quoted_span":"exact contents of the challenged line"}],"overall":"supported|not_supported|cannot_verify"}',
+            "```",
+        ]
+    )
+
+
+def _extract_referee_payload(stdout: str) -> dict[str, object] | None:
+    blocks = re.findall(r"```json\s*(.*?)```", stdout, flags=re.DOTALL)
+    if not blocks:
+        return None
+    try:
+        payload = json.loads(blocks[-1])
+    except json.JSONDecodeError:
+        return None
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def _claude_referee_argv(repo: Path, referee_family: str = "claude") -> list[str]:
+    try:
+        framework = json.loads(_read_text(repo / "contracts" / "framework.json"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("referee_backend_unavailable") from exc
+    executors = framework.get("executors") if isinstance(framework, dict) else None
+    panel = executors.get("referee_panel") if isinstance(executors, dict) else None
+    configs = panel if isinstance(panel, list) else []
+    config = next(
+        (
+            item
+            for item in configs
+            if isinstance(item, dict)
+            and item.get("backend") == "claude"
+            and item.get("family", "claude") == referee_family
+        ),
+        None,
+    )
+    if not isinstance(config, dict):
+        raise RuntimeError("referee_backend_unavailable")
+    executable = config.get("command", "claude")
+    model = config.get("model")
+    if not isinstance(executable, str) or not executable.strip() or not isinstance(model, str) or not model.strip():
+        raise RuntimeError("referee_backend_unavailable")
+    # NB: CLI-presence is checked at INVOCATION (_invoke_referee), not here —
+    # argv construction is pure so it (and the read-only-profile assertion) is
+    # testable on a runner without the referee CLI installed.
+    return [
+        executable.strip(),
+        "-p",
+        "--model",
+        model.strip(),
+        "--tools",
+        "Read,Glob,Grep",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "{}",
+        "--output-format",
+        "text",
+    ]
+
+
+def _invoke_referee(
+    *,
+    context: dict[str, object],
+    repo: Path,
+    task_id: str,
+    backend: str,
+    referee_family: str | None,
+    timeout_seconds: int,
+) -> RefereeOutcome:
+    if backend == "mock":
+        path = repo / ".orchestrator" / "mock_referee" / f"{task_id}.json"
+        if not path.is_file():
+            return RefereeOutcome(1, f"mock_referee_missing:{path.relative_to(repo)}", referee_family or "", {})
+        try:
+            payload = json.loads(_read_text(path))
+            if not isinstance(payload, dict) or payload.get("schema_version") != MOCK_REFEREE_SCHEMA_VERSION:
+                raise ValueError(f"mock_referee_schema_invalid:{payload.get('schema_version') if isinstance(payload, dict) else None}")
+            family = payload.get("referee_family")
+            if not isinstance(family, str) or not family.strip():
+                raise ValueError("mock_referee_family_invalid")
+            if referee_family is not None and family != referee_family:
+                raise ValueError(f"mock_referee_family_mismatch:{family}!={referee_family}")
+            returncode = payload.get("returncode", 0)
+            if not isinstance(returncode, int) or isinstance(returncode, bool):
+                raise ValueError("mock_referee_returncode_invalid")
+            report_payload = {
+                key: payload[key]
+                for key in ("verdicts", "opened_artifacts", "overall")
+                if key in payload
+            }
+            return RefereeOutcome(
+                returncode,
+                str(payload.get("stdout", "mock referee complete")),
+                family,
+                report_payload,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return RefereeOutcome(1, f"mock_referee_error:{type(exc).__name__}:{exc}", referee_family or "", {})
+    if backend == "claude":
+        family = referee_family or "claude"
+        argv = _claude_referee_argv(repo, family)
+        # Fail-closed at the invocation boundary if the referee CLI is absent
+        # (§4.3: unavailable → hard-block, never a silent waive).
+        if not argv or _which_or_none(argv[0]) is None:
+            return RefereeOutcome(
+                1, f"referee_backend_unavailable:missing_cli:{argv[0] if argv else 'claude'}", family, {}
+            )
+        prompt = _render_referee_prompt(repo, context)
+        try:
+            cp = subprocess.run(
+                argv,
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+                env={**_gate_environment(), **_planner_passthrough_env()},
+                timeout=timeout_seconds,
+                input=prompt,
+            )
+        except subprocess.TimeoutExpired:
+            return RefereeOutcome(1, "referee_timeout", family, {})
+        stdout = (cp.stdout or "") + (("\n" + cp.stderr) if cp.stderr else "")
+        if cp.returncode != 0:
+            return RefereeOutcome(cp.returncode, f"referee_cli_failed:{stdout[-2000:]}", family, {})
+        payload = _extract_referee_payload(cp.stdout or "")
+        if payload is None:
+            return RefereeOutcome(1, f"referee_output_unparseable:{stdout[-2000:]}", family, {})
+        returned_family = payload.get("referee_family")
+        if returned_family != family:
+            return RefereeOutcome(1, f"referee_family_mismatch:{returned_family}!={family}", family, payload)
+        return RefereeOutcome(0, stdout[-4000:], family, payload)
+    raise ValueError(f"unsupported_referee_backend:{backend}")
+
+
+def _referee_calibrated(repo: Path) -> bool:
+    path = repo / REFEREE_CALIBRATION_PATH
+    if not path.is_file():
+        return False
+    return not calibration_report_failures(repo=repo, report_path=path)
+
+
+def _referee_family_calibrated(repo: Path, family: str) -> bool:
+    path = repo / REFEREE_CALIBRATION_PATH
+    return path.is_file() and not calibration_report_failures(
+        repo=repo,
+        report_path=path,
+        required_family=family,
+    )
+
+
+def _normalize_referee_report(
+    *,
+    payload: dict[str, object],
+    required: dict[str, dict[str, object]],
+    sampled_artifacts: list[dict[str, object]],
+    sample_required: bool = False,
+) -> tuple[list[dict[str, object]], list[dict[str, str]], str, list[str]]:
+    failures: list[str] = []
+    raw_verdicts = payload.get("verdicts")
+    raw_opened = payload.get("opened_artifacts")
+    if not isinstance(raw_verdicts, list):
+        raw_verdicts = []
+        failures.append("referee_verdicts_invalid")
+    if not isinstance(raw_opened, list):
+        raw_opened = []
+        failures.append("referee_opened_artifacts_invalid")
+    verdicts: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw_verdicts):
+        if not isinstance(item, dict):
+            failures.append(f"referee_verdict_invalid:{index}")
+            continue
+        present = [key for key in ("success_criterion_id", "check_id") if isinstance(item.get(key), str)]
+        if len(present) != 1:
+            failures.append(f"referee_verdict_identifier_invalid:{index}")
+            continue
+        key = present[0]
+        identifier = str(item[key]).strip()
+        if identifier not in required or required[identifier]["identifier_key"] != key:
+            failures.append(f"referee_verdict_unexpected:{identifier}")
+            continue
+        if identifier in seen:
+            failures.append(f"referee_verdict_duplicate:{identifier}")
+            continue
+        seen.add(identifier)
+        verdict = item.get("verdict")
+        if verdict not in REFEREE_VERDICTS:
+            failures.append(f"referee_verdict_value_invalid:{identifier}:{verdict}")
+            continue
+        pointer = item.get("evidence_pointer")
+        note = item.get("note")
+        if required[identifier]["evidence_required"] and (
+            not isinstance(pointer, str) or not pointer.strip()
+        ):
+            failures.append(f"referee_evidence_pointer_missing:{identifier}")
+        if not isinstance(note, str) or not note.strip():
+            failures.append(f"referee_note_missing:{identifier}")
+        verdicts.append(
+            {
+                key: identifier,
+                "verdict": verdict,
+                "severity": required[identifier]["severity"],
+                "evidence_pointer": pointer if isinstance(pointer, str) else "",
+                "note": note if isinstance(note, str) else "",
+            }
+        )
+    for identifier in sorted(set(required) - seen):
+        failures.append(f"referee_verdict_missing:{identifier}")
+
+    opened_by_path: dict[str, dict[str, str]] = {}
+    for index, item in enumerate(raw_opened):
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or not isinstance(item.get("quoted_span"), str)
+        ):
+            failures.append(f"referee_opened_artifact_invalid:{index}")
+            continue
+        path = str(item["path"])
+        if path in opened_by_path:
+            failures.append(f"referee_opened_artifact_duplicate:{path}")
+            continue
+        opened_by_path[path] = {"path": path, "quoted_span": str(item["quoted_span"])}
+    if sample_required and not sampled_artifacts:
+        failures.append("referee_sample_empty_for_claims")
+    for item in sampled_artifacts:
+        if item.get("tampered") is True:
+            failures.append(f"referee_sampled_artifact_tampered:{item.get('path')}")
+        # A non-challengeable sample (blank/binary artifact, challenge_line 0)
+        # cannot prove opening — fail closed rather than accept an empty span.
+        if not item.get("challenge_line"):
+            failures.append(f"referee_sample_not_challengeable:{item.get('path')}")
+    missing_sample: list[str] = []
+    opened: list[dict[str, str]] = []
+    for sampled in sampled_artifacts:
+        path = str(sampled["path"])
+        supplied = opened_by_path.get(path)
+        if supplied is None:
+            missing_sample.append(path)
+            continue
+        if supplied["quoted_span"] != sampled.get("expected_quoted_span"):
+            failures.append(f"referee_opened_artifact_quote_mismatch:{path}")
+        opened.append(
+            {
+                "path": path,
+                "sha256": str(sampled.get("sha256", "")).lower(),
+                "quoted_span": supplied["quoted_span"],
+            }
+        )
+    if missing_sample:
+        failures.append("referee_did_not_open_sampled:" + ",".join(sorted(missing_sample)))
+
+    major = [item for item in verdicts if item.get("severity") == "major"]
+    if any(item.get("verdict") == "cannot_verify" for item in verdicts):
+        overall = "cannot_verify"
+    elif any(item.get("verdict") == "not_supported" for item in major):
+        overall = "not_supported"
+    else:
+        overall = "supported"
+    return verdicts, opened, overall, failures
 
 
 def _executor_output_bytes(output: object) -> bytes:
@@ -1519,6 +2260,14 @@ def _effective_required_active_locks(
     task cannot register one pre-experiment-lock."""
     mode = contract.project_mode or "empirical"
     required: list[str] = []
+    frontmatter = _task_frontmatter(task)
+    explicit_required = frontmatter.get("required_prereg_locks")
+    if isinstance(explicit_required, list):
+        required.extend(
+            phase
+            for phase in explicit_required
+            if isinstance(phase, str) and phase in _PREREG_PHASE_ORDER
+        )
     base = _required_active_lock(task, mode)
     if base is not None:
         required.append(base)
@@ -1728,6 +2477,34 @@ def _reconnaissance_line_count(task_text: str) -> int:
 def _git_current_branch(cwd: Path) -> str:
     cp = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd, capture=True, check=True)
     return (cp.stdout or "").strip()
+
+
+def _trusted_integration_branch(cwd: Path) -> str:
+    """The repository's real default/integration branch, derived from git — NOT
+    from a caller-supplied argument (a Worker on a task branch must not be able
+    to name its own branch as the 'base' to mint a control-plane waiver)."""
+    cp = _run(
+        ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        cwd=cwd,
+        capture=True,
+        check=False,
+    )
+    value = (cp.stdout or "").strip() if cp.returncode == 0 else ""
+    if value.startswith("origin/"):
+        value = value[len("origin/"):]
+    return value or "main"
+
+
+def _is_linked_worktree(cwd: Path) -> bool:
+    """True inside a linked git worktree (where Workers run) — the main
+    checkout's git dir equals its common dir; a linked worktree's does not."""
+    git_dir = _run(["git", "rev-parse", "--git-dir"], cwd=cwd, capture=True, check=False)
+    common = _run(["git", "rev-parse", "--git-common-dir"], cwd=cwd, capture=True, check=False)
+    gd = (git_dir.stdout or "").strip()
+    cd = (common.stdout or "").strip()
+    if not gd or not cd:
+        return False
+    return Path(gd).resolve() != Path(cd).resolve()
 
 
 def _git_head_sha(cwd: Path) -> str | None:
@@ -2210,6 +2987,80 @@ def _runtime_event_paths(repo: Path) -> set[str]:
     return paths
 
 
+def _executor_control_plane_snapshot(repo: Path) -> dict[str, bytes]:
+    """Capture task-visible control-plane bytes immediately around execution."""
+    snapshot: dict[str, bytes] = {}
+    for raw in EXECUTOR_FORBIDDEN_CONTROL_PLANE_PATHS:
+        normalized = _normalize_repo_relative_path(raw)
+        path = repo / normalized
+        if raw.endswith("/"):
+            if not path.is_dir():
+                continue
+            candidates = sorted(item for item in path.rglob("*") if item.is_file() or item.is_symlink())
+        else:
+            candidates = [path] if path.exists() or path.is_symlink() else []
+        for candidate in candidates:
+            rel = candidate.relative_to(repo).as_posix()
+            try:
+                snapshot[rel] = (
+                    f"symlink:{os.readlink(candidate)}".encode("utf-8")
+                    if candidate.is_symlink()
+                    else candidate.read_bytes()
+                )
+            except OSError:
+                snapshot[rel] = b"<unreadable>"
+    return snapshot
+
+
+def _kernel_heartbeat_only_journal_append(
+    before: bytes,
+    after: bytes,
+    allowed_events: list[dict[str, object]],
+) -> bool:
+    """Permit journal bytes concurrently appended by the lease heartbeat only."""
+    if not after.startswith(before):
+        return False
+    appended = after[len(before):]
+    if not appended:
+        return True
+    for raw_line in appended.splitlines():
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(event, dict):
+            return False
+        if event not in allowed_events:
+            return False
+    return True
+
+
+def _executor_control_plane_changes(
+    *,
+    repo: Path,
+    before: dict[str, bytes],
+    allowed_kernel_events: list[dict[str, object]],
+) -> list[str]:
+    after = _executor_control_plane_snapshot(repo)
+    changed: list[str] = []
+    event_paths = _runtime_event_paths(repo)
+    for path in sorted(set(before) | set(after)):
+        if before.get(path) == after.get(path):
+            continue
+        if (
+            path in event_paths
+            and path in after
+            and _kernel_heartbeat_only_journal_append(
+                before.get(path, b""),
+                after[path],
+                allowed_kernel_events,
+            )
+        ):
+            continue
+        changed.append(path)
+    return changed
+
+
 def _git_unstage_path(cwd: Path, path: str) -> None:
     head_entry = _run(
         ["git", "ls-tree", "HEAD", "--", path],
@@ -2289,6 +3140,23 @@ def _path_is_allowed(
 ) -> tuple[bool, str | None]:
     norm = _normalize_repo_relative_path(path)
 
+    # Runtime/review/referee evidence is written only by bounded kernel
+    # entrypoints. A task cannot make these paths writable by listing them in
+    # allowed_paths; legitimate control-plane commits bypass this task-output
+    # predicate explicitly at their call sites.
+    if norm.startswith("reports/status/swarm_runs/"):
+        return False, "swarm_runs_kernel_only"
+    if norm.startswith("reports/status/reviews/"):
+        return False, "reviews_kernel_only"
+    if norm.startswith("reports/status/referee_reports/"):
+        return False, "referee_reports_kernel_only"
+    if norm == "reports/status/referee_calibration.json":
+        return False, "referee_calibration_kernel_only"
+    if norm.startswith("reports/status/referee_calibration_runs/"):
+        return False, "referee_calibration_runs_kernel_only"
+    if norm.startswith("reports/status/events/"):
+        return False, "events_kernel_only"
+
     if norm == task_file_path:
         return True, None
     if norm in _task_projection_paths(task_file_path):
@@ -2298,10 +3166,6 @@ def _path_is_allowed(
         if Path(norm).name.startswith(f"H{digits}_"):
             return True, None
         return False, "handoff_namespace_violation"
-    if norm.startswith("reports/status/swarm_runs/") and Path(norm).name.startswith(f"{task_id}_"):
-        return True, None
-    # reports/status/reviews/ is deliberately NOT task-writable: review logs
-    # are Judge-only artifacts (M1 review fix — forged-approval channel).
     if norm.startswith(".orchestrator/"):
         return False, "orchestrator_write_forbidden"
 
@@ -2682,6 +3546,8 @@ def _judge_ownership_failures(
     task_file_rel = task.path.relative_to(repo).as_posix()
     path_sources, _ = _collect_changed_paths_with_sources(repo=repo, base_ref=base_ref)
     for changed_path in sorted(path_sources):
+        if _kernel_namespaced_run_path(task.task_id, changed_path):
+            continue
         ok, reason = _path_is_allowed(
             path=changed_path,
             allowed_paths=task.allowed_paths,
@@ -3608,6 +4474,619 @@ def cmd_plan(args: argparse.Namespace) -> int:
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
+
+
+def cmd_referee_task(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    output_root_raw = os.environ.get("SWARM_REFEREE_OUTPUT_ROOT", "").strip()
+    output_repo = (
+        Path(output_root_raw).expanduser().resolve()
+        if output_root_raw
+        else repo
+    )
+    if not (output_repo / ".orchestrator").is_dir():
+        raise SystemExit(f"referee_output_root_invalid:{output_repo}")
+    contract = load_framework_contract(repo)
+    tasks, quarantined = load_tasks_quarantined(contract)
+    task = _resolve_runtime_task(tasks, quarantined, args.task)
+    if (
+        task.task_kind not in {"etl", "analysis", "writing", "validation", "proof", "model", "bridge", "lit_review"}
+        and not _repair_is_referee_reviewable(task)
+        and not _task_is_manuscript_surface(task)
+    ):
+        raise SystemExit(f"referee_task_kind_not_substantive:{task.task_id}:{task.task_kind}")
+
+    run_manifest_path, run_manifest = _latest_referee_run_manifest(contract, task.task_id)
+    executor = run_manifest.get("executor") if isinstance(run_manifest.get("executor"), dict) else {}
+    authoring_family = _referee_family(executor.get("tool"))
+    if authoring_family is None:
+        _record_swarm_event(
+            repo,
+            {"event": "referee_family_of_author", "task_id": task.task_id, "reason": "authoring_family_unknown"},
+            escalation=True,
+        )
+        raise SystemExit(f"referee_authoring_family_unknown:{task.task_id}")
+
+    frontmatter = _task_frontmatter(task)
+    rubric_task_kind = task.task_kind
+    if task.task_kind == "repair":
+        source_kind = frontmatter.get("repair_source_task_kind")
+        rubric_task_kind = str(source_kind) if isinstance(source_kind, str) else task.task_kind
+    elif _task_is_manuscript_surface(task) and task.task_kind not in {
+        "etl", "analysis", "writing", "validation", "proof", "model", "bridge", "lit_review"
+    }:
+        rubric_task_kind = "writing"
+    rubric, rubric_path = _load_referee_rubric(repo, rubric_task_kind)
+    is_manuscript = task.task_kind == "writing" or any(
+        _path_matches_prefix(output, "reports/paper/") for output in task.outputs
+    )
+    rubrics = [rubric]
+    rubric_paths = [rubric_path]
+    if is_manuscript:
+        manuscript_rubric, manuscript_path = _load_referee_rubric(repo, rubric_task_kind, manuscript=True)
+        rubrics.append(manuscript_rubric)
+        rubric_paths.append(manuscript_path)
+    scoped_claims, ledger_diagnostic = _task_scoped_claims(repo, task)
+    sampled_artifacts = _kernel_sampled_artifacts(repo, task.task_id, task=task)
+    if ledger_diagnostic is not None:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "referee_claim_ledger_unavailable",
+                "task_id": task.task_id,
+                "diagnostic": ledger_diagnostic,
+            },
+            escalation=True,
+        )
+    assertions = _assertion_candidates(repo, task) if is_manuscript else []
+    required = _referee_required_verdicts(
+        task=task,
+        frontmatter=frontmatter,
+        rubrics=rubrics,
+        assertions=assertions,
+    )
+    if not required:
+        raise SystemExit(f"referee_no_required_verdicts:{task.task_id}")
+    run_manifest_relpath = run_manifest_path.relative_to(repo).as_posix()
+    rubric_digest = hashlib.sha256(
+        b"\0".join(path.read_bytes() for path in rubric_paths)
+    ).hexdigest()
+    declared_outputs = [
+        {key: value for key, value in item.items() if key != "sha256"}
+        for item in _declared_output_context(repo, task)
+    ]
+    context: dict[str, object] = {
+        "task": {
+            "path": task.path.relative_to(repo).as_posix(),
+            "frontmatter": frontmatter,
+            "contract_text": _read_text(task.path),
+        },
+        "diff_base_to_branch": _referee_diff(repo, args.base_branch, args.remote),
+        "run_manifest": run_manifest,
+        "run_manifest_path": run_manifest_relpath,
+        "declared_outputs": declared_outputs,
+        "rubrics": rubrics,
+        "rubric_version": f"research_swarm.rubric.v1:{rubric_digest[:16]}",
+        "required_verdicts": required,
+        # The line number is an independent open instruction; its contents
+        # are never supplied. The referee proves opening by quoting it, while
+        # the kernel alone computes and records the disk digest.
+        "kernel_sampled_artifacts": [
+            {
+                "claim_id": item.get("claim_id"),
+                "path": item.get("path"),
+                "challenge_line": item.get("challenge_line"),
+            }
+            for item in sampled_artifacts
+        ],
+        "assertion_prefilter_floor": assertions,
+        "claim_ledger": _referee_claim_context(scoped_claims) if is_manuscript else [],
+    }
+    target_hashes = {
+        str(item.get(key, ""))
+        for item in sampled_artifacts
+        for key in ("sha256", "ledger_sha256")
+        if isinstance(item.get(key), str) and item.get(key)
+    }
+    context = dict(_redact_sample_hashes(context, target_hashes))
+    run_manifest_sha256 = hashlib.sha256(run_manifest_path.read_bytes()).hexdigest()
+    invocation_event = _record_swarm_event(
+        repo,
+        {
+            "event": "referee_invoked",
+            "task_id": task.task_id,
+            "run_manifest_sha256": run_manifest_sha256,
+            "actor": "Referee",
+            "session_id": _ACTOR_SESSION_ID,
+            "backend": args.referee_backend,
+            "requested_family": args.referee_family,
+        },
+    )
+    outcome = _invoke_referee(
+        context=context,
+        repo=repo,
+        task_id=task.task_id,
+        backend=args.referee_backend,
+        referee_family=args.referee_family,
+        timeout_seconds=max(1, int(args.timeout_seconds)),
+    )
+    if outcome.returncode != 0:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "referee_invocation_failed",
+                "task_id": task.task_id,
+                "backend": args.referee_backend,
+                "run_manifest_sha256": run_manifest_sha256,
+                "reason": outcome.stdout[-1000:],
+            },
+            escalation=True,
+        )
+        print(json.dumps({"task_id": task.task_id, "ok": False, "error": outcome.stdout}, indent=2, sort_keys=True))
+        return 1
+    if outcome.referee_family == authoring_family:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "referee_family_of_author",
+                "task_id": task.task_id,
+                "authoring_family": authoring_family,
+                "referee_family": outcome.referee_family,
+            },
+            escalation=True,
+        )
+        print(
+            json.dumps(
+                {
+                    "task_id": task.task_id,
+                    "ok": False,
+                    "error": "referee_family_of_author",
+                    "authoring_family": authoring_family,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 1
+
+    verdicts, opened, overall, validation_failures = _normalize_referee_report(
+        payload=outcome.payload,
+        required=required,
+        sampled_artifacts=sampled_artifacts,
+        sample_required=bool(scoped_claims),
+    )
+    timestamp = _utc_timestamp_compact()
+    report_path = _next_json_artifact_path(output_repo / REFEREE_REPORT_DIR, task.task_id, timestamp)
+    report_relpath = report_path.relative_to(output_repo).as_posix()
+    report: dict[str, object] = {
+        "schema_version": REFEREE_REPORT_SCHEMA_VERSION,
+        "generated_at_utc": _utc_now_iso(),
+        "task_id": task.task_id,
+        "actor": "Referee",
+        "session_id": _ACTOR_SESSION_ID,
+        "referee_family": outcome.referee_family,
+        "authoring_family": authoring_family,
+        "run_manifest_path": run_manifest_relpath,
+        "run_manifest_sha256": run_manifest_sha256,
+        "rubric_version": context["rubric_version"],
+        "rubric_files": [path.relative_to(repo).as_posix() for path in rubric_paths],
+        "verdicts": verdicts,
+        "opened_artifacts": opened,
+        "sampled_artifacts": [
+            _public_sampled_artifact(item) for item in sampled_artifacts
+        ],
+        "assertion_prefilter_floor": assertions,
+        "reviewed_artifacts": [item["path"] for item in context["declared_outputs"] if isinstance(item, dict)],
+        "overall": overall,
+        "valid": not validation_failures,
+        "validation_failures": validation_failures,
+        "calibrated": _referee_family_calibrated(output_repo, outcome.referee_family),
+        "invocation_journaled": isinstance(invocation_event, dict),
+    }
+    _write_json(report_path, report)
+
+    if validation_failures:
+        for failure in validation_failures:
+            if failure.startswith("referee_did_not_open_sampled"):
+                _record_swarm_event(
+                    repo,
+                    {"event": "referee_did_not_open_sampled", "task_id": task.task_id, "report": report_relpath, "failure": failure},
+                    escalation=True,
+                )
+        _record_swarm_event(
+            repo,
+            {"event": "referee_report_invalid", "task_id": task.task_id, "report": report_relpath, "failures": validation_failures},
+            escalation=True,
+        )
+        print(json.dumps({"task_id": task.task_id, "ok": False, "report": report_relpath, "failures": validation_failures}, indent=2, sort_keys=True))
+        return 1
+
+    major_not_supported = [
+        item
+        for item in verdicts
+        if item.get("severity") == "major" and item.get("verdict") == "not_supported"
+    ]
+    cannot_verify = [item for item in verdicts if item.get("verdict") == "cannot_verify"]
+    blocking = [*major_not_supported, *cannot_verify]
+    unregistered = [
+        item
+        for item in major_not_supported
+        if isinstance(item.get("check_id"), str)
+        and item["check_id"].startswith("ASSERTION-")
+        and item.get("verdict") == "not_supported"
+    ]
+    if cannot_verify:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "referee_cannot_verify",
+                "task_id": task.task_id,
+                "report": report_relpath,
+                "finding_ids": [item.get("success_criterion_id", item.get("check_id")) for item in cannot_verify],
+            },
+            escalation=True,
+        )
+    if unregistered:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "unregistered_assertion",
+                "task_id": task.task_id,
+                "report": report_relpath,
+                "finding_ids": [item.get("check_id") for item in unregistered],
+            },
+            escalation=True,
+        )
+
+    revision_paths: list[Path] = []
+    if blocking:
+        try:
+            revision_paths = generate_revision_tasks(repo=output_repo, report_path=report_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            _record_swarm_event(
+                repo,
+                {"event": "revision_task_generation_failed", "task_id": task.task_id, "report": report_relpath, "reason": str(exc)},
+                escalation=True,
+            )
+            print(json.dumps({"task_id": task.task_id, "ok": False, "report": report_relpath, "error": str(exc)}, indent=2, sort_keys=True))
+            return 1
+    _record_swarm_event(
+        repo,
+        {
+            "event": "referee_reported",
+            "task_id": task.task_id,
+            "report": report_relpath,
+            "referee_family": outcome.referee_family,
+            "overall": overall,
+            "revision_tasks": [path.relative_to(output_repo).as_posix() for path in revision_paths],
+        },
+    )
+    result = {
+        "task_id": task.task_id,
+        "ok": not blocking,
+        "report": report_relpath,
+        "overall": overall,
+        "calibrated": report["calibrated"],
+        "revision_tasks": [path.relative_to(output_repo).as_posix() for path in revision_paths],
+        "plan_approval_pending": (
+            PLAN_APPROVAL_PENDING_PATH.as_posix()
+            if revision_paths and (output_repo / PLAN_APPROVAL_PENDING_PATH).is_file()
+            else None
+        ),
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 1 if blocking else 0
+
+
+def _latest_referee_report(repo: Path, task_id: str) -> tuple[Path, dict[str, object]] | None:
+    paths = _matching_task_jsons(repo / REFEREE_REPORT_DIR, task_id)
+    for path in reversed(paths):
+        try:
+            payload = json.loads(_read_text(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("schema_version") == REFEREE_REPORT_SCHEMA_VERSION:
+            return path, payload
+    return None
+
+
+def _referee_family_votes(
+    repo: Path,
+    task_id: str,
+    *,
+    run_manifest_relpath: str | None = None,
+    run_manifest_sha256: str | None = None,
+) -> dict[str, tuple[Path, dict[str, object]]]:
+    """Return at most one (the latest) vote per family for one artifact run."""
+    votes: dict[str, tuple[Path, dict[str, object]]] = {}
+    for path in reversed(_matching_task_jsons(repo / REFEREE_REPORT_DIR, task_id)):
+        try:
+            payload = json.loads(_read_text(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("schema_version") != REFEREE_REPORT_SCHEMA_VERSION:
+            continue
+        if run_manifest_relpath is not None and payload.get("run_manifest_path") != run_manifest_relpath:
+            continue
+        if run_manifest_sha256 is not None and payload.get("run_manifest_sha256") != run_manifest_sha256:
+            continue
+        family = payload.get("referee_family")
+        if isinstance(family, str) and family.strip() and family not in votes:
+            votes[family] = (path, payload)
+    return votes
+
+
+def _referee_report_journaled(
+    repo: Path,
+    *,
+    task_id: str,
+    run_manifest_sha256: str,
+    actor: object,
+    session_id: object,
+) -> bool:
+    if actor != "Referee" or not isinstance(session_id, str) or not session_id:
+        return False
+    events, _ = swarm_events.read_events(repo)
+    return any(
+        event.get("event") == "referee_invoked"
+        and event.get("task_id") == task_id
+        and event.get("run_manifest_sha256") == run_manifest_sha256
+        and event.get("actor") == actor
+        and event.get("session_id") == session_id
+        and event.get("actor_session") == session_id
+        for event in events
+    )
+
+
+def _referee_backend_failed(
+    repo: Path,
+    *,
+    task_id: str,
+    run_manifest_sha256: str,
+) -> bool:
+    events, _ = swarm_events.read_events(repo)
+    return any(
+        event.get("event") in {"referee_invocation_failed", "referee_panel_unavailable"}
+        and event.get("task_id") == task_id
+        and event.get("run_manifest_sha256") == run_manifest_sha256
+        for event in events
+    )
+
+
+def _referee_report_severity(
+    repo: Path,
+    report: dict[str, object],
+    verdict: dict[str, object],
+) -> str | None:
+    if isinstance(verdict.get("success_criterion_id"), str):
+        return "major"
+    check_id = verdict.get("check_id")
+    if not isinstance(check_id, str):
+        return None
+    if check_id.startswith("ASSERTION-"):
+        return "major"
+    rubric_files = report.get("rubric_files")
+    if not isinstance(rubric_files, list):
+        return None
+    for raw in rubric_files:
+        if not isinstance(raw, str) or not raw.startswith("contracts/rubrics/"):
+            continue
+        path = (repo / raw).resolve()
+        try:
+            path.relative_to(repo.resolve())
+            rubric = json.loads(_read_text(path))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        checks = rubric.get("checks") if isinstance(rubric, dict) else None
+        if not isinstance(checks, list):
+            continue
+        for check in checks:
+            if isinstance(check, dict) and check.get("id") == check_id:
+                severity = check.get("severity")
+                return str(severity) if severity in {"major", "minor"} else None
+    return None
+
+
+def _referee_owner_waiver(
+    repo: Path,
+    *,
+    task_id: str,
+    run_manifest_sha256: str,
+) -> dict[str, object] | None:
+    events, _ = swarm_events.read_events(repo)
+    trusted_base = _trusted_integration_branch(repo)
+    for event in reversed(events):
+        if not (
+            event.get("event") == "referee_owner_waiver"
+            and event.get("emitted_by") == REFEREE_WAIVER_EMITTER
+            and event.get("actor") == "HumanOwner"
+            # the waiver must have been emitted on the trusted integration branch,
+            # not merely carry a non-empty branch string
+            and event.get("control_plane_branch") == trusted_base
+            and event.get("task_id") == task_id
+            and event.get("run_manifest_sha256") == run_manifest_sha256
+        ):
+            continue
+        human_id = event.get("human_id")
+        reason = event.get("reason")
+        if not isinstance(human_id, str) or not human_id.strip():
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            continue
+        waiver = {"human_id": human_id, "reason": reason}
+        waiver_sha = hashlib.sha256(
+            json.dumps(waiver, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if event.get("waiver_sha256") == waiver_sha:
+            return {**waiver, "waiver_sha256": waiver_sha}
+    return None
+
+
+def cmd_referee_waiver(args: argparse.Namespace) -> int:
+    """Append one human manuscript-quorum waiver as kernel evidence."""
+    repo = _repo_root()
+    # The protected integration branch comes from git, NOT from --base-branch — a
+    # Worker on a task branch cannot name its own branch to authorize a waiver —
+    # and the waiver must run on the main checkout, never a linked worktree.
+    trusted_base = _trusted_integration_branch(repo)
+    current_branch = _git_current_branch(repo)
+    if _is_linked_worktree(repo) or current_branch != trusted_base:
+        raise SystemExit(
+            f"referee_waiver_requires_integration_branch:{current_branch}!={trusted_base}"
+        )
+    human_id = str(args.human_id).strip()
+    reason = str(args.reason).strip()
+    if not human_id or not reason:
+        raise SystemExit("referee_waiver_identity_and_reason_required")
+    contract = load_framework_contract(repo)
+    tasks, quarantined = load_tasks_quarantined(contract)
+    task = _resolve_runtime_task(tasks, quarantined, args.task)
+    if not _task_is_manuscript_surface(task):
+        raise SystemExit(f"referee_waiver_not_manuscript_surface:{task.task_id}")
+    waiver = {"human_id": human_id, "reason": reason}
+    manifest_path, manifest = _latest_referee_run_manifest(contract, task.task_id)
+    result = manifest.get("result") if isinstance(manifest.get("result"), dict) else {}
+    if result.get("status") != "ok":
+        raise SystemExit(f"referee_waiver_run_not_passing:{task.task_id}")
+    manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    waiver_sha = hashlib.sha256(
+        json.dumps(waiver, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    event = _record_swarm_event(
+        repo,
+        {
+            "event": "referee_owner_waiver",
+            "emitted_by": REFEREE_WAIVER_EMITTER,
+            "actor": "HumanOwner",
+            "control_plane_branch": current_branch,
+            "task_id": task.task_id,
+            "run_manifest_path": manifest_path.relative_to(repo).as_posix(),
+            "run_manifest_sha256": manifest_sha,
+            **waiver,
+            "waiver_sha256": waiver_sha,
+        },
+        escalation=True,
+    )
+    if not isinstance(event, dict):
+        raise SystemExit("referee_waiver_journal_write_failed")
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "task_id": task.task_id,
+                "run_manifest_sha256": manifest_sha,
+                "waiver_sha256": waiver_sha,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _referee_review_failures(
+    *,
+    repo: Path,
+    task: Task,
+    run_manifest_path: Path | None,
+) -> list[str]:
+    # Optional reports on S-tier / otherwise out-of-scope tasks never become
+    # latent review requirements after a rerun. Scope is the first predicate.
+    if not _referee_task_in_scope(task):
+        return []
+    evidence_root_raw = (
+        os.environ.get("SWARM_REFEREE_OUTPUT_ROOT", "").strip()
+        or os.environ.get("SWARM_EVENT_REPO_ROOT", "").strip()
+    )
+    evidence_repo = (
+        Path(evidence_root_raw).expanduser().resolve()
+        if evidence_root_raw
+        else repo
+    )
+    run_manifest_relpath = (
+        run_manifest_path.relative_to(repo).as_posix()
+        if run_manifest_path is not None
+        else None
+    )
+    run_manifest_sha256 = (
+        hashlib.sha256(run_manifest_path.read_bytes()).hexdigest()
+        if run_manifest_path is not None and run_manifest_path.is_file()
+        else None
+    )
+    votes = _referee_family_votes(
+        evidence_repo,
+        task.task_id,
+        run_manifest_relpath=run_manifest_relpath,
+        run_manifest_sha256=run_manifest_sha256,
+    )
+    if not votes:
+        if _latest_referee_report(evidence_repo, task.task_id) is not None:
+            return ["referee_report_stale_run_manifest"]
+        if run_manifest_sha256 is not None and _referee_backend_failed(
+            evidence_repo,
+            task_id=task.task_id,
+            run_manifest_sha256=run_manifest_sha256,
+        ):
+            return ["referee_backend_unavailable"]
+        return ["referee_required_missing"]
+    failures: list[str] = []
+    authoring_families: set[str] = set()
+    for family, (_, report) in sorted(votes.items()):
+        if not _referee_family_calibrated(evidence_repo, family):
+            failures.append(f"referee_panel_uncalibrated:{family}")
+        if report.get("valid") is not True:
+            failures.append(f"referee_report_invalid:{family}")
+        report_run_sha = report.get("run_manifest_sha256")
+        if not isinstance(report_run_sha, str) or not _referee_report_journaled(
+            evidence_repo,
+            task_id=task.task_id,
+            run_manifest_sha256=report_run_sha,
+            actor=report.get("actor"),
+            session_id=report.get("session_id"),
+        ):
+            failures.append(f"referee_report_unjournaled:{family}")
+        authoring = report.get("authoring_family")
+        if isinstance(authoring, str):
+            authoring_families.add(authoring)
+        if authoring == family:
+            failures.append(f"referee_family_of_author:{family}")
+        verdicts = report.get("verdicts") if isinstance(report.get("verdicts"), list) else []
+        for item in verdicts:
+            if not isinstance(item, dict):
+                continue
+            verdict = item.get("verdict")
+            identifier = item.get("success_criterion_id", item.get("check_id", "unknown"))
+            if verdict == "cannot_verify":
+                failures.append(f"referee_cannot_verify:{identifier}")
+            if (
+                verdict == "not_supported"
+                and _referee_report_severity(evidence_repo, report, item) == "major"
+            ):
+                failures.append(f"referee_not_supported:{identifier}")
+            if (
+                verdict == "not_supported"
+                and isinstance(item.get("check_id"), str)
+                and item["check_id"].startswith("ASSERTION-")
+            ):
+                failures.append(f"unregistered_assertion:{identifier}")
+    is_manuscript_release_surface = _task_is_manuscript_surface(task)
+    non_authoring_votes = set(votes) - authoring_families
+    if is_manuscript_release_surface and len(non_authoring_votes) < 2:
+        waiver = (
+            _referee_owner_waiver(
+                evidence_repo,
+                task_id=task.task_id,
+                run_manifest_sha256=run_manifest_sha256,
+            )
+            if run_manifest_sha256 is not None
+            else None
+        )
+        required_votes = 1 if waiver is not None else 2
+        if len(non_authoring_votes) < required_votes:
+            failures.append(
+                f"referee_manuscript_panel_family_quorum:{len(non_authoring_votes)}<{required_votes}"
+            )
+    return sorted(set(failures))
 
 
 def _planner_backlog_path(repo: Path, raw_path: object) -> tuple[Path | None, str | None]:
@@ -5011,6 +6490,19 @@ def _merge_inflight_task_ids(repo: Path) -> set[str]:
     return {task_id for task_id, active in state.items() if active}
 
 
+def _kernel_namespaced_run_path(task_id: str, path: str) -> bool:
+    normalized = _normalize_repo_relative_path(path)
+    direct = re.fullmatch(
+        rf"reports/status/swarm_runs/{re.escape(task_id)}_[A-Za-z0-9_.-]+\.json",
+        normalized,
+    )
+    nested = re.fullmatch(
+        rf"reports/status/swarm_runs/(?:logs|sessions)/{re.escape(task_id)}_[A-Za-z0-9_.-]+\.(?:log|json)",
+        normalized,
+    )
+    return direct is not None or nested is not None
+
+
 def _step_sync(args: argparse.Namespace) -> dict[str, object]:
     repo = _repo_root()
     _run(["git", "fetch", args.remote], cwd=repo, check=True)
@@ -5551,6 +7043,271 @@ def _step_judge(
     return {"judged": judged, "deferred": deferred}
 
 
+def _referee_output_paths_from_stdout(stdout: str, task_id: str) -> list[str]:
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict) or payload.get("task_id") != task_id:
+        return []
+    paths: list[str] = []
+    report = payload.get("report")
+    if isinstance(report, str):
+        normalized = _normalize_repo_relative_path(report)
+        if (
+            Path(normalized).parent.as_posix() == REFEREE_REPORT_DIR.as_posix()
+            and Path(normalized).name.startswith(f"{task_id}_")
+            and Path(normalized).suffix == ".json"
+        ):
+            paths.append(normalized)
+    revisions = payload.get("revision_tasks")
+    if isinstance(revisions, list):
+        for revision in revisions:
+            if not isinstance(revision, str):
+                continue
+            normalized = _normalize_repo_relative_path(revision)
+            if (
+                Path(normalized).parent.as_posix() == ".orchestrator/backlog"
+                and re.fullmatch(r"T\d{3}_[A-Za-z0-9_.-]+\.md", Path(normalized).name)
+            ):
+                paths.append(normalized)
+    pending = payload.get("plan_approval_pending")
+    if pending == PLAN_APPROVAL_PENDING_PATH.as_posix():
+        paths.append(PLAN_APPROVAL_PENDING_PATH.as_posix())
+    return sorted(set(paths))
+
+
+def _persist_referee_outputs(
+    *,
+    repo: Path,
+    task_id: str,
+    paths: list[str],
+    remote: str,
+    base_branch: str,
+    strict: bool,
+) -> bool:
+    if not paths:
+        return False
+    if _git_current_branch(repo) != base_branch:
+        raise SystemExit(
+            f"referee_output_root_wrong_branch:{_git_current_branch(repo)}!={base_branch}"
+        )
+    missing = [path for path in paths if not (repo / path).is_file()]
+    if missing:
+        raise SystemExit("referee_output_missing:" + ",".join(missing))
+    for raw_path in paths:
+        path = repo / raw_path
+        if path.parent != repo / REFEREE_REPORT_DIR:
+            continue
+        try:
+            report = json.loads(_read_text(path))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"referee_output_invalid:{raw_path}:{type(exc).__name__}") from exc
+        run_sha = report.get("run_manifest_sha256") if isinstance(report, dict) else None
+        if (
+            not isinstance(report, dict)
+            or report.get("task_id") != task_id
+            or not isinstance(run_sha, str)
+            or not _referee_report_journaled(
+                repo,
+                task_id=task_id,
+                run_manifest_sha256=run_sha,
+                actor=report.get("actor"),
+                session_id=report.get("session_id"),
+            )
+        ):
+            raise SystemExit(f"referee_output_unjournaled:{raw_path}")
+    staged_before_cp = _run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        capture=True,
+        check=True,
+    )
+    staged_before = {
+        line.strip() for line in (staged_before_cp.stdout or "").splitlines() if line.strip()
+    }
+    unexpected = sorted(staged_before - set(paths))
+    if unexpected:
+        raise SystemExit(
+            "referee_refused_preexisting_staged_changes:" + ",".join(unexpected)
+        )
+    _run(["git", "add", "--", *paths], cwd=repo, check=True)
+    staged = _run(
+        ["git", "diff", "--cached", "--name-only", "--", *paths],
+        cwd=repo,
+        capture=True,
+        check=True,
+    )
+    if not (staged.stdout or "").strip():
+        return False
+    _git_commit(
+        cwd=repo,
+        message=f"{task_id}: referee findings",
+        strict=strict,
+        paths=paths,
+    )
+    _git_push(
+        cwd=repo,
+        remote=remote,
+        ref=base_branch,
+        set_upstream=False,
+        strict=strict,
+    )
+    _record_swarm_event(
+        repo,
+        {
+            "event": "referee_outputs_persisted",
+            "task_id": task_id,
+            "paths": paths,
+            "actor": "RefereeKernel",
+            "session_id": _ACTOR_SESSION_ID,
+        },
+    )
+    return True
+
+
+def _step_referee(
+    args: argparse.Namespace,
+    *,
+    candidate_ids: set[str] | None = None,
+) -> dict[str, object]:
+    repo = _repo_root()
+    contexts = _ready_for_review_contexts(repo)
+    if candidate_ids is not None:
+        contexts = {
+            task_id: context
+            for task_id, context in contexts.items()
+            if task_id in candidate_ids
+        }
+    reported: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+    for task_id, context in sorted(contexts.items()):
+        manifest_path = context.get("manifest_path")
+        worktree = context.get("worktree")
+        task = context.get("task")
+        if not isinstance(manifest_path, Path) or not isinstance(worktree, Path) or not isinstance(task, Task):
+            skipped.append({"task_id": task_id, "reason": "referee_context_incomplete"})
+            continue
+        if not _referee_task_in_scope(task):
+            skipped.append({"task_id": task_id, "reason": "referee_out_of_scope"})
+            continue
+        manifest_rel = manifest_path.relative_to(worktree).as_posix()
+        manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        existing = _referee_family_votes(
+            repo,
+            task_id,
+            run_manifest_relpath=manifest_rel,
+            run_manifest_sha256=manifest_sha,
+        )
+        requested_family = getattr(args, "referee_family", None)
+        if isinstance(requested_family, str) and requested_family:
+            desired_families = [requested_family]
+        else:
+            try:
+                framework = json.loads(_read_text(repo / "contracts" / "framework.json"))
+            except (OSError, json.JSONDecodeError):
+                framework = {}
+            executors = framework.get("executors") if isinstance(framework, dict) else None
+            panel = executors.get("referee_panel") if isinstance(executors, dict) else None
+            configured = [
+                str(item.get("family", item.get("backend")))
+                for item in panel
+                if isinstance(item, dict) and isinstance(item.get("family", item.get("backend")), str)
+            ] if isinstance(panel, list) else []
+            manifest = context.get("manifest")
+            executor = manifest.get("executor") if isinstance(manifest, dict) and isinstance(manifest.get("executor"), dict) else {}
+            authoring_family = _referee_family(executor.get("tool"))
+            eligible = [family for family in configured if family != authoring_family]
+            if (
+                _task_is_manuscript_surface(task)
+                and len(set(eligible)) < 2
+                and _referee_owner_waiver(
+                    repo,
+                    task_id=task_id,
+                    run_manifest_sha256=manifest_sha,
+                )
+                is None
+            ):
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "referee_panel_unavailable",
+                        "task_id": task_id,
+                        "run_manifest_sha256": manifest_sha,
+                        "configured_non_authoring_families": sorted(set(eligible)),
+                        "required_non_authoring_families": 2,
+                        "reason": "configured_family_quorum_unavailable",
+                    },
+                    escalation=True,
+                )
+            desired_families = eligible if _task_is_manuscript_surface(task) else eligible[:1]
+        missing_families = [family for family in desired_families if family not in existing]
+        if not missing_families and existing:
+            skipped.append({"task_id": task_id, "reason": "referee_report_current"})
+            continue
+        if not missing_families:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "referee_panel_unavailable",
+                    "task_id": task_id,
+                    "run_manifest_sha256": manifest_sha,
+                    "reason": "no_non_authoring_family_configured",
+                },
+                escalation=True,
+            )
+            reported.append({"task_id": task_id, "returncode": 1, "error": "referee_backend_unavailable"})
+            continue
+        for referee_family in missing_families:
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "referee-task",
+                "--task",
+                task_id,
+                "--referee-backend",
+                getattr(args, "referee_backend", "mock"),
+                "--referee-family",
+                referee_family,
+                "--remote",
+                args.remote,
+                "--base-branch",
+                args.base_branch,
+            ]
+            env = dict(os.environ)
+            env["SWARM_REPO_ROOT"] = str(worktree)
+            env["SWARM_EVENT_REPO_ROOT"] = str(repo)
+            env["SWARM_REFEREE_OUTPUT_ROOT"] = str(repo)
+            cp = _run(
+                command,
+                cwd=worktree,
+                capture=True,
+                check=False,
+                env=env,
+                timeout_seconds=max(30, int(getattr(args, "referee_timeout_seconds", 900))),
+            )
+            output_paths = _referee_output_paths_from_stdout(cp.stdout or "", task_id)
+            persisted = _persist_referee_outputs(
+                repo=repo,
+                task_id=task_id,
+                paths=output_paths,
+                remote=args.remote,
+                base_branch=args.base_branch,
+                strict=bool(args.unattended),
+            )
+            reported.append(
+                {
+                    "task_id": task_id,
+                    "referee_family": referee_family,
+                    "returncode": cp.returncode,
+                    "output_paths": output_paths,
+                    "persisted": persisted,
+                    "output_tail": (cp.stdout or "")[-2000:],
+                }
+            )
+    return {"reported": reported, "skipped": skipped}
+
+
 def _latest_approving_review(
     context: dict[str, object],
 ) -> tuple[Path, dict[str, object]] | None:
@@ -5874,6 +7631,7 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
                 _path_matches_prefix(path, prefix)
                 for prefix in contract.operator_owned_shared_surfaces
             )
+            and not _kernel_namespaced_run_path(task_id, path)
         )
         if protected and branch_task.role != "Operator":
             _record_swarm_event(
@@ -6042,6 +7800,8 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
                 check=False,
             )
             for changed in [line.strip() for line in (range_cp.stdout or "").splitlines() if line.strip()]:
+                if _kernel_namespaced_run_path(task_id, changed):
+                    continue
                 ok, reason = _path_is_allowed(
                     path=changed,
                     allowed_paths=branch_task.allowed_paths,
@@ -7000,6 +8760,7 @@ def _supervise_cycle(args: argparse.Namespace) -> dict[str, object]:
         and context["manifest"]["result"].get("status") == "blocked"
     }
     run_step("TICK", _step_tick, args)
+    run_step("REFEREE", _step_referee, args, candidate_ids=judge_candidates)
     run_step("JUDGE", _step_judge, args, candidate_ids=judge_candidates)
     run_step("MERGE", _step_merge, args)
     run_step("SWEEP", _step_sweep, args)
@@ -7259,8 +9020,18 @@ def _lease_heartbeat(*, repo: Path, remote: str, task_id: str):
     raised from the timer thread (the post-run renewal fails loudly)."""
     claims = swarm_claims.read_claims(repo, remote, fetch=False)
     claim = claims.get(task_id)
+    kernel_events: list[dict[str, object]] = []
+
+    def _capture_event(event: dict[str, object], *, escalation: bool = False) -> None:
+        recorded = _record_swarm_event(repo, event, escalation=escalation)
+        if isinstance(recorded, dict):
+            normalized = dict(recorded)
+            normalized.pop("delivery", None)
+            normalized.pop("delivery_error", None)
+            kernel_events.append(normalized)
+
     if claim is None or claim.session_id != _ACTOR_SESSION_ID:
-        yield
+        yield kernel_events
         return
     ttl = claim.payload.get("lease_ttl_seconds")
     if isinstance(ttl, int) and ttl > 0:
@@ -7279,13 +9050,12 @@ def _lease_heartbeat(*, repo: Path, remote: str, task_id: str):
                     task_id,
                     expected_sha=current_sha,
                     session_id=_ACTOR_SESSION_ID,
-                    journal=lambda event: _record_swarm_event(repo, event),
+                    journal=_capture_event,
                 )
                 if renewed.ok and renewed.sha:
                     current_sha = renewed.sha
                 else:
-                    _record_swarm_event(
-                        repo,
+                    _capture_event(
                         {
                             "event": "heartbeat_failed",
                             "task_id": task_id,
@@ -7295,8 +9065,7 @@ def _lease_heartbeat(*, repo: Path, remote: str, task_id: str):
                     )
                     return
             except Exception as exc:
-                _record_swarm_event(
-                    repo,
+                _capture_event(
                     {"event": "heartbeat_failed", "task_id": task_id, "reason": str(exc)},
                     escalation=True,
                 )
@@ -7305,7 +9074,7 @@ def _lease_heartbeat(*, repo: Path, remote: str, task_id: str):
     thread = threading.Thread(target=_beat, name=f"lease-heartbeat-{task_id}", daemon=True)
     thread.start()
     try:
-        yield
+        yield kernel_events
     finally:
         stop.set()
         thread.join(timeout=10)
@@ -7459,6 +9228,9 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     executor_usage: dict[str, object] | None = None
     executor_session_relpath: str | None = None
     executor_backend = getattr(args, "executor_backend", "codex")
+    executor_control_plane_before: dict[str, bytes] | None = None
+    executor_control_plane_written_paths: list[str] = []
+    executor_kernel_events: list[dict[str, object]] = []
 
     if task.allow_network and task.workstream not in set(contract.network_workstreams):
         blocked_reasons.append("network_policy_violation")
@@ -7494,11 +9266,16 @@ def cmd_run_task(args: argparse.Namespace) -> int:
                 )
             else:
                 executor_command = ["mock", _mock_transcript_relpath(task.task_id)]
+            executor_control_plane_before = _executor_control_plane_snapshot(repo)
             executor_started = time.perf_counter()
             execution_values = dict(vars(args))
             execution_values["_executor_command"] = executor_command
             execution_args = argparse.Namespace(**execution_values)
-            with _lease_heartbeat(repo=repo, remote=args.remote, task_id=task.task_id):
+            with _lease_heartbeat(
+                repo=repo,
+                remote=args.remote,
+                task_id=task.task_id,
+            ) as executor_kernel_events:
                 outcome = _execute_task(
                     backend=executor_backend,
                     task=task,
@@ -7525,6 +9302,33 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             executor_error = str(exc)
             blocked_reasons.append("executor_unavailable")
         finally:
+            if executor_control_plane_before is not None:
+                executor_control_plane_written_paths = _executor_control_plane_changes(
+                    repo=repo,
+                    before=executor_control_plane_before,
+                    allowed_kernel_events=executor_kernel_events,
+                )
+                for path in executor_control_plane_written_paths:
+                    blocked_reasons.append(f"executor_wrote_control_plane:{path}")
+                    # Quarantine the forged control-plane file immediately so it
+                    # cannot survive into a retry's "before" snapshot (where an
+                    # unchanged forgery would evade re-detection) or a later merge.
+                    try:
+                        forged = (repo / path).resolve()
+                        if repo.resolve() in forged.parents and forged.is_file():
+                            forged.unlink()
+                            _run(["git", "rm", "-f", "--ignore-unmatch", "--", path], cwd=repo, check=False)
+                    except OSError:
+                        pass
+                    _record_swarm_event(
+                        repo,
+                        {
+                            "event": "executor_wrote_control_plane",
+                            "task_id": task.task_id,
+                            "path": path,
+                        },
+                        escalation=True,
+                    )
             if executor_started is not None and executor_wall_clock_seconds is None:
                 executor_wall_clock_seconds = max(0.0, time.perf_counter() - executor_started)
             if executor_wall_clock_seconds is not None:
@@ -7612,6 +9416,11 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         path_sources, ops = _collect_changed_paths_with_sources(repo=repo, base_ref=base_ref)
         changed_paths = sorted(path_sources.keys())
         task_file_rel = task.path.relative_to(repo).as_posix()
+        kernel_generated_run_paths = {
+            path
+            for path in (executor_log_relpath, executor_session_relpath)
+            if isinstance(path, str)
+        }
 
         for op in ops:
             if op.get("code") == "R" and op.get("old_path") == task_file_rel and op.get("path") != task_file_rel:
@@ -7633,6 +9442,11 @@ def cmd_run_task(args: argparse.Namespace) -> int:
 
         seen: set[tuple[str, str]] = set()
         for changed_path in changed_paths:
+            if (
+                changed_path in kernel_generated_run_paths
+                or _kernel_namespaced_run_path(task.task_id, changed_path)
+            ):
+                continue
             ok, reason = _path_is_allowed(
                 path=changed_path,
                 allowed_paths=task.allowed_paths,
@@ -7760,6 +9574,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             "changed_paths": changed_paths,
             "violations": ownership_failures,
             "uncommitted_violations": sorted(set(uncommitted_violations)),
+            "executor_control_plane_changes": executor_control_plane_written_paths,
         },
         "artifacts": {
             "outputs_ok": outputs_ok,
@@ -7991,6 +9806,20 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
             selected_manifest_data = data
             break
 
+    referee_failures = _referee_review_failures(
+        repo=repo,
+        task=task,
+        run_manifest_path=selected_run_manifest,
+    )
+    review_bundle_failures.extend(referee_failures)
+    for failure in referee_failures:
+        if failure.startswith("referee_cannot_verify"):
+            _record_swarm_event(
+                repo,
+                {"event": "referee_cannot_verify", "task_id": task.task_id, "failure": failure},
+                escalation=True,
+            )
+
     # The Judge executes the PINNED gate commands from the manifest it is
     # judging, never the live (editable) task file's copy (§4.0 #12).
     commands_block = (
@@ -8194,6 +10023,28 @@ def build_parser() -> argparse.ArgumentParser:
     costs.add_argument("--json", action="store_true")
     costs.set_defaults(func=cmd_costs)
 
+    referee_task = subparsers.add_parser(
+        "referee-task",
+        help="Run a read-only cross-family referee for one task and emit findings JSON",
+    )
+    referee_task.add_argument("--task", required=True, metavar="T###")
+    referee_task.add_argument("--referee-backend", choices=["mock", "claude"], default="mock")
+    referee_task.add_argument("--referee-family", default=None)
+    referee_task.add_argument("--remote", default="origin")
+    referee_task.add_argument("--base-branch", default="main")
+    referee_task.add_argument("--timeout-seconds", type=int, default=900)
+    referee_task.set_defaults(func=cmd_referee_task)
+
+    referee_waiver = subparsers.add_parser(
+        "referee-waiver",
+        help="Journal a human waiver reducing manuscript family quorum to one",
+    )
+    referee_waiver.add_argument("--task", required=True, metavar="T###")
+    referee_waiver.add_argument("--human-id", required=True)
+    referee_waiver.add_argument("--reason", required=True)
+    referee_waiver.add_argument("--base-branch", default="main")
+    referee_waiver.set_defaults(func=cmd_referee_waiver)
+
     plan = subparsers.add_parser("plan", help="Print done/claimed/ready task status as JSON")
     plan.add_argument("--remote", default="origin")
     plan.add_argument("--base-branch", default="main")
@@ -8274,6 +10125,9 @@ def build_parser() -> argparse.ArgumentParser:
     supervise.add_argument("--base-branch", default="main")
     supervise.add_argument("--executor-backend", choices=["codex", "mock"], default="codex")
     supervise.add_argument("--planner-backend", choices=["mock", "claude"], default="mock")
+    supervise.add_argument("--referee-backend", choices=["mock", "claude"], default="mock")
+    supervise.add_argument("--referee-family", default=None)
+    supervise.add_argument("--referee-timeout-seconds", type=int, default=900)
     supervise.add_argument("--codex-model", default=None)
     supervise.add_argument(
         "--codex-sandbox",

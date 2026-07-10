@@ -1,0 +1,10 @@
+{
+  "schema_version": "research_swarm.rubric.v1",
+  "task_kind": "bridge",
+  "checks": [
+    {"id": "BRIDGE_SOURCE_BINDING", "prompt": "Trace every modeled input to a hash-bound empirical source manifest.", "severity": "major", "evidence_required": true},
+    {"id": "BRIDGE_SEMANTIC_MAPPING", "prompt": "Verify units, populations, timing, transformations, and identities across the empirical-model seam.", "severity": "major", "evidence_required": true},
+    {"id": "BRIDGE_UNCERTAINTY", "prompt": "Check that empirical uncertainty is propagated through the bridge rather than discarded.", "severity": "major", "evidence_required": true},
+    {"id": "BRIDGE_LIMITATIONS", "prompt": "Check that seam assumptions and extrapolation limits are documented.", "severity": "minor", "evidence_required": true}
+  ]
+}

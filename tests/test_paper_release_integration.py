@@ -40,35 +40,29 @@ class PaperReleaseIntegrationTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.repo_root = Path(__file__).resolve().parents[1]
         cls.release_assembly = load_release_assembly_module()
-        cls.preview = cls.release_assembly.assemble_release_manifest(
-            cls.repo_root,
+        cls.expected_relpaths = [
+            relpath for relpath in CANONICAL_PAPER_ARTIFACTS if (cls.repo_root / relpath).is_file()
+        ]
+
+    def test_materialized_paper_without_panel_blocks_release_preview(self) -> None:
+        if len(self.expected_relpaths) != len(CANONICAL_PAPER_ARTIFACTS):
+            self.skipTest("canonical paper is not materialized")
+        with self.assertRaisesRegex(SystemExit, "referee_release_evidence"):
+            self.release_assembly.assemble_release_manifest(
+                self.repo_root,
+                date(2026, 3, 31),
+                allow_gate_failures=True,
+            )
+
+    def test_pending_paper_preview_still_skips_referee_release_gate(self) -> None:
+        if len(self.expected_relpaths) == len(CANONICAL_PAPER_ARTIFACTS):
+            self.skipTest("canonical paper is materialized")
+        preview = self.release_assembly.assemble_release_manifest(
+            self.repo_root,
             date(2026, 3, 31),
             allow_gate_failures=True,
         )
-
-    def test_release_preview_marks_materialized_paper_surface_present(self) -> None:
-        paper = self.preview["artifacts"]["paper"]
-        self.assertEqual(paper["expected_namespace"], "reports/paper/build/")
-        expected_relpaths = [
-            relpath
-            for relpath in CANONICAL_PAPER_ARTIFACTS
-            if (self.repo_root / relpath).is_file()
-        ]
-        if len(expected_relpaths) == len(CANONICAL_PAPER_ARTIFACTS):
-            self.assertEqual(paper["status"], "present")
-        else:
-            self.assertEqual(paper["status"], "pending_stage2")
-
-    def test_release_preview_records_only_canonical_paper_artifacts(self) -> None:
-        paper = self.preview["artifacts"]["paper"]
-        relpaths = [artifact["path"] for artifact in paper["artifacts"]]
-        expected_relpaths = [
-            relpath
-            for relpath in CANONICAL_PAPER_ARTIFACTS
-            if (self.repo_root / relpath).is_file()
-        ]
-        self.assertEqual(relpaths, expected_relpaths)
-        self.assertEqual(self.preview["counts"]["paper_artifacts"], len(expected_relpaths))
+        self.assertEqual(preview["artifacts"]["paper"]["status"], "pending_stage2")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,26 @@ Delivery: one branch per milestone (`milestone/<id>-<slug>`), red/green-tested b
 
 ---
 
-## M3a — Deterministic science gates + modeling battery + prereg locks (branch: `milestone/m3a-science-gates`) — IN PROGRESS (fix round 4 green; re-verification pending)
+## M3b — Referee panel + gold set (branch: `milestone/m3b-referee`) — Batch 1 IN PROGRESS (converged after 2 fix rounds; cheap residual blockers fixed inline; deep residuals → M5)
+
+Scope: plan §5.3/§5.4 (L2 cross-family referee panel), §9.3 (gold-set calibration). Batch 2 (§6.5 integrity audit + §6.3 W-Lit + §6.6 truth-seeking prompts) staged separately.
+
+Batch record:
+
+- **M3b Batch 1** (`dece4b6`) — the referee panel MECHANISM: `referee-task` (mock default; Claude read-only argv), `referee_report_v1` schema, 9 rubrics, kernel-sampled artifact opening, unregistered-assertion sweep (incl. the `MANUSCRIPT_SEMANTIC_VALUE_ROLE` rubric that closes the M3a→M3b value-swap boundary), gold set + calibration, revision-task generator. Codex workhorse; 356 tests.
+- **Verification round 1** (Codex 11/7-BLOCKER + Claude adversary DO-NOT-SHIP): the layer built the mechanism but was **fail-open and Worker-spoofable** — absence-of-report = approval, release path omitted the referee gates, calibration self-assertable, family derived from a Worker-writable manifest. Owner adjudicated (read both, verify — confirmed Codex right that minor `cannot_verify` escaped and reports/manifests weren't kernel-protected, points Claude had cleared/understated).
+- **Fix round 1** (`1af536d`, Codex under frozen dispositions): fail-CLOSED gating (in-scope task/release blocks on missing/stale/uncalibrated/backend-unavailable), `cannot_verify` universal + rubric-derived severity, `not_supported` blocks all in-scope scientific tasks, kernel-only surface declarations, backend-bound calibration, task-scoped opened-artifact. 370 tests.
+- **Verification round 2** (Codex 8/6-BLOCKER): the authority boundary was still partly bypassable — owner **verified against code** that `swarm.py:2974` auto-accepted a Worker-written task-namespaced run manifest (the exact "forged-approval channel" M1 closed for review logs).
+- **Fix round 2** (`f7dc712`, Codex under precise dispositions): control-plane surfaces (`swarm_runs`/`referee_reports`/`calibration`/`reviews`/events) are DENIED to task writes; the kernel snapshots those namespaces before the executor and hard-blocks any executor-written control-plane file (`executor_wrote_control_plane`) before any kernel write; a kernel-only `referee-waiver` command; release verdict-checking; a read-only-compatible content-challenge (kernel computes the disk sha + gives the referee a line NUMBER, referee returns the `quoted_span`); strict git-immutable calibration bars. 380 tests.
+- **Verification round 3** (Codex 3-BLOCKER + 1 MAJOR): policy `≤2 delegate rounds → inline`, so **owner fixed inline**: (B1) the content-challenge could pick a BLANK line (echo-satisfiable) — now selects only non-blank lines and fails closed (`referee_sample_not_challengeable`) when none exists; (B3) the `referee-waiver` branch guard used a caller-supplied `--base-branch` — now derives the trusted integration branch from git (`refs/remotes/origin/HEAD`), rejects linked worktrees, and the consumers require the waiver's `control_plane_branch` to equal it; (M4-cheap) a detected control-plane forgery is quarantined (unlinked + `git rm`) so it can't poison a retry. + regression tests.
+
+Design decisions:
+
+- **D-M3b-1 (deep provenance/calibration residuals → M5, documented; NOT exploitable on the empirical repo).** Two residuals require the M5 kernel-hardening / live-calibration machinery and are not reachable on the current empirical repo (no live panel, no manuscript release in flight; the same-commit calibration state is correctly UNAUTHORITATIVE): (a) **manifest-authority-ref** — a FULLY un-forgeable run-manifest authority against a full-access executor or a direct main-repo write requires migrating manifest authority into a kernel-only git ref (like M1's `refs/swarm/claims/`) + process-group termination + exact-kernel-event-path merge exemption (not the current `T###` filename regex); the executor-forgery detection + kernel-only surfaces close the practical task-branch attack for M3b. (b) **live-calibration binding** — `calibrate()` currently mints its run record from the supplied predictions file's self-declared metadata; proving a LIVE referee actually ran requires the calibration to consume kernel-journaled referee-invocation records emitted at invocation time (the §9.3 tier-(c) on-demand live-calibration harness). Both are logged as M5 items.
+
+---
+
+## M3a — Deterministic science gates + modeling battery + prereg locks (branch: `milestone/m3a-science-gates`) — COMPLETE (merged to main via PR #4, squash `ca462e8`)
 
 Scope: plan §5.2 (deterministic science gates), §6.1 (phased preregistration locks + amendment discipline), §6.2 (claim ledger / per-type uncertainty table), §10 M3a acceptance row. Plus the M2-deferred items (canonical hypothesis↔prereg linkage, per-tier numeric ceilings).
 

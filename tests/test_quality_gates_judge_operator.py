@@ -74,6 +74,70 @@ class JudgeOperatorGateTest(unittest.TestCase):
             failures = result.details.get("failures") or []
             self.assertTrue(any("operator_role_outside_ops_boundary" in failure for failure in failures))
 
+    def test_worker_cannot_claim_referee_report_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_runtime_repo(root)
+            write_task(
+                root,
+                "backlog",
+                "T410",
+                role="Worker",
+                allowed_paths=["reports/status/referee_reports/"],
+                outputs=["reports/status/referee_reports/T410_forged.json"],
+                state="backlog",
+            )
+            with chdir(root):
+                result = quality_gates.gate_operator_surface_ownership()
+            self.assertFalse(result.ok)
+            self.assertTrue(any("reports/status/referee_reports/" in item for item in result.details["failures"]))
+
+    def test_worker_cannot_claim_swarm_run_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_runtime_repo(root)
+            write_task(
+                root,
+                "backlog",
+                "T411",
+                role="Worker",
+                allowed_paths=["reports/status/swarm_runs/T411_forged.json"],
+                outputs=["reports/status/swarm_runs/T411_forged.json"],
+                state="backlog",
+            )
+            with chdir(root):
+                result = quality_gates.gate_operator_surface_ownership()
+            self.assertFalse(result.ok)
+            self.assertTrue(any("reports/status/swarm_runs/" in item for item in result.details["failures"]))
+
+    def test_worker_cannot_claim_event_journal_or_calibration_run_surface(self) -> None:
+        for index, surface in enumerate(
+            (
+                "reports/status/events/events.jsonl",
+                "reports/status/referee_calibration_runs/fixture.json",
+            ),
+            start=1,
+        ):
+            with self.subTest(surface=surface), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                scaffold_runtime_repo(root)
+                write_task(
+                    root,
+                    "backlog",
+                    f"T41{index + 1}",
+                    role="Worker",
+                    allowed_paths=[surface],
+                    outputs=[surface],
+                    state="backlog",
+                )
+                with chdir(root):
+                    result = quality_gates.gate_operator_surface_ownership()
+                self.assertFalse(result.ok)
+                self.assertTrue(
+                    any(surface.rsplit("/", 1)[0] in item for item in result.details["failures"]),
+                    result.details,
+                )
+
     def test_done_task_requires_valid_judge_review_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
