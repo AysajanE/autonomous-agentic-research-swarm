@@ -12,8 +12,9 @@ This runtime keeps the file-based control plane intact:
 - `ready_for_review` requires outputs, gates, manifests, and a durable run manifest
 - `done` requires a deterministic Judge review log
 
-The public operator-facing commands remain:
+The public operator-facing commands are:
 
+- `status`
 - `plan`
 - `tick`
 - `loop`
@@ -48,7 +49,10 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+import swarm_claims
+import swarm_events
 from swarm_taskfile import WorktreeCollisionError
+from swarm_taskfile import extract_section as _extract_section
 from swarm_taskfile import parse_status_value as _parse_status_value
 from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 from swarm_taskfile import parse_task_id_from_branch as _parse_task_id_from_branch
@@ -189,6 +193,25 @@ def _read_text(path: Path) -> str:
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _record_swarm_event(
+    repo: Path,
+    event: dict[str, object],
+    *,
+    escalation: bool = False,
+) -> dict | None:
+    """Best-effort journaling: runtime exit semantics never depend on it."""
+    try:
+        writer = swarm_events.escalate if escalation else swarm_events.append_event
+        return writer(repo, event, actor_session=_ACTOR_SESSION_ID)
+    except Exception as exc:
+        print(
+            f"[warn] event journal failed event={event.get('event')} "
+            f"error={type(exc).__name__}:{exc}",
+            file=sys.stderr,
+        )
+        return None
 
 
 def _run(
@@ -1172,6 +1195,19 @@ def _git_untracked_files(cwd: Path) -> list[str]:
     return [line.strip() for line in (cp.stdout or "").splitlines() if line.strip()]
 
 
+def _runtime_event_paths(repo: Path) -> set[str]:
+    paths = {swarm_events.EVENT_JOURNAL_PATH.as_posix()}
+    sink = swarm_events.escalation_sink_config(repo)
+    if sink.get("type") != "file":
+        return paths
+    try:
+        target = (repo / str(sink["target"])).resolve().relative_to(repo.resolve())
+    except (KeyError, ValueError):
+        return paths
+    paths.add(target.as_posix())
+    return paths
+
+
 def _git_unstage_path(cwd: Path, path: str) -> None:
     head_entry = _run(
         ["git", "ls-tree", "HEAD", "--", path],
@@ -1201,6 +1237,7 @@ def _git_unstage_path(cwd: Path, path: str) -> None:
 def _collect_changed_paths_with_sources(*, repo: Path, base_ref: str | None) -> tuple[dict[str, set[str]], list[dict[str, str]]]:
     path_sources: dict[str, set[str]] = {}
     ops: list[dict[str, str]] = []
+    runtime_event_paths = _runtime_event_paths(repo)
 
     def add_entries(source: str, entries: list[dict[str, str]]) -> None:
         for entry in entries:
@@ -1208,7 +1245,7 @@ def _collect_changed_paths_with_sources(*, repo: Path, base_ref: str | None) -> 
             record["source"] = source
             ops.append(record)
             for candidate in (entry.get("path", ""), entry.get("old_path", "")):
-                if not candidate:
+                if not candidate or candidate in runtime_event_paths:
                     continue
                 path_sources.setdefault(candidate, set()).add(source)
 
@@ -1217,6 +1254,8 @@ def _collect_changed_paths_with_sources(*, repo: Path, base_ref: str | None) -> 
     add_entries("staged", _git_diff_name_status_entries(repo, ["--cached"]))
     add_entries("unstaged", _git_diff_name_status_entries(repo, []))
     for path in _git_untracked_files(repo):
+        if path in runtime_event_paths:
+            continue
         path_sources.setdefault(path, set()).add("untracked")
         ops.append(
             {
@@ -1840,6 +1879,201 @@ def _executor_prompt_path(task: Task, contract: FrameworkContract) -> Path:
     return contract.prompt_templates[key]
 
 
+def _latest_run_manifest_status(
+    *,
+    repo: Path,
+    directory: Path,
+    task_id: str,
+) -> dict[str, object]:
+    paths = _matching_task_jsons(directory, task_id)
+    if not paths:
+        return {
+            "last_run_manifest": None,
+            "last_run_status": None,
+            "blocked_reasons": [],
+        }
+
+    path = paths[-1]
+    status: str | None = None
+    blocked_reasons: list[str] = []
+    try:
+        data = json.loads(_read_text(path))
+        task_block = data.get("task") if isinstance(data, dict) else None
+        result = data.get("result") if isinstance(data, dict) else None
+        if (
+            isinstance(task_block, dict)
+            and task_block.get("task_id") == task_id
+            and isinstance(result, dict)
+        ):
+            raw_status = result.get("status")
+            if isinstance(raw_status, str):
+                status = raw_status
+            raw_reasons = result.get("blocked_reasons")
+            if isinstance(raw_reasons, list):
+                blocked_reasons = [item for item in raw_reasons if isinstance(item, str)]
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    return {
+        "last_run_manifest": path.relative_to(repo).as_posix(),
+        "last_run_status": status,
+        "blocked_reasons": blocked_reasons,
+    }
+
+
+def _last_human_note(task: Task) -> str | None:
+    try:
+        section = _extract_section(_read_text(task.path), "Notes / Decisions")
+    except OSError:
+        return None
+    if section is None:
+        return None
+    note_lines = [line.strip() for line in section.splitlines() if line.strip()]
+    if not note_lines or "@human" not in note_lines[-1]:
+        return None
+    return note_lines[-1].removeprefix("- ").strip()
+
+
+def _run_manifest_spend(directory: Path) -> float | str:
+    values: list[float] = []
+    if directory.exists():
+        for path in sorted(directory.glob("*.json")):
+            try:
+                data = json.loads(_read_text(path))
+            except (OSError, json.JSONDecodeError):
+                continue
+            usage = data.get("usage") if isinstance(data, dict) else None
+            value = usage.get("estimated_cost_usd") if isinstance(usage, dict) else None
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                values.append(float(value))
+    return sum(values) if values else "unknown"
+
+
+def _render_status_text(payload: dict[str, object]) -> str:
+    lines = ["Swarm status"]
+    states = payload["states"]
+    assert isinstance(states, dict)
+    for state in DEFAULT_ALLOWED_STATES:
+        task_ids = states.get(state, [])
+        rendered = ", ".join(task_ids) if isinstance(task_ids, list) and task_ids else "(none)"
+        lines.append(f"{state}: {rendered}")
+
+    lines.append(f"quarantined: {payload['quarantine_count']}")
+    lines.append("non-done tasks:")
+    non_done = payload["non_done_tasks"]
+    assert isinstance(non_done, dict)
+    if not non_done:
+        lines.append("  (none)")
+    for task_id, summary in non_done.items():
+        assert isinstance(summary, dict)
+        reasons = summary.get("blocked_reasons") or []
+        reason_text = ",".join(reasons) if isinstance(reasons, list) and reasons else "(none)"
+        lines.append(
+            f"  {task_id}: state={summary.get('state')} "
+            f"last_run={summary.get('last_run_status') or 'unknown'} "
+            f"blocked_reasons={reason_text}"
+        )
+
+    lines.append("open @human questions:")
+    questions = payload["human_questions"]
+    assert isinstance(questions, list)
+    if not questions:
+        lines.append("  (none)")
+    for question in questions:
+        lines.append(f"  {question['task_id']}: {question['note']}")
+
+    lines.append("lease health:")
+    leases = payload["leases"]
+    assert isinstance(leases, list)
+    if not leases:
+        lines.append("  (none)")
+    for lease in leases:
+        lines.append(
+            f"  {lease['task_id']}: lease_id={lease['lease_id']} "
+            f"session={lease['session']} expired={lease['expired']} "
+            f"orphaned={lease['orphaned']}"
+        )
+
+    journal = payload["journal"]
+    assert isinstance(journal, dict)
+    lines.append(
+        "journal: "
+        f"events={journal['total_events']} malformed={journal['malformed_count']} "
+        f"escalations={journal['escalation_count']} "
+        f"last={journal['last_event_timestamp'] or 'none'}"
+    )
+    lines.append(f"spend_usd: {payload['spend']}")
+    return "\n".join(lines)
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    contract = load_framework_contract(repo)
+    tasks, quarantined = load_tasks_quarantined(contract)
+
+    states = {
+        state: sorted(task_id for task_id, task in tasks.items() if task.state == state)
+        for state in DEFAULT_ALLOWED_STATES
+    }
+    non_done_tasks: dict[str, dict[str, object]] = {}
+    human_questions: list[dict[str, str]] = []
+    for task_id, task in sorted(tasks.items()):
+        if task.state != "done":
+            non_done_tasks[task_id] = {
+                "state": task.state,
+                **_latest_run_manifest_status(
+                    repo=repo,
+                    directory=contract.run_manifest_dir,
+                    task_id=task_id,
+                ),
+            }
+        human_note = _last_human_note(task)
+        if human_note is not None:
+            human_questions.append({"task_id": task_id, "note": human_note})
+
+    now = dt.datetime.now(tz=dt.timezone.utc)
+    claims = swarm_claims.read_claims(
+        repo,
+        args.remote,
+        fetch=not bool(args.no_fetch),
+    )
+    leases = []
+    for task_id, claim in sorted(claims.items()):
+        task = tasks.get(task_id)
+        leases.append(
+            {
+                "task_id": task_id,
+                "lease_id": claim.lease_id,
+                "session": claim.session_id,
+                "expired": claim.expired(now=now),
+                "orphaned": task is None
+                or task.state not in {"active", "ready_for_review"},
+            }
+        )
+
+    events, malformed_count = swarm_events.read_events(repo)
+    payload: dict[str, object] = {
+        "states": states,
+        "quarantined": quarantined,
+        "quarantine_count": len(quarantined),
+        "non_done_tasks": non_done_tasks,
+        "human_questions": human_questions,
+        "leases": leases,
+        "journal": {
+            "total_events": len(events),
+            "malformed_count": malformed_count,
+            "escalation_count": sum(event.get("escalation") is True for event in events),
+            "last_event_timestamp": events[-1].get("ts_utc") if events else None,
+        },
+        "spend": _run_manifest_spend(contract.run_manifest_dir),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(_render_status_text(payload))
+    return 0
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     repo = _repo_root()
     contract = load_framework_contract(repo)
@@ -1894,6 +2128,15 @@ def cmd_tick(args: argparse.Namespace) -> int:
     }
 
     if args.dry_run or not selected:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "tick_completed",
+                "selected": len(summary["selected"]),
+                "skipped": len(summary["skipped"]),
+                "quarantined": len(quarantined),
+            },
+        )
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
 
@@ -1966,6 +2209,15 @@ def cmd_tick(args: argparse.Namespace) -> int:
             _run(command, cwd=worktree_path, check=False)
 
     summary["started"] = started
+    _record_swarm_event(
+        repo,
+        {
+            "event": "tick_completed",
+            "selected": len(summary["selected"]),
+            "skipped": len(summary["skipped"]),
+            "quarantined": len(quarantined),
+        },
+    )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 
@@ -1976,12 +2228,30 @@ def _loop_iteration(args: argparse.Namespace) -> int:
     return cmd_tick(args)
 
 
-def _handle_loop_failure(exc: BaseException, *, interval_seconds: int, consecutive_failures: int) -> int:
+def _handle_loop_failure(
+    exc: BaseException,
+    *,
+    interval_seconds: int,
+    consecutive_failures: int,
+    repo: Path | None = None,
+) -> int:
     print(
         f"[loop] escalation iteration_failed kind={type(exc).__name__} detail={exc}",
         file=sys.stderr,
     )
-    return min(3600, interval_seconds * (2 ** max(0, consecutive_failures - 1)))
+    backoff_seconds = min(3600, interval_seconds * (2 ** max(0, consecutive_failures - 1)))
+    if repo is not None:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "loop_iteration_failed",
+                "kind": type(exc).__name__,
+                "detail": str(exc),
+                "backoff_seconds": backoff_seconds,
+            },
+            escalation=True,
+        )
+    return backoff_seconds
 
 
 def _attempt_loop_iteration(
@@ -1989,6 +2259,7 @@ def _attempt_loop_iteration(
     *,
     interval_seconds: int,
     consecutive_failures: int,
+    repo: Path | None = None,
 ) -> tuple[int, int]:
     try:
         _loop_iteration(args)
@@ -2000,6 +2271,7 @@ def _attempt_loop_iteration(
             exc,
             interval_seconds=interval_seconds,
             consecutive_failures=consecutive_failures,
+            repo=repo,
         )
         return consecutive_failures, backoff_seconds
     return 0, 0
@@ -2028,6 +2300,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 args,
                 interval_seconds=interval_seconds,
                 consecutive_failures=consecutive_failures,
+                repo=repo,
             )
             remaining = interval_seconds + backoff_seconds
             while remaining > 0:
@@ -2164,6 +2437,15 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             set_upstream=True,
             strict=strict_sync,
         )
+
+    _record_swarm_event(
+        repo,
+        {
+            "event": "run_started",
+            "task_id": task.task_id,
+            "state_before": state_before,
+        },
+    )
 
     blocked_reasons: list[str] = []
     executor_command: list[str] = []
@@ -2415,6 +2697,17 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     if quarantined:
         run_manifest["quarantined_tasks"] = quarantined
     _write_json(run_manifest_path, run_manifest)
+    _record_swarm_event(
+        repo,
+        {
+            "event": "run_finished",
+            "task_id": task.task_id,
+            "status": run_manifest["result"]["status"],
+            "blocked_reasons": blocked_reasons,
+            "run_manifest": run_manifest_relpath,
+            "provenance_class": run_manifest["provenance_class"],
+        },
+    )
 
     if state_after == "integration_ready":
         note = (
@@ -2452,6 +2745,17 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         ).strip()
 
     _update_task_status_and_notes(task_path=task.path, new_state=state_after, note_line=note)
+    if state_after == "blocked" and "@human" in note:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "human_question",
+                "task_id": task.task_id,
+                "blocked_reasons": blocked_reasons,
+                "note": note,
+            },
+            escalation=True,
+        )
 
     if _git_has_changes(repo):
         task_file_rel = task.path.relative_to(repo).as_posix()
@@ -2625,6 +2929,7 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
 
     approved = gate_ok and outputs_ok and not manifest_failures and not review_bundle_failures
     state_after = "done" if approved else args.on_fail
+    outcome = "approve" if approved else ("block" if args.on_fail == "blocked" else "revise")
 
     review_log_path = _next_json_artifact_path(contract.judge_review_dir, task.task_id, _utc_timestamp_compact())
     review_log_relpath = review_log_path.relative_to(repo).as_posix()
@@ -2670,11 +2975,27 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
             "failures": check_failures,
         },
         "decision": {
-            "outcome": "approve" if approved else ("block" if args.on_fail == "blocked" else "revise"),
+            "outcome": outcome,
             "note": decision_note,
         },
     }
     _write_json(review_log_path, review_log)
+    review_event = {
+        "task_id": task.task_id,
+        "outcome": outcome,
+        "failures": check_failures,
+        "review_log": review_log_relpath,
+    }
+    _record_swarm_event(
+        repo,
+        {"event": "review_recorded", **review_event},
+    )
+    if not approved and args.on_fail == "blocked":
+        _record_swarm_event(
+            repo,
+            {"event": "judge_block", **review_event},
+            escalation=True,
+        )
 
     task_note = (
         f"Judge approved; review log: {review_log_relpath}"
@@ -2722,6 +3043,12 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="swarm.py")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
+
+    status = subparsers.add_parser("status", help="Render task, lease, journal, and spend status")
+    status.add_argument("--remote", default="origin")
+    status.add_argument("--no-fetch", action="store_true")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(func=cmd_status)
 
     plan = subparsers.add_parser("plan", help="Print done/claimed/ready task status as JSON")
     plan.add_argument("--remote", default="origin")
