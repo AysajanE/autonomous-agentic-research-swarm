@@ -246,21 +246,44 @@ def _run_cycle(
     )
     delay: float | None = None
     killed = False
+    kill_phase_seen = False
     if kill:
-        delay = rng.uniform(0.5, 2.0)
-        time.sleep(delay)
-        killed = _kill_group(proc)
+        # phase-synchronized kill: wait for the CYCLE'S OWN progress (a new
+        # journal event) rather than wall-clock — scheduler speed must not
+        # decide whether the kill lands (CI runners finish cycles faster
+        # than any fixed delay).
+        journal = repo / "reports" / "status" / "events" / "events.jsonl"
+        baseline = journal.stat().st_size if journal.is_file() else 0
+        deadline = time.monotonic() + 30.0
+        jitter = rng.uniform(0.0, 0.05)
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            current = journal.stat().st_size if journal.is_file() else 0
+            if current > baseline:
+                kill_phase_seen = True
+                time.sleep(jitter)
+                killed = _kill_group(proc)
+                break
+            time.sleep(0.02)
+        delay = round(time.monotonic() - (deadline - 30.0), 3)
     output, _ = proc.communicate()
     record = {
         "cycle": cycle,
         "returncode": proc.returncode,
         "killed": killed,
+        "kill_phase_seen": kill_phase_seen,
         "output_tail": (output or "")[-2000:],
     }
     if delay is not None:
-        record["kill_delay_seconds"] = round(delay, 3)
-    if kill and not killed:
+        record["kill_delay_seconds"] = delay
+    if kill and not killed and not kill_phase_seen:
         return record, f"supervisor_exited_before_kill:cycle={cycle}:rc={proc.returncode}"
+    if kill and not killed and kill_phase_seen:
+        # the cycle raced to completion between event and signal: report the
+        # miss honestly; the caller retries the kill on the next cycle
+        record["kill_missed_race"] = True
+        return record, None
     if not kill and proc.returncode != 0:
         return record, f"supervisor_cycle_failed:cycle={cycle}:rc={proc.returncode}"
     return record, None
@@ -355,8 +378,9 @@ def run_chaos(args: argparse.Namespace) -> dict:
         if worker_result.get("injected"):
             kills["worker"] = 1
 
+    kill_pending = args.kill_supervisor_at_cycle
     for cycle in range(1, args.cycles + 1):
-        kill_supervisor = args.kill_supervisor_at_cycle == cycle
+        kill_supervisor = kill_pending == cycle
         max_workers = 0 if args.kill_worker and cycle == 1 else 2
         result, error = _run_cycle(
             repo,
@@ -368,6 +392,10 @@ def run_chaos(args: argparse.Namespace) -> dict:
         cycle_results.append(result)
         if result["killed"]:
             kills["supervisor"] += 1
+        elif kill_supervisor and result.get("kill_missed_race") and cycle < args.cycles:
+            # the cycle completed between phase-event and signal: retry once
+            # on the next cycle so a kill ALWAYS lands within the run
+            kill_pending = cycle + 1
         if error:
             errors.append(error)
 
