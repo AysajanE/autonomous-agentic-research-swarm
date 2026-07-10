@@ -36,7 +36,7 @@ quality_gates = load_quality_gates_module()
 import swarm_taskfile
 
 
-GREEN_GATE = 'python -c "raise SystemExit(0)";'
+GREEN_GATE = 'python scripts/noop_gate.py'
 
 
 def _only_json(root: Path, rel_dir: str, pattern: str) -> tuple[Path, dict[str, object]]:
@@ -389,11 +389,17 @@ class GoldenM0Test(unittest.TestCase):
                 gates=[chained_gate],
                 outputs=["README.md"],
             )
-            exit_code, _ = repo.run_task("T210", skip_executor=True)
-            self.assertEqual(exit_code, 0)
+            exit_code, summary = repo.run_task("T210", skip_executor=True)
+            # form policy now rejects the chained gate outright — the chained
+            # command never runs, an even stronger guarantee than shlex inertness
+            self.assertEqual(exit_code, 1)
+            self.assertIn("gates_failed", summary["blocked_reasons"])
             _, manifest = _only_json(repo.root, "reports/status/swarm_runs", "T210_*.json")
             self.assertFalse(marker.exists())
             self.assertIn("&&", manifest["gates"][0]["argv"])
+            self.assertTrue(
+                str(manifest["gates"][0]["constraint_violation"]).startswith("gate_form_forbidden:")
+            )
 
     def test_G10_loop_survives_collision_and_systemexit(self) -> None:
         args = argparse.Namespace()

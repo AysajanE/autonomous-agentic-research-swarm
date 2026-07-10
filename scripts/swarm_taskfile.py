@@ -84,6 +84,51 @@ _DURATION_RE = re.compile(r"^(?P<value>(?:\d+(?:\.\d*)?|\.\d+))(?P<unit>[hms])$"
 _TOKEN_COUNT_RE = re.compile(r"^(?P<value>(?:\d+(?:\.\d*)?|\.\d+))(?P<unit>[kmb]?)$", re.IGNORECASE)
 
 
+import shlex as _shlex
+
+GATE_INTERPRETER_ALLOWLIST = ("python", "python3", "make")
+
+
+def gate_command_violation(gate: str) -> str | None:
+    """One rule for both lint and execution (§4.0 #12 hardened for M2): a
+    gate is only `make <target>...` or `python[3] <repo-relative .py> [args]`.
+    Inline code (-c), module execution (-m), and stdin (-) are rejected — an
+    autonomously-authored gate can never be an arbitrary-code channel."""
+    if not isinstance(gate, str) or not gate.strip():
+        return "gate_empty"
+    if gate.rstrip().endswith(("'", '"')):
+        return "gate_ends_in_quote"
+    try:
+        argv = _shlex.split(gate)
+    except ValueError as exc:
+        return f"gate_parse_error:{exc}"
+    if not argv:
+        return "gate_empty"
+    interpreter = argv[0]
+    if interpreter != Path(interpreter).name:
+        return f"gate_interpreter_path_qualified:{interpreter}"
+    if interpreter not in GATE_INTERPRETER_ALLOWLIST:
+        return f"gate_interpreter_not_allowlisted:{interpreter}"
+    rest = argv[1:]
+    if interpreter == "make":
+        for token in rest:
+            if token.startswith("-") and token not in ("-C",):
+                return f"gate_make_flag_forbidden:{token}"
+        return None
+    # python / python3
+    for token in rest:
+        if token in ("-c", "-m", "-"):
+            return f"gate_code_execution_forbidden:{token}"
+    script = next((token for token in rest if not token.startswith("-")), None)
+    if script is None:
+        return "gate_python_requires_script"
+    if not script.endswith(".py"):
+        return f"gate_python_script_must_be_py:{script}"
+    if script.startswith("/") or script.startswith("~") or ".." in script.replace("\\", "/").split("/"):
+        return f"gate_python_script_outside_repo:{script}"
+    return None
+
+
 TASK_ID_BRANCH_RE = re.compile(r"^(T\d{3})(?=[_-]|$)")
 
 
@@ -743,13 +788,14 @@ def lint_task_files(
                         diagnostics, task, f"gates[{index}]", "invalid_gate", "non-empty string", gate
                     )
                     continue
-                if gate.endswith(("'", '\"')):
+                violation = gate_command_violation(gate)
+                if violation is not None:
                     _diagnostic(
                         diagnostics,
                         task,
                         f"gates[{index}]",
-                        "gate_ends_in_quote",
-                        "command not ending in a quote character",
+                        violation.split(":", 1)[0],
+                        "make <target> or python[3] <repo .py>; no -c/-m/stdin",
                         gate,
                     )
                 if workstream not in network_workstream_set:

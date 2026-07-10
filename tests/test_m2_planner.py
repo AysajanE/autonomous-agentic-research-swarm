@@ -29,7 +29,7 @@ import swarm_events
 
 
 swarm = load_swarm_module()
-GREEN_GATE = 'python -c "raise SystemExit(0)";'
+GREEN_GATE = 'python scripts/noop_gate.py'
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -832,8 +832,10 @@ class M2PlannerTests(unittest.TestCase):
             write_json(root, "contracts/framework.json", framework)
             argv = swarm._claude_planner_argv(root)
             self.assertEqual(argv[1], "-p")
-            self.assertIn("--allowedTools", argv)
-            self.assertEqual(argv[argv.index("--allowedTools") + 1], "Read Glob Grep")
+            # --tools RESTRICTS (M2 review C1); --allowedTools only suppresses prompts
+            self.assertIn("--tools", argv)
+            self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep")
+            self.assertNotIn("--allowedTools", argv)
             self.assertIn("fixture-top-tier", argv)
 
         good = 'reasoning...\n```json\n{"proposals": [{"action": "triage_confirm", "task_id": "T001", "note": "ok"}]}\n```\n'

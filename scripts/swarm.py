@@ -56,6 +56,7 @@ import swarm_claims
 import swarm_events
 import sweep_tasks
 from swarm_taskfile import WorktreeCollisionError
+from swarm_taskfile import gate_command_violation
 from swarm_taskfile import REQUIRED_FRONTMATTER_KEYS
 from swarm_taskfile import TASK_SCHEMA_VERSION
 from swarm_taskfile import TaskV2Fields
@@ -649,8 +650,16 @@ def _claude_planner_argv(repo: Path) -> list[str]:
         "-p",
         "--model",
         model.strip(),
-        "--allowedTools",
-        "Read Glob Grep",
+        # --tools RESTRICTS the toolset (read-only); --allowedTools alone only
+        # suppresses permission prompts and would leave Write/Bash reachable
+        # via project settings (M2 review C1). Defense-in-depth only: the
+        # authoritative boundary is the kernel's bounded proposal application,
+        # which never trusts the planner to write anything itself.
+        "--tools",
+        "Read,Glob,Grep",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "{}",
         "--output-format",
         "text",
     ]
@@ -1411,9 +1420,18 @@ def _task_has_planner_triage(task: Task) -> bool:
     )
 
 
+def _plan_approval_pending(repo: Path) -> bool:
+    return (repo / PLAN_APPROVAL_PENDING_PATH).is_file()
+
+
 def ready_backlog_tasks(tasks: dict[str, Task], claimed_ids: set[str], contract: FrameworkContract) -> list[Task]:
     ready: list[Task] = []
     v1_exemptions = _load_v1_task_exemptions(contract.repo_root)
+    # The plan-approval hold is enforced HERE — the single funnel every
+    # dispatch path (cmd_tick, supervise _step_tick) shares — so no v2 task
+    # can be selected while a plan awaits human approval, regardless of the
+    # entrypoint (§4.2 mandatory gate).
+    plan_pending = _plan_approval_pending(contract.repo_root)
 
     diagnostics = lint_task_files(
         [task.path for task in tasks.values()],
@@ -1431,6 +1449,16 @@ def ready_backlog_tasks(tasks: dict[str, Task], claimed_ids: set[str], contract:
         if task.role not in set(contract.task_execution_roles):
             continue
         if task.task_id in claimed_ids:
+            continue
+        if plan_pending and TaskV2Fields(_task_frontmatter(task)).task_schema == TASK_SCHEMA_VERSION:
+            _record_swarm_event(
+                contract.repo_root,
+                {
+                    "event": "plan_unapproved",
+                    "task_id": task.task_id,
+                    "pending_path": PLAN_APPROVAL_PENDING_PATH.as_posix(),
+                },
+            )
             continue
         task_diagnostics = diagnostics_by_task.get(task.task_id, [])
         if task_diagnostics:
@@ -2590,10 +2618,15 @@ def _run_gates(
     *,
     interpreter_allowlist: tuple[str, ...] = DEFAULT_GATE_INTERPRETER_ALLOWLIST,
     timeout_seconds: int = DEFAULT_GATE_TIMEOUT_SECONDS,
+    enforce_form: bool = True,
 ) -> tuple[bool, list[dict[str, object]]]:
-    """Constrained gate execution (§4.0 #12 + #18): no shell, interpreter
-    allowlist, stripped environment, per-gate timeout, network denied where
-    the OS supports it, head+tail output capture."""
+    """Constrained gate execution (§4.0 #12 + #18, hardened for M2): no shell,
+    interpreter allowlist, gate-FORM policy (make <target> / python <repo .py>
+    — no inline -c/-m code, so an autonomously-authored gate is never an
+    arbitrary-code channel), stripped environment, per-gate timeout, network
+    denied where the OS supports it, head+tail capture. Every production
+    caller keeps enforce_form=True; only the lower-layer sandbox-mechanics
+    tests set it False to exercise raw execution with synthetic commands."""
     outputs: list[dict[str, object]] = []
     all_ok = True
     deny_wrapper = _network_deny_wrapper()
@@ -2634,6 +2667,13 @@ def _run_gates(
             continue
         if interpreter not in set(interpreter_allowlist):
             record["constraint_violation"] = f"gate_interpreter_not_allowlisted:{interpreter}"
+            outputs.append(record)
+            all_ok = False
+            continue
+
+        form_violation = gate_command_violation(gate) if enforce_form else None
+        if form_violation is not None:
+            record["constraint_violation"] = f"gate_form_forbidden:{form_violation}"
             outputs.append(record)
             all_ok = False
             continue
@@ -4068,27 +4108,23 @@ def cmd_tick(args: argparse.Namespace) -> int:
 
     tasks, quarantined = load_tasks_quarantined(contract)
     claimed_ids = claimed_task_ids(repo, args.remote, args.base_branch)
+    # ready_backlog_tasks already excludes unapproved v2 tasks (the shared
+    # dispatch funnel) — cmd_tick no longer needs its own filter.
     ready = ready_backlog_tasks(tasks, claimed_ids, contract)
 
     dispatchable = list(ready)
     plan_skipped: list[dict[str, str]] = []
-    pending_path = repo / PLAN_APPROVAL_PENDING_PATH
-    if pending_path.is_file():
-        dispatchable = []
-        for task in ready:
-            fields = TaskV2Fields(_task_frontmatter(task))
-            if fields.task_schema == TASK_SCHEMA_VERSION:
+    # reporting only: name the backlog v2 tasks the shared funnel withheld
+    # for plan approval (the funnel already enforced the exclusion)
+    if _plan_approval_pending(repo):
+        for task in tasks.values():
+            if (
+                task.state == "backlog"
+                and task.role in set(contract.task_execution_roles)
+                and task.task_id not in claimed_ids
+                and TaskV2Fields(_task_frontmatter(task)).task_schema == TASK_SCHEMA_VERSION
+            ):
                 plan_skipped.append({"task_id": task.task_id, "reason": "plan_unapproved"})
-                _record_swarm_event(
-                    repo,
-                    {
-                        "event": "plan_unapproved",
-                        "task_id": task.task_id,
-                        "pending_path": PLAN_APPROVAL_PENDING_PATH.as_posix(),
-                    },
-                )
-            else:
-                dispatchable.append(task)
 
     capacity = max(0, int(args.max_workers))
     selected = choose_tasks_heuristic(dispatchable, capacity)
@@ -6612,6 +6648,15 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         _require_unattended_ack()
 
     task = _resolve_runtime_task(tasks, quarantined, args.task_id)
+
+    # The plan-approval hold binds every entrypoint, including a direct
+    # run-task of a freshly-planned v2 task (§4.2 mandatory gate).
+    if (
+        _plan_approval_pending(repo)
+        and TaskV2Fields(_task_frontmatter(task)).task_schema == TASK_SCHEMA_VERSION
+        and not getattr(args, "force_deps", False)
+    ):
+        raise SystemExit(f"plan_unapproved:{task.task_id}:{PLAN_APPROVAL_PENDING_PATH.as_posix()}")
 
     if args.codex_sandbox == "danger-full-access" and not (
         getattr(args, "i_accept_full_access", False) and task.allow_network

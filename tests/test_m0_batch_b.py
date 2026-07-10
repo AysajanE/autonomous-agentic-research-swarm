@@ -20,7 +20,7 @@ from runtime_test_utils import write_task
 
 
 swarm = load_swarm_module()
-GREEN_GATE = 'python -c "raise SystemExit(0)";'
+GREEN_GATE = 'python scripts/noop_gate.py'
 
 
 def _run_args(task_id: str, *, skip_executor: bool = False, force_deps: bool = False) -> argparse.Namespace:

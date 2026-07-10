@@ -317,6 +317,7 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     write_text(root, "scripts/swarm.py", "# placeholder\n")
     write_text(root, "scripts/sweep_tasks.py", "# placeholder\n")
     write_text(root, "scripts/quality_gates.py", "# placeholder\n")
+    write_text(root, "scripts/noop_gate.py", "import sys\nif __name__ == '__main__':\n    sys.exit(0)\n")
 
     mkdir(root, "tests")
     write_text(root, "tests/README.md", "# tests\n")

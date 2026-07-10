@@ -221,7 +221,9 @@ gates:
                 workstream="W8",
                 gates=["curl https://example.invalid"],
             )
-            self._assert_reason(root, "network_string_in_gate", field="gates[0]")
+            reasons = {f["reason"] for f in self._failures(root)}
+            self.assertIn("network_string_in_gate", reasons)
+            self.assertIn("gate_interpreter_not_allowlisted", reasons)
 
     def test_bad_wall_clock_budget_form_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -29,7 +29,7 @@ from runtime_test_utils import (
 
 swarm = load_swarm_module()
 quality_gates = load_quality_gates_module()
-GREEN_GATE = 'python -c "raise SystemExit(0)";'
+GREEN_GATE = 'python scripts/noop_gate.py'
 WEAK_GATE = 'python -c "pass";'
 
 
