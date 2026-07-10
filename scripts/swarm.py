@@ -169,6 +169,7 @@ class FrameworkContract:
     wip_max_active: int | None
     wip_max_ready_for_review: int
     budget_max_program_usd: float | None
+    claim_lease_ttl_seconds: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -397,7 +398,9 @@ def _run_mock_transcript(*, repo: Path, task: Task) -> tuple[int, str, dict[str,
             if not isinstance(action, dict):
                 raise ValueError(f"mock_transcript_action_invalid:{index}")
             action_keys = [
-                key for key in ("write", "append", "set_task_state", "note") if key in action
+                key
+                for key in ("write", "append", "set_task_state", "note", "sleep_seconds")
+                if key in action
             ]
             if len(action_keys) != 1:
                 raise ValueError(f"mock_transcript_action_invalid:{index}")
@@ -420,7 +423,7 @@ def _run_mock_transcript(*, repo: Path, task: Task) -> tuple[int, str, dict[str,
                     new_state=new_state,
                     note_line=f"Mock transcript set task state to {new_state}.",
                 )
-            else:
+            elif action_key == "note":
                 note = action[action_key]
                 if not isinstance(note, str):
                     raise ValueError(f"mock_transcript_note_invalid:{index}")
@@ -432,6 +435,17 @@ def _run_mock_transcript(*, repo: Path, task: Task) -> tuple[int, str, dict[str,
                     new_state=current_state,
                     note_line=note,
                 )
+            else:
+                seconds = action[action_key]
+                if (
+                    not isinstance(seconds, (int, float))
+                    or isinstance(seconds, bool)
+                    or seconds < 0
+                ):
+                    raise ValueError(f"mock_transcript_sleep_invalid:{index}")
+                if seconds > 30:
+                    raise ValueError(f"mock_transcript_sleep_too_long:{index}:{seconds}")
+                time.sleep(float(seconds))
 
         returncode = payload.get("returncode")
         stdout = payload.get("stdout")
@@ -899,6 +913,17 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
         else None
     )
 
+    claims = raw.get("claims")
+    try:
+        claim_lease_ttl_seconds = (
+            int(claims.get("lease_ttl_seconds"))
+            if isinstance(claims, dict)
+            else swarm_claims.DEFAULT_LEASE_TTL_SECONDS
+        )
+    except (TypeError, ValueError):
+        claim_lease_ttl_seconds = swarm_claims.DEFAULT_LEASE_TTL_SECONDS
+    claim_lease_ttl_seconds = max(0, claim_lease_ttl_seconds)
+
     return FrameworkContract(
         repo_root=repo,
         control_plane_root=control_plane_root,
@@ -924,6 +949,7 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
         wip_max_active=wip_max_active,
         wip_max_ready_for_review=wip_max_ready_for_review,
         budget_max_program_usd=budget_max_program_usd,
+        claim_lease_ttl_seconds=claim_lease_ttl_seconds,
     )
 
 
@@ -2860,6 +2886,7 @@ def _claim_for_dispatch(
     repo: Path,
     remote: str,
     task: Task,
+    ttl_seconds: int = swarm_claims.DEFAULT_LEASE_TTL_SECONDS,
 ) -> swarm_claims.ClaimResult:
     branch = f"{task.task_id}_{_slug_from_task_path(task.path, task.task_id)}"
     return swarm_claims.claim_task(
@@ -2868,6 +2895,7 @@ def _claim_for_dispatch(
         task.task_id,
         session_id=_ACTOR_SESSION_ID,
         branch=branch,
+        ttl_seconds=ttl_seconds,
         journal=lambda event: _record_swarm_event(repo, event),
     )
 
@@ -2999,7 +3027,12 @@ def cmd_tick(args: argparse.Namespace) -> int:
 
     claimed: list[tuple[Task, swarm_claims.ClaimResult]] = []
     for task in selected:
-        result = _claim_for_dispatch(repo=repo, remote=args.remote, task=task)
+        result = _claim_for_dispatch(
+            repo=repo,
+            remote=args.remote,
+            task=task,
+            ttl_seconds=contract.claim_lease_ttl_seconds,
+        )
         if not result.ok:
             _record_swarm_event(
                 repo,
@@ -3397,7 +3430,12 @@ def _step_tick(args: argparse.Namespace) -> dict[str, object]:
 
     claimed: list[tuple[Task, swarm_claims.ClaimResult]] = []
     for task in selected:
-        result = _claim_for_dispatch(repo=repo, remote=args.remote, task=task)
+        result = _claim_for_dispatch(
+            repo=repo,
+            remote=args.remote,
+            task=task,
+            ttl_seconds=contract.claim_lease_ttl_seconds,
+        )
         if not result.ok:
             _record_swarm_event(
                 repo,
