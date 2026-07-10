@@ -82,7 +82,10 @@ def classify_run_manifest(payload: dict) -> str:
     raise SystemExit(f"unclassifiable manifest: runner={runner} tool={tool}")
 
 
-def write_json(path: Path, payload: dict, write: bool) -> None:
+def write_json(path: Path, payload: dict, write: bool, *, keep_existing: bool = False) -> None:
+    if keep_existing and path.exists():
+        print("KEEP  " + str(path.relative_to(REPO)))
+        return
     if write:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -122,14 +125,14 @@ def main(argv: list[str]) -> int:
             ),
             "annotated_at_utc": stamp,
         }
-        write_json(
-            runs_dir / "annotations" / f"{manifest_path.name}.provenance.json",
-            annotation,
-            write,
-        )
-        exemptions["run_manifests"].append(
-            {"path": rel, "sha256": digest, "schema_version": str(payload.get("schema_version"))}
-        )
+        annotation_path = runs_dir / "annotations" / f"{manifest_path.name}.provenance.json"
+        write_json(annotation_path, annotation, write, keep_existing=True)
+        entry = {"path": rel, "sha256": digest, "schema_version": str(payload.get("schema_version"))}
+        if annotation_path.exists():
+            entry["provenance_class"] = klass
+            entry["annotation_path"] = annotation_path.relative_to(REPO).as_posix()
+            entry["annotation_sha256"] = sha256_file(annotation_path)
+        exemptions["run_manifests"].append(entry)
 
     # 2a. superseded rebaselines for the 6 stale processed manifests
     pm_dir = REPO / "data/processed_manifest"
@@ -146,7 +149,7 @@ def main(argv: list[str]) -> int:
             "provenance_note": SUPERSEDED_NOTE,
             "rebaselined_at_utc": stamp,
         }
-        write_json(pm_dir / "rebaselines" / f"{stale_name}.rebaseline.json", rebaseline, write)
+        write_json(pm_dir / "rebaselines" / f"{stale_name}.rebaseline.json", rebaseline, write, keep_existing=True)
 
     # 2b. raw_evidence_unavailable rebaselines for the 6 raw manifests
     rm_dir = REPO / "data/raw_manifest"
@@ -160,7 +163,7 @@ def main(argv: list[str]) -> int:
             "provenance_note": RAW_UNAVAILABLE_NOTE,
             "rebaselined_at_utc": stamp,
         }
-        write_json(rm_dir / "rebaselines" / f"{raw_path.name}.rebaseline.json", rebaseline, write)
+        write_json(rm_dir / "rebaselines" / f"{raw_path.name}.rebaseline.json", rebaseline, write, keep_existing=True)
 
     # 3. historical exemptions (v1-schema artifacts; strict checks apply to v2+)
     reviews_dir = REPO / "reports/status/reviews"
@@ -173,6 +176,31 @@ def main(argv: list[str]) -> int:
                 "schema_version": str(payload.get("schema_version")),
             }
         )
+    def _collect_section(directory: Path, pattern: str) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        for path in sorted(directory.glob(pattern)):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            out.append(
+                {
+                    "path": path.relative_to(REPO).as_posix(),
+                    "sha256": sha256_file(path),
+                    "schema_version": str(payload.get("schema_version")),
+                }
+            )
+        return out
+
+    exemptions["processed_manifests"] = _collect_section(REPO / "data/processed_manifest", "*.json")
+    exemptions["raw_manifests"] = _collect_section(REPO / "data/raw_manifest", "*.json")
+    exemptions["validation_reports"] = [
+        entry
+        for entry in _collect_section(REPO / "reports/validation", "*.json")
+        if entry["schema_version"] != "research_swarm.validation_report.v2"
+    ]
+    exemptions["rebaselines"] = (
+        _collect_section(REPO / "data/processed_manifest/rebaselines", "*.rebaseline.json")
+        + _collect_section(REPO / "data/raw_manifest/rebaselines", "*.rebaseline.json")
+    )
+
     exemptions_payload = {
         "schema_version": EXEMPTIONS_SCHEMA,
         "created_at_utc": stamp,
@@ -184,6 +212,10 @@ def main(argv: list[str]) -> int:
         ),
         "run_manifests": exemptions["run_manifests"],
         "review_logs": exemptions["review_logs"],
+        "processed_manifests": exemptions["processed_manifests"],
+        "raw_manifests": exemptions["raw_manifests"],
+        "validation_reports": exemptions["validation_reports"],
+        "rebaselines": exemptions["rebaselines"],
     }
     write_json(REPO / "contracts/historical_exemptions.json", exemptions_payload, write)
 

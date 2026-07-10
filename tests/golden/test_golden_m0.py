@@ -20,6 +20,7 @@ if str(_TESTS_ROOT) not in sys.path:
 
 from golden.harness import GoldenRepo
 from runtime_test_utils import (
+    register_historical_exemption,
     chdir,
     load_quality_gates_module,
     load_swarm_module,
@@ -275,9 +276,10 @@ class GoldenM0Test(unittest.TestCase):
                 newer_rel,
                 _processed_payload(output_rel, output, as_of="2026-07-10"),
             )
+            sidecar_rel = "data/processed_manifest/rebaselines/panel_2026-07-09.json.rebaseline.json"
             write_json(
                 repo.root,
-                "data/processed_manifest/rebaselines/panel_2026-07-09.json.rebaseline.json",
+                sidecar_rel,
                 {
                     "schema_version": "research_swarm.manifest_rebaseline.v1",
                     "rebaseline_of": stale_rel,
@@ -289,6 +291,27 @@ class GoldenM0Test(unittest.TestCase):
                 },
             )
 
+            # a sidecar for a manifest that is NOT on the hash-pinned
+            # historical exemption list is refused — remediation is a
+            # one-time act, not a general bypass
+            with chdir(repo.root):
+                unexempted = quality_gates.gate_processed_manifest_hashes()
+            self.assertFalse(unexempted.ok)
+            self.assertTrue(
+                any(
+                    item.get("reason") == "invalid_rebaseline"
+                    and item.get("actual") == "rebaseline_not_exempted"
+                    for item in unexempted.details["failures"]
+                ),
+                unexempted.details,
+            )
+
+            register_historical_exemption(
+                repo.root, section="processed_manifests", rel_path=stale_rel
+            )
+            register_historical_exemption(
+                repo.root, section="rebaselines", rel_path=sidecar_rel
+            )
             with chdir(repo.root):
                 rebaselined = quality_gates.gate_processed_manifest_hashes()
             self.assertTrue(rebaselined.ok, rebaselined.details)

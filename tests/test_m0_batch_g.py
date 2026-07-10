@@ -38,7 +38,7 @@ def _write_exemptions(root: Path, run_entries: list[dict[str, str]]) -> Path:
     )
 
 
-def _write_annotation(root: Path, manifest_path: Path, *, sha256: str, provenance_class: str = "backfill") -> Path:
+def _write_annotation(root: Path, manifest_path: Path, *, sha256: str, provenance_class: str = "manual_operator") -> Path:
     rel = manifest_path.relative_to(root).as_posix()
     return write_json(
         root,
@@ -92,12 +92,59 @@ class HistoricalExemptionsGateTest(unittest.TestCase):
             root, manifest_path = self._fixture_with_v1_manifest(tmp)
             digest = _sha256_file(manifest_path)
             rel = manifest_path.relative_to(root).as_posix()
-            _write_exemptions(root, [{"path": rel, "sha256": digest, "schema_version": "v1"}])
-            _write_annotation(root, manifest_path, sha256=digest)
+            annotation_path = _write_annotation(
+                root, manifest_path, sha256=digest, provenance_class="manual_operator"
+            )
+            _write_exemptions(
+                root,
+                [
+                    {
+                        "path": rel,
+                        "sha256": digest,
+                        "schema_version": "v1",
+                        "provenance_class": "manual_operator",
+                        "annotation_path": annotation_path.relative_to(root).as_posix(),
+                        "annotation_sha256": _sha256_file(annotation_path),
+                    }
+                ],
+            )
             with chdir(root):
                 result = quality_gates.gate_historical_exemptions()
             self.assertTrue(result.ok, result.details)
             self.assertEqual(result.details["annotations_checked"], 1)
+
+    def test_relabelled_annotation_class_fails(self) -> None:
+        # F6: a mutated provenance label is caught three ways — file drift,
+        # pin mismatch, and mechanical re-derivation from executor fields.
+        with tempfile.TemporaryDirectory() as tmp:
+            root, manifest_path = self._fixture_with_v1_manifest(tmp)
+            digest = _sha256_file(manifest_path)
+            rel = manifest_path.relative_to(root).as_posix()
+            annotation_path = _write_annotation(
+                root, manifest_path, sha256=digest, provenance_class="manual_operator"
+            )
+            _write_exemptions(
+                root,
+                [
+                    {
+                        "path": rel,
+                        "sha256": digest,
+                        "schema_version": "v1",
+                        "provenance_class": "manual_operator",
+                        "annotation_path": annotation_path.relative_to(root).as_posix(),
+                        "annotation_sha256": _sha256_file(annotation_path),
+                    }
+                ],
+            )
+            # attacker relabels the annotation to executor_run
+            _write_annotation(root, manifest_path, sha256=digest, provenance_class="executor_run")
+            with chdir(root):
+                result = quality_gates.gate_historical_exemptions()
+            self.assertFalse(result.ok)
+            failures = " ".join(result.details["failures"])
+            self.assertIn("annotation_file_drift", failures)
+            self.assertIn("class_pin_mismatch", failures)
+            self.assertIn("class_derivation_mismatch", failures)
 
     def test_exemption_list_drift_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 from importlib import metadata
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -58,6 +59,28 @@ def _dependency_versions(names: Iterable[str]) -> dict[str, str]:
     return versions
 
 
+def _declared_dependencies(repo: Path) -> tuple[str, ...]:
+    """Names of the project's declared runtime dependencies (pyproject.toml).
+    Falls back to the known core pair if the file is unreadable."""
+    pyproject = repo / "pyproject.toml"
+    try:
+        import tomllib
+
+        payload = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        deps = payload.get("project", {}).get("dependencies", [])
+        names = []
+        for spec in deps:
+            if isinstance(spec, str) and spec.strip():
+                name = re.split(r"[<>=!~\[; ]", spec.strip(), maxsplit=1)[0]
+                if name:
+                    names.append(name)
+        if names:
+            return tuple(names)
+    except Exception:
+        pass
+    return ("pandas", "matplotlib")
+
+
 def write_processed_manifest(
     *,
     repo: Path,
@@ -99,6 +122,17 @@ def write_processed_manifest(
     }
     if dirty:
         transform["tree_diff"] = _run_git(repo, "diff", "--binary", "--no-ext-diff", "HEAD", "--")
+        transform["tree_status"] = dirty_status
+        untracked_entries: list[dict[str, object]] = []
+        for line in _run_git(repo, "ls-files", "--others", "--exclude-standard").splitlines():
+            rel = line.strip()
+            if not rel:
+                continue
+            candidate = repo / rel
+            if candidate.is_file():
+                sha256, size = _sha256_and_bytes(candidate)
+                untracked_entries.append({"path": rel, "sha256": sha256, "bytes": size})
+        transform["untracked_files"] = untracked_entries
 
     normalized_inputs = [_repo_path(repo, input_path)[0] for input_path in inputs]
     payload: dict[str, object] = {
@@ -109,7 +143,7 @@ def write_processed_manifest(
         "outputs": output_entries,
         "environment": {
             "python": sys.version.split()[0],
-            "dependencies": _dependency_versions(("pandas", "matplotlib")),
+            "dependencies": _dependency_versions(_declared_dependencies(repo)),
         },
     }
 

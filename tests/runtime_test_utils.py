@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import importlib.util
+import hashlib
 import json
 import os
 from functools import lru_cache
@@ -455,6 +456,25 @@ def write_run_manifest(
     actor_session_id: str = "fixture-worker-session",
     generated_at_utc: str = "2026-03-29T00:00:00Z",
 ) -> Path:
+    task_disk_path = root / task_path
+    pinned_frontmatter_sha = "0" * 64
+    task_gates = ["make gate"]
+    if task_disk_path.is_file():
+        lines = task_disk_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        if lines and lines[0].strip() == "---":
+            for index in range(1, len(lines)):
+                if lines[index].strip() == "---":
+                    block = "".join(lines[1:index])
+                    pinned_frontmatter_sha = hashlib.sha256(block.encode("utf-8")).hexdigest()
+                    break
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import swarm_taskfile as _taskfile
+
+        frontmatter = _taskfile.parse_task_frontmatter(task_disk_path.read_text(encoding="utf-8"))
+        if isinstance(frontmatter, dict) and isinstance(frontmatter.get("gates"), list):
+            parsed_gates = [item for item in frontmatter["gates"] if isinstance(item, str)]
+            if parsed_gates:
+                task_gates = parsed_gates
     if branch is None:
         branch = _git_read_or_default(root, ["rev-parse", "--abbrev-ref", "HEAD"], f"{task_id}_branch")
     if git_sha is None:
@@ -498,14 +518,15 @@ def write_run_manifest(
         "commands": {
             "executor": [],
             "executor_log_path": None,
-            "gates": ["make gate"],
+            "gates": list(task_gates),
         },
         "gates": [
             {
-                "command": "make gate",
+                "command": gate,
                 "returncode": 0,
                 "output_tail": "",
             }
+            for gate in task_gates
         ],
         "ownership": {
             "ok": True,
@@ -529,9 +550,15 @@ def write_run_manifest(
             "session_id": actor_session_id,
             "recorded_at_utc": "2026-03-29T00:00:00Z",
         }
-        payload["commands"]["executor_log_sha256"] = None
+        if provenance_class == "executor_run":
+            log_rel = f"reports/status/swarm_runs/logs/{task_id}_20260329T000000Z.log"
+            log_path = write_text(root, log_rel, "fixture executor log\n")
+            payload["commands"]["executor_log_path"] = log_rel
+            payload["commands"]["executor_log_sha256"] = hashlib.sha256(log_path.read_bytes()).hexdigest()
+        else:
+            payload["commands"]["executor_log_sha256"] = None
         payload["frontmatter"] = {
-            "pinned_sha256": "0" * 64,
+            "pinned_sha256": pinned_frontmatter_sha,
             "tampered": False,
             "tampered_keys": [],
         }
@@ -587,3 +614,34 @@ def write_review_log(
     if schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION:
         payload["operator_attestation"] = None
     return write_json(root, rel, payload)
+
+
+def register_historical_exemption(root: Path, *, section: str, rel_path: str, extra: dict[str, Any] | None = None) -> Path:
+    """Add (or refresh) a hash-pinned entry in the fixture's historical
+    exemption list, creating the file when absent."""
+    exemptions_path = root / "contracts/historical_exemptions.json"
+    if exemptions_path.exists():
+        payload = json.loads(exemptions_path.read_text(encoding="utf-8"))
+    else:
+        payload = {
+            "schema_version": "research_swarm.historical_exemptions.v1",
+            "created_at_utc": "2026-07-09T00:00:00Z",
+            "rationale": "test fixture",
+            "run_manifests": [],
+            "review_logs": [],
+            "processed_manifests": [],
+            "raw_manifests": [],
+            "validation_reports": [],
+            "rebaselines": [],
+        }
+    entries = payload.setdefault(section, [])
+    entries[:] = [item for item in entries if item.get("path") != rel_path]
+    entry: dict[str, Any] = {
+        "path": rel_path,
+        "sha256": hashlib.sha256((root / rel_path).read_bytes()).hexdigest(),
+        "schema_version": "fixture",
+    }
+    if extra:
+        entry.update(extra)
+    entries.append(entry)
+    return write_json(root, "contracts/historical_exemptions.json", payload)

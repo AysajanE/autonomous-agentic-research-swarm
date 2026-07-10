@@ -1453,6 +1453,7 @@ def _is_valid_run_manifest(path: Path, task_id: str) -> bool:
         and isinstance(result, dict)
         and result.get("status") == "ok"
         and data.get("provenance_class") == "executor_run"
+        and _parse_utc_iso(data.get("generated_at_utc")) is not None
     )
 
 
@@ -1573,12 +1574,50 @@ def _judge_manifest_integrity_failures(
         failures.append("actor_separation_same_session")
 
     generated_at = _parse_utc_iso(manifest.get("generated_at_utc"))
-    if generated_at is not None:
+    if generated_at is None:
+        # fail closed: a manifest without a parseable timestamp cannot prove
+        # it satisfies the separation window
+        failures.append("actor_separation_window_unverifiable")
+    else:
         elapsed = (dt.datetime.now(tz=dt.timezone.utc) - generated_at).total_seconds()
         if elapsed < contract.review_min_separation_seconds:
             failures.append(
                 f"actor_separation_window:{int(elapsed)}s<{contract.review_min_separation_seconds}s"
             )
+
+    # The LIVE task frontmatter must be byte-identical to the copy pinned at
+    # run time — an uncommitted or amended edit to gates/allowed_paths after
+    # the run is invisible to every other check (§4.0 #10/#13).
+    frontmatter_block = manifest.get("frontmatter") if isinstance(manifest.get("frontmatter"), dict) else {}
+    pinned_sha = frontmatter_block.get("pinned_sha256")
+    if not isinstance(pinned_sha, str) or not pinned_sha:
+        failures.append("manifest_missing_pinned_frontmatter")
+    else:
+        try:
+            current_text, _ = _task_frontmatter_snapshot(task.path)
+            current_sha = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+        except ValueError:
+            current_sha = None
+        if current_sha != pinned_sha:
+            failures.append("post_run_frontmatter_tamper")
+
+    # Executor-log binding: an executor_run manifest must be backed by the
+    # durable log it hashes — fabricating provenance requires fabricating a
+    # coherent hashed log too, and drift after the run is visible.
+    if manifest.get("provenance_class") == "executor_run":
+        commands_block = manifest.get("commands") if isinstance(manifest.get("commands"), dict) else {}
+        log_rel = commands_block.get("executor_log_path")
+        log_sha = commands_block.get("executor_log_sha256")
+        if not isinstance(log_rel, str) or not log_rel or not isinstance(log_sha, str) or not log_sha:
+            failures.append("executor_log_binding_missing")
+        else:
+            log_path = repo / log_rel
+            if not log_path.is_file():
+                failures.append(f"executor_log_binding_failed:missing:{log_rel}")
+            else:
+                actual = hashlib.sha256(log_path.read_bytes()).hexdigest()
+                if actual != log_sha:
+                    failures.append(f"executor_log_binding_failed:sha256_mismatch:{log_rel}")
 
     return failures
 
@@ -1748,7 +1787,12 @@ def _run_gates(
             continue
         record["argv"] = argv
 
-        interpreter = Path(argv[0]).name
+        interpreter = argv[0]
+        if interpreter != Path(interpreter).name:
+            record["constraint_violation"] = f"gate_interpreter_path_qualified:{interpreter}"
+            outputs.append(record)
+            all_ok = False
+            continue
         if interpreter not in set(interpreter_allowlist):
             record["constraint_violation"] = f"gate_interpreter_not_allowlisted:{interpreter}"
             outputs.append(record)
@@ -1757,15 +1801,15 @@ def _run_gates(
 
         full_argv = [*(deny_wrapper or ()), *argv]
         try:
-            cp = subprocess.run(
+            # _run uses start_new_session + killpg on timeout, so a gate's
+            # whole process tree dies with it — not just the direct child.
+            cp = _run(
                 full_argv,
-                cwd=str(repo),
-                shell=False,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                cwd=repo,
+                capture=True,
+                check=False,
                 env=_gate_environment(),
-                timeout=timeout_seconds,
+                timeout_seconds=timeout_seconds,
             )
             record["returncode"] = cp.returncode
             head, tail = _clip_gate_output(cp.stdout or "")
@@ -2059,17 +2103,25 @@ def cmd_tmux_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_runtime_task(tasks: dict[str, Task], quarantined: list[dict[str, str]], task_id: str) -> Task:
+    task = tasks.get(task_id)
+    if task is not None:
+        return task
+    for record in quarantined:
+        if Path(record.get("path", "")).name.startswith(f"{task_id}_"):
+            raise SystemExit(f"task_quarantined:{task_id}:{record.get('error')}")
+    raise SystemExit(f"unknown_task_id:{task_id}")
+
+
 def cmd_run_task(args: argparse.Namespace) -> int:
     repo = _repo_root()
     contract = load_framework_contract(repo)
-    tasks = load_tasks(contract)
+    tasks, quarantined = load_tasks_quarantined(contract)
 
     if args.unattended:
         _require_unattended_ack()
 
-    task = tasks.get(args.task_id)
-    if task is None:
-        raise SystemExit(f"unknown_task_id:{args.task_id}")
+    task = _resolve_runtime_task(tasks, quarantined, args.task_id)
 
     if task.role not in set(contract.task_execution_roles):
         raise SystemExit(f"task_not_runtime_executable:{task.task_id}:{task.role}")
@@ -2084,7 +2136,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     ]
     dependencies_satisfied = _dependencies_satisfied(task, tasks, contract)
     force_deps = bool(getattr(args, "force_deps", False))
-    if task.state in {"backlog", "active"} and not dependencies_satisfied and not force_deps:
+    if not dependencies_satisfied and not force_deps:
         raise SystemExit(f"dependencies_unsatisfied:{task.task_id}:{','.join(missing_dependencies)}")
 
     _require_git_identity(cwd=repo, reason="runtime")
@@ -2360,6 +2412,8 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             "force_deps": True,
             "unsatisfied_dependencies": missing_dependencies,
         }
+    if quarantined:
+        run_manifest["quarantined_tasks"] = quarantined
     _write_json(run_manifest_path, run_manifest)
 
     if state_after == "integration_ready":
@@ -2477,7 +2531,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
 def cmd_judge_task(args: argparse.Namespace) -> int:
     repo = _repo_root()
     contract = load_framework_contract(repo)
-    tasks = load_tasks(contract)
+    tasks, quarantined = load_tasks_quarantined(contract)
 
     if args.unattended:
         _require_unattended_ack()
@@ -2491,18 +2545,10 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
     )
     strict_sync = bool(args.unattended)
 
-    task = tasks.get(args.task_id)
-    if task is None:
-        raise SystemExit(f"unknown_task_id:{args.task_id}")
+    task = _resolve_runtime_task(tasks, quarantined, args.task_id)
     if task.state != "ready_for_review":
         raise SystemExit(f"task_not_ready_for_review:{task.task_id}:{task.state}")
 
-    gate_ok, gate_outputs = _run_gates(
-        repo,
-        task.gates,
-        interpreter_allowlist=contract.gate_interpreter_allowlist,
-        timeout_seconds=contract.gate_timeout_seconds,
-    )
     outputs_ok, output_failures = _check_declared_outputs_exist(repo=repo, task=task)
     manifest_failures = required_manifest_failures(repo, task)
 
@@ -2534,13 +2580,31 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
     )
     run_manifest_relpath = selected_run_manifest.relative_to(repo).as_posix() if selected_run_manifest else None
 
+    selected_manifest_data: dict[str, object] = {}
+    for path, data in matching_v2_manifests:
+        if path == selected_run_manifest:
+            selected_manifest_data = data
+            break
+
+    # The Judge executes the PINNED gate commands from the manifest it is
+    # judging, never the live (editable) task file's copy (§4.0 #12).
+    commands_block = (
+        selected_manifest_data.get("commands")
+        if isinstance(selected_manifest_data.get("commands"), dict)
+        else {}
+    )
+    pinned_gates = [
+        gate for gate in commands_block.get("gates", []) if isinstance(gate, str)
+    ] if valid_run_manifests else []
+    gate_ok, gate_outputs = _run_gates(
+        repo,
+        pinned_gates if pinned_gates else task.gates,
+        interpreter_allowlist=contract.gate_interpreter_allowlist,
+        timeout_seconds=contract.gate_timeout_seconds,
+    )
+
     integrity_failures: list[str] = []
     if valid_run_manifests:
-        selected_manifest_data = dict(matching_v2_manifests[-1][1]) if matching_v2_manifests else {}
-        for path, data in matching_v2_manifests:
-            if path == selected_run_manifest:
-                selected_manifest_data = data
-                break
         integrity_failures.extend(
             _judge_manifest_integrity_failures(
                 repo=repo,

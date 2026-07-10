@@ -81,13 +81,17 @@ def scaffold_release_ready_repo(
         root,
         "data/processed_manifest/daily_rollup_panel_2026-03-29.json",
         {
+            "schema_version": "research_swarm.processed_manifest.v2",
             "as_of_utc_date": "2026-03-29",
             "inputs": ["data/raw_manifest/growthepie_2026-03-29.json"],
             "transform": {
                 "script_path": "src/etl/build_panel.py",
+                "script_sha256": "e" * 64,
                 "git_sha": "b" * 40,
                 "command": "python src/etl/build_panel.py --run-date 2026-03-29",
+                "dirty": False,
             },
+            "environment": {"python": "3.11.0", "dependencies": {"pandas": "2.2.0"}},
             "outputs": [
                 {
                     "path": "data/processed/panels/daily_rollup_panel.csv",

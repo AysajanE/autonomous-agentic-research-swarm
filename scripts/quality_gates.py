@@ -726,6 +726,33 @@ def _validate_required_keys(data: object, required_keys: set[str], prefix: str) 
     return failures
 
 
+HISTORICAL_EXEMPTIONS_PATH = Path("contracts/historical_exemptions.json")
+
+
+def _historical_exemption_entries(section: str) -> dict[str, dict[str, object]]:
+    """Path → entry map for one section of the hash-pinned historical
+    exemption list. Empty when the list (or section) is absent — absence
+    exempts nothing."""
+    if not HISTORICAL_EXEMPTIONS_PATH.exists():
+        return {}
+    payload, error = _load_json_file(HISTORICAL_EXEMPTIONS_PATH)
+    if error is not None or not isinstance(payload, dict):
+        return {}
+    out: dict[str, dict[str, object]] = {}
+    for item in payload.get(section, []):
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            out[item["path"]] = item
+    return out
+
+
+def _historical_exemption_hashes(section: str) -> dict[str, str]:
+    return {
+        path: entry["sha256"]
+        for path, entry in _historical_exemption_entries(section).items()
+        if isinstance(entry.get("sha256"), str)
+    }
+
+
 def _sha256_and_bytes(path: Path) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
@@ -906,6 +933,38 @@ def _manifest_hash_gate(
         if not sidecar_path.exists():
             for entry in entries:
                 failures.extend(_verify_hash_claim(manifest=manifest_path, entry=entry))
+            continue
+
+        # A rebaseline is a one-time historical remediation, not a general
+        # mechanism: the sidecar is honored only when both the manifest and
+        # the sidecar itself are hash-pinned on the exemption list. Anything
+        # else gets direct verification — a new manifest cannot green itself
+        # by shipping its own sidecar.
+        exempted_sidecars = _historical_exemption_hashes("rebaselines")
+        sidecar_rel = sidecar_path.as_posix()
+        pinned_sidecar_sha = exempted_sidecars.get(sidecar_rel)
+        if pinned_sidecar_sha is None:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected="sidecar hash-pinned in contracts/historical_exemptions.json",
+                    actual="rebaseline_not_exempted",
+                )
+            )
+            for entry in entries:
+                failures.extend(_verify_hash_claim(manifest=manifest_path, entry=entry))
+            continue
+        actual_sidecar_sha, _ = _sha256_and_bytes(sidecar_path)
+        if actual_sidecar_sha != pinned_sidecar_sha:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected=pinned_sidecar_sha,
+                    actual=f"rebaseline_sidecar_drift:{actual_sidecar_sha}",
+                )
+            )
             continue
 
         sidecar, sidecar_error = _load_json_file(sidecar_path)
@@ -1171,6 +1230,8 @@ def _validate_swarm_run_manifest(path: Path, contract: FrameworkContract) -> lis
         SWARM_RUN_MANIFEST_SCHEMA_VERSION,
     }:
         failures.append(f"{path}:invalid_schema_version:{payload.get('schema_version')}")
+    elif schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 and path.as_posix() not in _historical_exemption_entries("run_manifests"):
+        failures.append(f"{path}:unexempted_v1_schema")
 
     if schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION:
         provenance_class = payload.get("provenance_class")
@@ -1265,6 +1326,8 @@ def _validate_judge_review_log(path: Path, contract: FrameworkContract) -> list[
         JUDGE_REVIEW_LOG_SCHEMA_VERSION,
     }:
         failures.append(f"{path}:invalid_schema_version:{payload.get('schema_version')}")
+    elif schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1 and path.as_posix() not in _historical_exemption_entries("review_logs"):
+        failures.append(f"{path}:unexempted_v1_schema")
 
     reviewer = payload.get("reviewer")
     reviewer_keys = {"role"}
@@ -1750,6 +1813,9 @@ def gate_processed_manifest_validity() -> GateResult:
             for failure in _validate_required_keys(transform, {"script_path", "git_sha", "command"}, "transform")
         )
 
+        if payload.get("schema_version") != PROCESSED_MANIFEST_SCHEMA_VERSION and path.as_posix() not in _historical_exemption_entries("processed_manifests"):
+            failures.append(f"{path}:unexempted_legacy_processed_manifest")
+
         if payload.get("schema_version") == PROCESSED_MANIFEST_SCHEMA_VERSION:
             failures.extend(
                 f"{path}:{failure}"
@@ -1837,6 +1903,17 @@ def gate_validation_report_content_binding() -> GateResult:
             continue
         if payload.get("schema_version") != VALIDATION_REPORT_SCHEMA_VERSION:
             legacy_reports += 1
+            if report_path.as_posix() not in _historical_exemption_entries("validation_reports"):
+                failures.append(
+                    {
+                        "report": report_path.as_posix(),
+                        "path": report_path.as_posix(),
+                        "reason": "unexempted_legacy_validation_report",
+                        "expected": VALIDATION_REPORT_SCHEMA_VERSION,
+                        "actual": payload.get("schema_version"),
+                        "message": "legacy validation reports are accepted only from the hash-pinned historical exemption list",
+                    }
+                )
             continue
 
         v2_reports += 1
@@ -1999,6 +2076,8 @@ def gate_historical_exemptions() -> GateResult:
     v1_reviews = sweep_v1(Path(contract.judge_review_dir), "review_logs", JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1)
 
     annotations_checked = 0
+    annotation_class_counts: dict[str, int] = {}
+    exempted_entries = _historical_exemption_entries("run_manifests")
     for rel in sorted(exempted["run_manifests"]):
         manifest_path = Path(rel)
         annotation_path = manifest_path.parent / "annotations" / f"{manifest_path.name}.provenance.json"
@@ -2014,11 +2093,59 @@ def gate_historical_exemptions() -> GateResult:
             failures.append(f"provenance_annotation_invalid:{rel}:schema_version")
         if annotation.get("annotates") != rel:
             failures.append(f"provenance_annotation_invalid:{rel}:annotates_mismatch")
-        if annotation.get("provenance_class") not in VALID_PROVENANCE_CLASSES:
+        annotation_class = annotation.get("provenance_class")
+        if annotation_class not in VALID_PROVENANCE_CLASSES:
             failures.append(f"provenance_annotation_invalid:{rel}:provenance_class")
+        else:
+            annotation_class_counts[annotation_class] = annotation_class_counts.get(annotation_class, 0) + 1
         annotated_sha = annotation.get("annotates_sha256")
         if annotated_sha != exempted["run_manifests"][rel]:
             failures.append(f"provenance_annotation_invalid:{rel}:annotates_sha256_mismatch")
+
+        # the annotation FILE is itself hash-pinned, and its class must agree
+        # with both the pinned class and a mechanical re-derivation from the
+        # manifest's own executor fields — labels are immutable, not editable.
+        entry = exempted_entries.get(rel, {})
+        pinned_annotation_sha = entry.get("annotation_sha256")
+        if isinstance(pinned_annotation_sha, str):
+            actual_annotation_sha, _ = _sha256_and_bytes(annotation_path)
+            if actual_annotation_sha != pinned_annotation_sha:
+                failures.append(f"provenance_annotation_invalid:{rel}:annotation_file_drift")
+        else:
+            failures.append(f"provenance_annotation_invalid:{rel}:annotation_not_pinned")
+        pinned_class = entry.get("provenance_class")
+        if pinned_class != annotation_class:
+            failures.append(f"provenance_annotation_invalid:{rel}:class_pin_mismatch")
+        manifest_payload, manifest_error = _load_json_file(manifest_path)
+        if manifest_error is None and isinstance(manifest_payload, dict):
+            executor = manifest_payload.get("executor") if isinstance(manifest_payload.get("executor"), dict) else {}
+            runner = executor.get("runner")
+            tool = executor.get("tool")
+            if runner == "legacy_backfill" or tool == "operator_backfill":
+                derived = "backfill"
+            elif tool == "codex":
+                derived = "executor_run"
+            elif tool == "manual":
+                derived = "manual_operator"
+            else:
+                derived = None
+            if derived is not None and derived != annotation_class:
+                failures.append(f"provenance_annotation_invalid:{rel}:class_derivation_mismatch:{derived}")
+
+    # the release amendment's per-class counts must agree with the annotations
+    release_dir = Path("reports/status/releases")
+    if annotation_class_counts and release_dir.exists():
+        for release_path in sorted(release_dir.glob("release_*.json")):
+            release_payload, release_error = _load_json_file(release_path)
+            if release_error is not None or not isinstance(release_payload, dict):
+                continue
+            for note in release_payload.get("notes", []):
+                if isinstance(note, dict) and note.get("type") == "raw_evidence_unavailable":
+                    recorded = note.get("provenance_class_run_counts")
+                    if recorded != annotation_class_counts:
+                        failures.append(
+                            f"release_amendment_count_mismatch:{release_path.name}:{recorded}!={annotation_class_counts}"
+                        )
 
     return GateResult(
         ok=len(failures) == 0,
@@ -2050,6 +2177,41 @@ def _review_min_separation_seconds(repo: Path) -> int:
         return int(payload["review_bundle"]["min_separation_seconds"])
     except Exception:
         return 60
+
+
+def _done_bundle_approval_failures(valid_review_logs: list[Path], repo: Path) -> list[str]:
+    approve_logs: list[tuple[Path, dict[str, object]]] = []
+    for path in valid_review_logs:
+        payload, error = _load_json_file(path)
+        if error is not None or not isinstance(payload, dict):
+            continue
+        decision = payload.get("decision")
+        if isinstance(decision, dict) and decision.get("outcome") == "approve":
+            approve_logs.append((path, payload))
+
+    if not approve_logs:
+        return ["missing_approving_review_log"]
+
+    review_path, review = approve_logs[-1]
+    if review.get("schema_version") == JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1:
+        # historical bundle: the validator already required exemption-list membership
+        return []
+
+    task_block = review.get("task") if isinstance(review.get("task"), dict) else {}
+    manifest_rel = task_block.get("run_manifest_path")
+    if not isinstance(manifest_rel, str) or not manifest_rel:
+        return [f"approving_review_missing_manifest_link:{review_path.name}"]
+    manifest, error = _load_json_file(repo / manifest_rel)
+    if error is not None or not isinstance(manifest, dict):
+        return [f"approving_review_manifest_unreadable:{manifest_rel}"]
+    if manifest.get("schema_version") != SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+        return [f"approving_review_manifest_not_v2:{manifest_rel}"]
+    result = manifest.get("result") if isinstance(manifest.get("result"), dict) else {}
+    if result.get("status") != "ok":
+        return [f"approving_review_manifest_not_passing:{manifest_rel}"]
+    if manifest.get("provenance_class") != "executor_run":
+        return [f"approving_review_manifest_provenance:{manifest.get('provenance_class')}:{manifest_rel}"]
+    return []
 
 
 def _review_log_actor_separation_failures(review_path: Path, repo: Path) -> list[str]:
@@ -2085,7 +2247,9 @@ def _review_log_actor_separation_failures(review_path: Path, repo: Path) -> list
 
     run_time = _parse_utc_iso(manifest_payload.get("generated_at_utc"))
     review_time = _parse_utc_iso(payload.get("generated_at_utc"))
-    if run_time is not None and review_time is not None:
+    if run_time is None or review_time is None:
+        failures.append(f"actor_separation_window_unverifiable:{review_path.name}")
+    else:
         separation = (review_time - run_time).total_seconds()
         minimum = _review_min_separation_seconds(repo)
         if separation < minimum:
@@ -2147,6 +2311,14 @@ def gate_review_bundle_integrity() -> GateResult:
             for review_path in valid_review_logs:
                 for reason in _review_log_actor_separation_failures(review_path, repo):
                     failures.append(f"{task.path}:{reason}")
+
+            # done requires an APPROVING review whose linked run manifest is a
+            # passing executor_run — a blocking review or a backfill/blocked
+            # manifest can never durably satisfy done (§4.0 #6).
+            failures.extend(
+                f"{task.path}:{reason}"
+                for reason in _done_bundle_approval_failures(valid_review_logs, repo)
+            )
 
     return GateResult(ok=len(failures) == 0, details={"failures": failures})
 

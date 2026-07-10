@@ -73,13 +73,17 @@ class ProcessedManifestGateTest(unittest.TestCase):
                 root,
                 manifest_path,
                 {
+                    "schema_version": "research_swarm.processed_manifest.v2",
                     "as_of_utc_date": "2026-03-29",
                     "inputs": ["data/raw_manifest/growthepie_2026-03-29.json"],
                     "transform": {
                         "script_path": "src/etl/build_l1_rent_panel.py",
+                        "script_sha256": "e" * 64,
                         "git_sha": "0123456789abcdef0123456789abcdef01234567",
                         "command": "python src/etl/build_l1_rent_panel.py --run-date 2026-03-29",
+                        "dirty": False,
                     },
+                    "environment": {"python": "3.11.0", "dependencies": {"pandas": "2.2.0"}},
                     "outputs": [
                         {
                             "path": output_path,
@@ -139,6 +143,7 @@ class ProcessedManifestGateTest(unittest.TestCase):
                 root,
                 raw_manifest_path,
                 {
+                    "schema_version": "research_swarm.processed_manifest.v2",
                     "as_of_utc_date": "2026-03-31",
                     "command": "python src/etl/growthepie_fetch.py --run-date 2026-03-31",
                     "files": [
@@ -154,13 +159,17 @@ class ProcessedManifestGateTest(unittest.TestCase):
                 root,
                 processed_manifest_path,
                 {
+                    "schema_version": "research_swarm.processed_manifest.v2",
                     "as_of_utc_date": "2026-03-31",
                     "inputs": [raw_manifest_path],
                     "transform": {
                         "script_path": code_path,
+                        "script_sha256": "e" * 64,
                         "git_sha": "0" * 40,
                         "command": "python src/etl/growthepie_fetch.py --run-date 2026-03-31",
+                        "dirty": False,
                     },
+                    "environment": {"python": "3.11.0", "dependencies": {"pandas": "2.2.0"}},
                     "outputs": [
                         {
                             "path": processed_output_path,
@@ -236,13 +245,17 @@ class ProcessedManifestGateTest(unittest.TestCase):
                 root,
                 processed_manifest_path,
                 {
+                    "schema_version": "research_swarm.processed_manifest.v2",
                     "as_of_utc_date": "2026-03-31",
                     "inputs": [raw_manifest_path],
                     "transform": {
                         "script_path": code_path,
+                        "script_sha256": "e" * 64,
                         "git_sha": "0" * 40,
                         "command": "python src/etl/growthepie_fetch.py --run-date 2026-03-31",
+                        "dirty": False,
                     },
+                    "environment": {"python": "3.11.0", "dependencies": {"pandas": "2.2.0"}},
                     "outputs": [
                         {
                             "path": processed_output_path,

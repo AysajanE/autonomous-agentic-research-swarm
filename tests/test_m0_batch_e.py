@@ -32,14 +32,16 @@ class ConstrainedGateExecutionTest(unittest.TestCase):
         )
         self.assertIsNone(outputs[0]["returncode"])
 
-    def test_absolute_path_interpreter_uses_basename(self) -> None:
-        ok, outputs = self._run(["/usr/bin/nonexistent-shell -c evil"])
-        self.assertFalse(ok)
-        self.assertTrue(
-            str(outputs[0]["constraint_violation"]).startswith(
-                "gate_interpreter_not_allowlisted:"
+    def test_path_qualified_interpreter_is_refused(self) -> None:
+        for gate in ("/usr/bin/nonexistent-shell -c evil", "./python -c evil", "/tmp/python -c evil"):
+            ok, outputs = self._run([gate])
+            self.assertFalse(ok)
+            self.assertTrue(
+                str(outputs[0]["constraint_violation"]).startswith(
+                    "gate_interpreter_path_qualified:"
+                ),
+                outputs[0],
             )
-        )
 
     def test_shell_metacharacters_have_no_power(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

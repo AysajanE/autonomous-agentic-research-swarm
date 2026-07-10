@@ -14,6 +14,7 @@ if str(_TESTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_TESTS_ROOT))
 
 from runtime_test_utils import (
+    register_historical_exemption,
     REPO_ROOT,
     chdir,
     init_git_fixture_repo,
@@ -99,7 +100,11 @@ def _write_rebaseline(
         payload["superseded_by"] = superseded_by
     manifest_dir = Path(manifest_rel).parent
     sidecar_rel = manifest_dir / "rebaselines" / f"{Path(manifest_rel).name}.rebaseline.json"
-    return write_json(root, sidecar_rel.as_posix(), payload)
+    sidecar_path = write_json(root, sidecar_rel.as_posix(), payload)
+    section = "raw_manifests" if manifest_rel.startswith("data/raw_manifest/") else "processed_manifests"
+    register_historical_exemption(root, section=section, rel_path=manifest_rel)
+    register_historical_exemption(root, section="rebaselines", rel_path=sidecar_rel.as_posix())
+    return sidecar_path
 
 
 class ManifestHashGateTest(unittest.TestCase):
@@ -330,7 +335,18 @@ class ManifestWriterTest(unittest.TestCase):
             self.assertFalse(invalid.ok)
             self.assertTrue(any("missing_key:script_sha256" in item for item in invalid.details["failures"]))
 
+            # a legacy-shaped manifest is a schema downgrade unless it sits on
+            # the hash-pinned historical exemption list
             write_json(root, manifest_rel, v1_payload)
+            with chdir(root):
+                unexempted = quality_gates.gate_processed_manifest_validity()
+            self.assertFalse(unexempted.ok)
+            self.assertTrue(
+                any("unexempted_legacy_processed_manifest" in item for item in unexempted.details["failures"]),
+                unexempted.details,
+            )
+
+            register_historical_exemption(root, section="processed_manifests", rel_path=manifest_rel)
             with chdir(root):
                 legacy = quality_gates.gate_processed_manifest_validity()
             self.assertTrue(legacy.ok, legacy.details)
@@ -353,19 +369,27 @@ class ValidationAndProjectionGateTest(unittest.TestCase):
                     "inputs_consumed": [{"path": input_rel, "sha256": sha256, "bytes": size}],
                 },
             )
-            write_json(root, "reports/validation/legacy.json", {"status": "pass"})
+            legacy_path = write_json(root, "reports/validation/legacy.json", {"status": "pass"})
             input_path.write_text("value\n2\n", encoding="utf-8")
             with chdir(root):
                 result = quality_gates.gate_validation_report_content_binding()
             self.assertFalse(result.ok)
             self.assertEqual(result.details["legacy_reports"], 1)
-            self.assertIn("sha256_mismatch", {item["reason"] for item in result.details["failures"]})
-            self.assertTrue(
-                all(
-                    item["message"] == "validation report is date-bound to data that has drifted"
-                    for item in result.details["failures"]
-                )
+            reasons = {item["reason"] for item in result.details["failures"]}
+            self.assertIn("sha256_mismatch", reasons)
+            # an unlisted legacy report is a schema downgrade, not a free pass
+            self.assertIn("unexempted_legacy_validation_report", reasons)
+
+            register_historical_exemption(
+                root,
+                section="validation_reports",
+                rel_path=legacy_path.relative_to(root).as_posix(),
             )
+            with chdir(root):
+                exempted = quality_gates.gate_validation_report_content_binding()
+            exempted_reasons = {item["reason"] for item in exempted.details["failures"]}
+            self.assertNotIn("unexempted_legacy_validation_report", exempted_reasons)
+            self.assertIn("sha256_mismatch", exempted_reasons)
 
     def test_projection_drift_gate_reports_move_then_turns_green(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
