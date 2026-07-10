@@ -69,7 +69,7 @@ def _valid_claim(root: Path, *, claim_type: str = "methodological") -> dict[str,
         "statement": "A registered statement.",
         "type": claim_type,
         "supporting_artifacts": [{"path": "reports/evidence.txt", "sha256": _hash(evidence)}],
-        "verification_command": "make gate",
+        "verification_command": "make verify-claim",
         "uncertainty_artifact": None,
         "uncertainty_justification": "No numeric uncertainty applies to this claim type.",
     }
@@ -79,6 +79,15 @@ def _valid_claim(root: Path, *, claim_type: str = "methodological") -> dict[str,
             "sha256": _hash(uncertainty),
         }
         claim.pop("uncertainty_justification", None)
+    if claim_type == "causal":
+        sensitivity = write_text(root, "reports/sensitivity.txt", "sensitivity\n")
+        claim["sensitivity_artifact"] = {
+            "path": "reports/sensitivity.txt",
+            "sha256": _hash(sensitivity),
+        }
+        claim["identification_strategy"] = "docs/prereg/analysis_plan.lock.md#identification"
+    if claim_type == "theoretical":
+        claim["assumption_scope"] = "The proposition holds on the declared domain."
     return claim
 
 
@@ -99,13 +108,17 @@ def _reasons(result) -> set[str]:
 
 
 def _snapshot(citekey: str, **overrides: object) -> dict[str, object]:
+    retrieval_payload = {"citekey": citekey, "provider": "fixture"}
     payload: dict[str, object] = {
         "schema_version": "research_swarm.citation_snapshot.v1",
         "citekey": citekey,
-        "title": "Verified title",
+        "title": "Verified",
         "source": "crossref",
         "retrieved_at_utc": "2026-07-10T12:00:00Z",
-        "retrieval_sha256": "a" * 64,
+        "retrieval_sha256": hashlib.sha256(
+            json.dumps(retrieval_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "retrieval_payload": retrieval_payload,
         "resolved": True,
         "retraction_status": "none",
         "url_resolves": True,
@@ -132,7 +145,7 @@ class M3aScienceGateTest(unittest.TestCase):
         cases = {
             "hash_drift": "artifact_sha256_mismatch",
             "missing_uncertainty": "uncertainty_artifact_required",
-            "missing_justification": "uncertainty_justification_required",
+            "missing_justification": "uncertainty_na_justification_required",
             "bad_command": "verification_command_policy_violation",
         }
         for case, expected in cases.items():
@@ -360,6 +373,24 @@ class M3aScienceGateTest(unittest.TestCase):
                     encoding="utf-8",
                 )
                 args.amend = True
+                write_json(
+                    root,
+                    "docs/prereg/amendments/2b_v2.md",
+                    {
+                        "schema_version": "research_swarm.prereg_amendment.v1",
+                        "phase": "2b",
+                        "from_version": 1,
+                        "to_version": 2,
+                        "dual_definition_rerun": {
+                            "old_artifact": "reports/old.json",
+                            "new_artifact": "reports/new.json",
+                            "sensitivity_delta_artifact": "reports/delta.json",
+                        },
+                        "human_reviewer": "Independent Reviewer",
+                        "justification": "New evidence requires a definition amendment.",
+                        "effective_date": "2026-07-10",
+                    },
+                )
                 self.assertEqual(swarm.cmd_lock_prereg(args), 0)
             import swarm_taskfile
 
@@ -413,6 +444,333 @@ class M3aScienceGateTest(unittest.TestCase):
             with chdir(root):
                 green = quality_gates.gate_task_lint()
             self.assertTrue(green.ok, green.details)
+
+    def test_manuscript_numeric_must_be_registered_or_computed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            write_text(root, "reports/paper/index.qmd", "# Results\n\nMean STR was 12.5%.\n")
+            with chdir(root):
+                red = quality_gates.gate_claim_evidence_ledger()
+            self.assertIn("unregistered_manuscript_numeric", _reasons(red))
+            claim = _valid_claim(root, claim_type="descriptive")
+            claim["statement"] = "Mean STR was 12.5%."
+            _write_claims(root, [claim])
+            with chdir(root):
+                registered = quality_gates.gate_claim_evidence_ledger()
+            self.assertTrue(registered.ok, registered.details)
+            _write_claims(root, [])
+            write_text(
+                root,
+                "reports/paper/index.qmd",
+                "# Results\n\nMean STR was {{ paper_values.mean_str }}.\n",
+            )
+            with chdir(root):
+                computed = quality_gates.gate_claim_evidence_ledger()
+            self.assertTrue(computed.ok, computed.details)
+
+    def test_citation_payload_hash_and_bibliography_identity_are_recomputed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            write_text(root, "reports/paper/index.qmd", "# Paper\n")
+            write_text(root, "reports/paper/references.bib", "@article{paper1, title={Verified}}\n")
+            write_text(root, "data/citations/AS_OF", "2026-07-10\n")
+            snapshot = _snapshot("paper1")
+            snapshot["retrieval_payload"] = {"tampered": True}
+            write_json(root, "data/citations/2026-07-10/paper1.json", snapshot)
+            with chdir(root):
+                hash_red = quality_gates.gate_citation_integrity()
+            self.assertIn("retrieval_sha256_mismatch", _reasons(hash_red))
+            snapshot = _snapshot("paper1", title="Different title")
+            write_json(root, "data/citations/2026-07-10/paper1.json", snapshot)
+            with chdir(root):
+                identity_red = quality_gates.gate_citation_integrity()
+            self.assertIn("citation_snapshot_bib_identity_mismatch", _reasons(identity_red))
+
+    def test_falsification_rejects_nonfinite_empty_and_author_avoidance(self) -> None:
+        overflow = quality_gates.evaluate_falsification_spec(
+            {
+                "domain": {"x": [0, 1]},
+                "seed": 1,
+                "inequalities": ["1e308 * 1e308 == 1e307 * 1e307"],
+                "comparative_statics": [],
+            }
+        )
+        self.assertIn("inequality_evaluation_error", {item["reason"] for item in overflow})
+        empty = quality_gates.evaluate_falsification_spec(
+            {
+                "domain": {"x": [0, 1]},
+                "seed": 1,
+                "inequalities": [],
+                "comparative_statics": [],
+            }
+        )
+        self.assertIn("falsification_spec_empty", {item["reason"] for item in empty})
+        avoided = quality_gates.evaluate_falsification_spec(
+            {
+                "domain": {"x": [0, 1]},
+                "seed": 1,
+                "inequalities": ["x < 0.5"],
+                "comparative_statics": [],
+                "sample_points": [{"x": 0.1}],
+            }
+        )
+        self.assertIn("inequality_violated", {item["reason"] for item in avoided})
+
+    def test_claim_type_uncertainty_table_is_structural(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            causal = _valid_claim(root, claim_type="causal")
+            causal.pop("sensitivity_artifact")
+            _write_claims(root, [causal])
+            with chdir(root):
+                causal_red = quality_gates.gate_claim_evidence_ledger()
+            self.assertIn("causal_sensitivity_artifact_required", _reasons(causal_red))
+
+            interpretation = _valid_claim(root, claim_type="interpretation")
+            interpretation["uncertainty_artifact"] = None
+            interpretation.pop("uncertainty_justification", None)
+            _write_claims(root, [interpretation])
+            with chdir(root):
+                interpretation_red = quality_gates.gate_claim_evidence_ledger()
+            self.assertIn("interpretation_evidence_scope_required", _reasons(interpretation_red))
+
+            theoretical = _valid_claim(root, claim_type="theoretical")
+            theoretical.pop("assumption_scope")
+            _write_claims(root, [theoretical])
+            with chdir(root):
+                theoretical_red = quality_gates.gate_claim_evidence_ledger()
+            self.assertIn("theoretical_assumption_scope_required", _reasons(theoretical_red))
+
+            counterfactual = _valid_claim(root, claim_type="counterfactual")
+            _write_claims(root, [counterfactual])
+            with chdir(root):
+                counterfactual_red = quality_gates.gate_claim_evidence_ledger()
+            self.assertIn(
+                "counterfactual_union_artifact_required", _reasons(counterfactual_red)
+            )
+
+            methodological = _valid_claim(root)
+            methodological["verification_command"] = "make gate"
+            _write_claims(root, [methodological])
+            with chdir(root):
+                command_red = quality_gates.gate_claim_evidence_ledger()
+            self.assertIn("verification_command_self_referential", _reasons(command_red))
+
+    def test_checklist_human_attestation_cannot_mask_red_machine_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            write_text(root, "reports/paper/index.qmd", "Figure Figure ??\n")
+            write_json(
+                root,
+                "contracts/venue.yaml",
+                {
+                    "checklist": [
+                        {
+                            "question": "Does the manuscript render?",
+                            "answer": "yes",
+                            "derived_from": ["gate:render_qa", "human_attested"],
+                        }
+                    ]
+                },
+            )
+            with chdir(root):
+                result = quality_gates.gate_checklist_derivation()
+            self.assertFalse(result.ok)
+            self.assertIn("checklist_answer_not_supported", _reasons(result))
+
+    def test_task_lint_rejects_nonfinite_budgets_and_ceilings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            write_task(
+                root,
+                "backlog",
+                "T904",
+                schema="v2",
+                budgets={"max_wall_clock": "1h", "max_tokens": float("nan"), "max_cost_usd": 1},
+            )
+            with chdir(root):
+                budget_red = quality_gates.gate_task_lint()
+            self.assertIn(
+                "invalid_budget_value",
+                {item["reason"] for item in budget_red.details["failures"]},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            framework = json.loads((root / "contracts/framework.json").read_text())
+            framework["complexity_tier_ceilings"]["S"]["max_tokens"] = float("inf")
+            write_json(root, "contracts/framework.json", framework)
+            write_task(root, "backlog", "T905", schema="v2")
+            with chdir(root):
+                ceiling_red = quality_gates.gate_task_lint()
+            self.assertIn(
+                "invalid_tier_ceiling",
+                {item["reason"] for item in ceiling_red.details["failures"]},
+            )
+
+    def test_lock_matrix_and_task_kind_gate_threading(self) -> None:
+        cases = (
+            ("empirical", "etl", ["data/processed/panel.csv"], "2a"),
+            ("empirical", "analysis", ["reports/tables/result.md"], "2b"),
+            ("modeling", "proof", ["reports/proofs/p.md"], None),
+            ("modeling", "model", ["reports/models/result.json"], "lock_a"),
+            ("hybrid", "bridge", ["contracts/instances/i.json"], "lock_a"),
+            ("hybrid", "model", ["reports/models/result.json"], "lock_b"),
+        )
+        for mode, task_kind, outputs, expected in cases:
+            with self.subTest(mode=mode, task_kind=task_kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "repo"
+                scaffold_runtime_repo(root, mode=mode)
+                write_task(root, "backlog", "T906", schema="v2", task_kind=task_kind, outputs=outputs)
+                contract = swarm.load_framework_contract(root)
+                task = swarm.load_tasks(contract)["T906"]
+                self.assertEqual(swarm._required_active_lock(task, mode), expected)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            ok, outputs = swarm._run_gates(
+                root,
+                ["python scripts/quality_gates.py"],
+                task_kind="analysis",
+            )
+            self.assertTrue(ok, outputs)
+            self.assertEqual(outputs[0]["argv"][-2:], ["--task-kind", "analysis"])
+
+    def test_ready_funnel_blocks_until_required_lock_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            write_task(
+                root,
+                "backlog",
+                "T908",
+                schema="v2",
+                task_kind="analysis",
+                outputs=["reports/tables/result.md"],
+            )
+            contract = swarm.load_framework_contract(root)
+            tasks = swarm.load_tasks(contract)
+            with (
+                mock.patch.object(swarm, "_task_has_planner_triage", return_value=True),
+                mock.patch.object(swarm, "_record_swarm_event") as record_event,
+            ):
+                self.assertEqual(swarm.ready_backlog_tasks(tasks, set(), contract), [])
+            self.assertTrue(
+                any(
+                    call.args[1].get("event") == "blocked_on_prereg_lock"
+                    for call in record_event.call_args_list
+                )
+            )
+            _write_lock(root, "2b", "# Plan\n")
+            tasks = swarm.load_tasks(contract)
+            with mock.patch.object(swarm, "_task_has_planner_triage", return_value=True):
+                ready = swarm.ready_backlog_tasks(tasks, set(), contract)
+            self.assertEqual([task.task_id for task in ready], ["T908"])
+
+    def test_amendment_record_cap_and_lock_header_journal_integrity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            args = argparse.Namespace(phase="2b", locked_by="Test Owner", amend=False)
+            stderr = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"SWARM_REPO_ROOT": str(root)}, clear=False),
+                mock.patch.object(swarm, "_REPO_ROOT_CACHE", None),
+                mock.patch.object(swarm, "_utc_now_iso", return_value="2026-07-10T12:00:00Z"),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(swarm.cmd_lock_prereg(args), 0)
+                lock_path = root / "docs/prereg/analysis_plan.lock.md"
+                lock_path.write_text(lock_path.read_text() + "\nAmended body.\n")
+                args.amend = True
+                self.assertEqual(swarm.cmd_lock_prereg(args), 1)
+            self.assertIn("amendment_record_required", stderr.getvalue())
+
+            lock, error = swarm.load_prereg_lock(lock_path, expected_phase="2b")
+            self.assertIsNone(error)
+            body = str(lock["body"])
+            body_hash = hashlib.sha256(body.encode()).hexdigest()
+            lock_path.write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "schema_version: research_swarm.prereg_lock.v1",
+                        "phase: 2b",
+                        "status: locked",
+                        "locked_at_utc: 2026-07-10T12:00:00Z",
+                        f"locked_sha256: {body_hash}",
+                        "locked_by: Test Owner",
+                        "lock_version: 3",
+                        "---",
+                        "",
+                    ]
+                )
+                + body
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"SWARM_REPO_ROOT": str(root)}, clear=False),
+                mock.patch.object(swarm, "_REPO_ROOT_CACHE", None),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(swarm.cmd_lock_prereg(args), 1)
+            self.assertIn("amendment_cap_exceeded:L3_required", stderr.getvalue())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            args = argparse.Namespace(phase="2b", locked_by="Test Owner", amend=False)
+            with (
+                mock.patch.dict(os.environ, {"SWARM_REPO_ROOT": str(root)}, clear=False),
+                mock.patch.object(swarm, "_REPO_ROOT_CACHE", None),
+                mock.patch.object(swarm, "_utc_now_iso", return_value="2026-07-10T12:00:00Z"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(swarm.cmd_lock_prereg(args), 0)
+            with chdir(root):
+                self.assertTrue(quality_gates.gate_prereg_lock_coverage().ok)
+            lock_path = root / "docs/prereg/analysis_plan.lock.md"
+            lock_path.write_text(
+                lock_path.read_text().replace(
+                    "locked_at_utc: 2026-07-10T12:00:00Z",
+                    "locked_at_utc: 2026-07-11T12:00:00Z",
+                )
+            )
+            with chdir(root):
+                tampered = quality_gates.gate_prereg_lock_coverage()
+            self.assertIn("prereg_lock_header_journal_mismatch", _reasons(tampered))
+
+    def test_prereg_lock_coverage_rejects_historical_bypass(self) -> None:
+        for done_before_lock, expected_ok in ((True, False), (False, True)):
+            with self.subTest(done_before_lock=done_before_lock), tempfile.TemporaryDirectory() as tmp:
+                root = self._root(tmp)
+                write_task(
+                    root,
+                    "done",
+                    "T907",
+                    schema="v2",
+                    state="done",
+                    task_kind="analysis",
+                    outputs=["reports/tables/result.md"],
+                )
+                if done_before_lock:
+                    swarm.swarm_events.append_event(root, {"event": "task_done", "task_id": "T907"})
+                args = argparse.Namespace(phase="2b", locked_by="Test Owner", amend=False)
+                with (
+                    mock.patch.dict(os.environ, {"SWARM_REPO_ROOT": str(root)}, clear=False),
+                    mock.patch.object(swarm, "_REPO_ROOT_CACHE", None),
+                    mock.patch.object(swarm, "_utc_now_iso", return_value="2026-07-10T12:00:00Z"),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(swarm.cmd_lock_prereg(args), 0)
+                if not done_before_lock:
+                    swarm.swarm_events.append_event(root, {"event": "task_done", "task_id": "T907"})
+                with chdir(root):
+                    result = quality_gates.gate_prereg_lock_coverage()
+                self.assertEqual(result.ok, expected_ok, result.details)
+                if not expected_ok:
+                    self.assertIn(
+                        "task_completed_before_required_prereg_lock", _reasons(result)
+                    )
 
     def test_science_gate_registry_order_follows_task_lint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

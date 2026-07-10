@@ -10,7 +10,25 @@ Delivery: one branch per milestone (`milestone/<id>-<slug>`), red/green-tested b
 
 ---
 
-## M2 — Planner + task schema v2 (branch: `milestone/m2-planner`) — IN PROGRESS
+## M3a — Deterministic science gates + modeling battery + prereg locks (branch: `milestone/m3a-science-gates`) — IN PROGRESS (fix round green; verification pending)
+
+Scope: plan §5.2 (deterministic science gates), §6.1 (phased preregistration locks + amendment discipline), §6.2 (claim ledger / per-type uncertainty table), §10 M3a acceptance row. Plus the M2-deferred items (canonical hypothesis↔prereg linkage, per-tier numeric ceilings).
+
+Batch record:
+
+- **M3a Batch 1** (`f6cff91`) — deterministic science gates (citation_integrity, claim_evidence_ledger, prereg_conformance, etl_decision_log, rigor_sections) + phased prereg lock commands + the two M2 deferrals. Codex workhorse; owner diff review.
+- **M3a Batch 2** (`ee47667`) — modeling verification battery (instance_manifest_conformance, seed_budget_lock, gap_convergence, theoretical_falsification, sweep_artifact) + hybrid_interface_conformance + executable JSON schemas + remaining science gates. Codex workhorse; owner diff review. Registry now 35 gates.
+- **Dual-vendor review** of the frozen batch-1+2 delta: Codex critique 17 findings (5 BLOCKER: F1 citation-bib-path false-green, F2 unregistered-numeric never scanned, F3 phased locks not consulted at claim/judge time, F4 amendment discipline absent, F5 prereg-conformance regex-only), NOT-MERGEABLE; Claude adversary corroborated. Central verified theme: the gates were **permissive** — skip-on-absent and trust-self-asserted — against the plan's whole thesis that gates must BIND when the artifact exists and content-bind every claim. Owner adjudicated the two reviewers' factual disagreements against the code and froze deterministic dispositions (`m3a_fixround_prompt.md`).
+- **Owner fix round** (Codex workhorse under the frozen dispositions; owner re-verified the two highest-stakes pieces — the lock-enforcement matrix and amendment discipline — line-by-line): lock matrix `_required_active_lock`/`_effective_required_active_lock` wired into the shared `ready_backlog_tasks` funnel AND `cmd_judge_task` (empirical 2a/2b, hybrid Lock A/B, counterfactual→Lock B); 2-amendment cap + mandatory dual-definition amendment record + lock-header↔journal integrity + exploratory retyping (`gate_amendment_exploratory_tagging`, `gate_headline_confirmatory`); manuscript-numeric scan in the ledger gate; falsify hardening (finite-intermediate guard, empty-spec rejection, kernel-generated sample points over the locked domain); per-type uncertainty structure; content-binding symlink/tracked-file guards; NaN/Inf ceiling guards; new goldens GM3A_17/18/19. **321 tests green; real `make gate` green** after the F2 remediation below.
+
+Design decisions:
+
+- **D-M3a-1 (F2 remediation — frozen-manuscript numeric exemption, owner-inline, tripwire-owned).** The F2 fix makes `gate_claim_evidence_ledger` scan the manuscript for bare reportable numerics; on the real repo that turned the battle-test STR paper red (20 unregistered numerics + empty ledger). The two remediation paths the delegate flagged — retroactively registering the numbers as claims, or rewriting them as computed-value keys — both **corrupt the "frozen regression reference" property** (§10): (a) manufactures a claim ledger that never existed during the battle test, (b) edits the reference itself. Instead I extended the gate to honor a hash-pinned **`manuscripts` exemption** in `contracts/historical_exemptions.json` (the same M0 gate-scoping precedent used for v1 run-manifests/review-logs) and pinned `reports/paper/index.qmd` at sha `50982a53…`. The exemption is **self-lapsing**: the numeric-registration requirement binds in full on any manuscript whose bytes differ from the pin — so the M4 computed paper (a new artifact) is fully gated, and any edit to the reference re-arms the gate. The binding force is proven independently by golden GM3A_18 on a scaffolded fixture (no exemption there). This is the more honest option: the gate BINDS on the real deliverable, and the frozen reference is documented-and-pinned rather than retro-fitted. **Flagged for the fix-verification pass to challenge (exempt vs register).**
+- **D-M3a-2 (scope-deferred to M4, owner-mapped).** F11 (clean-clone `make paper` build), F12 (AS_OF→release-as-of binding), F14 (corpus/checklist absence→failure at the release perimeter) are release-perimeter policy = M4 §7.3/§8. F12's retrieval_sha256 recompute + snapshot↔bib identity match WAS done here (in scope). Recorded forward so M4 absorbs them.
+
+---
+
+## M2 — Planner + task schema v2 (branch: `milestone/m2-planner`) — COMPLETE (merged to main via PR #3, squash `188c8db`)
 
 Scope: plan §4.2 (Planner runtime), §4.4 (task schema v2 + strict lint), §4.3 (read-only Claude planner profile).
 

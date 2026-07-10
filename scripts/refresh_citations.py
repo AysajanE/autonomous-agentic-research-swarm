@@ -100,6 +100,7 @@ def _fixture_to_snapshot(payload: object, *, fixture_path: Path) -> tuple[str, s
         "retrieval_sha256": hashlib.sha256(
             _canonical_raw_bytes(payload["raw_response"])
         ).hexdigest(),
+        "retrieval_payload": payload["raw_response"],
         "resolved": normalized["resolved"],
         "retraction_status": normalized["retraction_status"],
         "url_resolves": normalized["url_resolves"],

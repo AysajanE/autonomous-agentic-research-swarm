@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ if str(_TESTS_ROOT) not in sys.path:
 
 from runtime_test_utils import (
     chdir,
+    init_git_fixture_repo,
     load_quality_gates_module,
     scaffold_runtime_repo,
     write_json,
@@ -141,12 +143,17 @@ def _experiment_manifest(
     budget: int = 100,
     gap: float | None = None,
     dispersion: bool = False,
+    parameters: dict[str, object] | None = None,
+    experiment_id: str = "E1",
 ) -> Path:
     payload: dict[str, object] = json.loads(
         (_FIXTURES / "experiment_manifest_template.json").read_text(encoding="utf-8")
     )
     payload["seed"] = seed
     payload["budget"] = budget
+    payload["experiment_id"] = experiment_id
+    if parameters is not None:
+        payload["parameters"] = parameters
     if gap is not None:
         payload["optimality_gap"] = gap
     if dispersion:
@@ -155,7 +162,7 @@ def _experiment_manifest(
             "path": "reports/models/dispersion.json",
             "sha256": _sha(artifact),
         }
-    return write_json(root, "reports/models/experiment_E1.json", payload)
+    return write_json(root, f"reports/models/experiment_{experiment_id}.json", payload)
 
 
 def _claim(root: Path, claim_type: str, *, experiment: Path | None = None, headline: bool = False) -> dict[str, object]:
@@ -168,7 +175,7 @@ def _claim(root: Path, claim_type: str, *, experiment: Path | None = None, headl
         "supporting_artifacts": [
             {"path": evidence.relative_to(root).as_posix(), "sha256": _sha(evidence)}
         ],
-        "verification_command": "make gate",
+        "verification_command": "make verify-claim",
         "uncertainty_artifact": None,
         "uncertainty_justification": "A theorem has no sampling uncertainty.",
     }
@@ -177,6 +184,12 @@ def _claim(root: Path, claim_type: str, *, experiment: Path | None = None, headl
             "path": "reports/uncertainty.txt",
             "sha256": _sha(uncertainty),
         }
+    if claim_type == "theoretical":
+        claim["assumption_scope"] = "The claim holds on the declared parameter domain."
+    if claim_type == "counterfactual":
+        claim["empirical_artifact"] = claim["supporting_artifacts"][0]
+        claim["model_artifact"] = claim["supporting_artifacts"][0]
+        claim["cross_bridge_uncertainty_artifact"] = claim["uncertainty_artifact"]
     if headline:
         claim["headline"] = True
     return claim
@@ -224,6 +237,7 @@ class M3aModelingBatteryTest(unittest.TestCase):
     def test_gap_convergence_requires_gap_and_dispersion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._root(tmp)
+            _lock_a(root)
             manifest = _experiment_manifest(root)
             _claims(root, [_claim(root, "computational", experiment=manifest)])
             with chdir(root):
@@ -231,7 +245,7 @@ class M3aModelingBatteryTest(unittest.TestCase):
             reasons = {item["reason"] for item in red.details["failures"]}
             self.assertIn("missing_or_invalid_optimality_gap", reasons)
             self.assertIn("missing_per_instance_dispersion_artifact", reasons)
-            manifest = _experiment_manifest(root, gap=0.01, dispersion=True)
+            manifest = _experiment_manifest(root, gap=0.0001, dispersion=True)
             _claims(root, [_claim(root, "computational", experiment=manifest)])
             with chdir(root):
                 self.assertTrue(quality_gates.gate_gap_convergence().ok)
@@ -251,11 +265,14 @@ class M3aModelingBatteryTest(unittest.TestCase):
             claim["falsification_spec"] = {
                 "inequalities": ["x >= 0"],
                 "comparative_statics": [],
+                "domain": {"x": [-0.01, 0.01]},
+                "seed": 23,
                 "sample_points": [{"x": -0.01}],
             }
             _claims(root, [claim])
             with chdir(root):
                 self.assertFalse(quality_gates.gate_theoretical_falsification().ok)
+            claim["falsification_spec"]["inequalities"] = ["x >= -0.01"]
             claim["falsification_spec"]["sample_points"] = [{"x": 0.01}]
             _claims(root, [claim])
             with chdir(root):
@@ -283,13 +300,30 @@ class M3aModelingBatteryTest(unittest.TestCase):
             with chdir(root):
                 self.assertFalse(quality_gates.gate_sweep_artifact().ok)
                 cells = quality_gates.enumerate_cells(spec)
+            bound_cells = self._bound_sweep_cells(root, cells)
             write_json(
                 root,
                 "reports/models/sweeps/C1.json",
                 {
                     "schema_version": "research_swarm.sweep_artifact.v1",
                     "claim_id": "C1",
-                    "cells": cells,
+                    "cells": bound_cells,
+                    "survival_count": 0,
+                },
+            )
+            with chdir(root):
+                asserted_red = quality_gates.gate_sweep_artifact()
+            self.assertIn(
+                "sweep_survival_count_mismatch",
+                {item["reason"] for item in asserted_red.details["failures"]},
+            )
+            write_json(
+                root,
+                "reports/models/sweeps/C1.json",
+                {
+                    "schema_version": "research_swarm.sweep_artifact.v1",
+                    "claim_id": "C1",
+                    "cells": bound_cells,
                     "survival_count": len(cells),
                 },
             )
@@ -318,6 +352,22 @@ class M3aModelingBatteryTest(unittest.TestCase):
             write_json(root, "contracts/instances/bridge.json", payload)
             with chdir(root):
                 self.assertTrue(quality_gates.gate_hybrid_interface_conformance().ok)
+
+    def test_pre_bridge_status_is_read_from_validation_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp, mode="hybrid")
+            manifest_path = _bridge_instance(root)
+            validation = write_json(root, "reports/validation/bridge.json", {"status": "red"})
+            payload = json.loads(manifest_path.read_text())
+            payload["pre_bridge_validation"][0]["sha256"] = _sha(validation)
+            payload["pre_bridge_validation"][0]["status"] = "green"
+            write_json(root, "contracts/instances/bridge.json", payload)
+            with chdir(root):
+                red = quality_gates.gate_hybrid_interface_conformance()
+            self.assertIn(
+                "pre_bridge_validation_not_green",
+                {item["reason"] for item in red.details["failures"]},
+            )
 
     def test_hybrid_modeling_task_direct_processed_input_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -419,6 +469,102 @@ class M3aModelingBatteryTest(unittest.TestCase):
             with chdir(root):
                 self.assertTrue(quality_gates.gate_checklist_derivation().ok)
 
+    def test_ready_model_task_requires_corresponding_manifests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            write_task(
+                root,
+                "ready_for_review",
+                "T991",
+                schema="v2",
+                state="ready_for_review",
+                task_kind="model",
+                outputs=["reports/models/result.json"],
+            )
+            with chdir(root):
+                missing = quality_gates.gate_gap_convergence()
+            self.assertIn(
+                "required_experiment_manifest_missing",
+                {item["reason"] for item in missing.details["failures"]},
+            )
+            _experiment_manifest(root)
+            with chdir(root):
+                present = quality_gates.gate_gap_convergence()
+            self.assertTrue(present.ok, present.details)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp, mode="hybrid")
+            write_task(
+                root,
+                "ready_for_review",
+                "T992",
+                schema="v2",
+                state="ready_for_review",
+                task_kind="bridge",
+                outputs=["contracts/instances/bridge.json"],
+            )
+            with chdir(root):
+                missing = quality_gates.gate_instance_manifest_conformance()
+            self.assertIn(
+                "required_instance_manifest_missing",
+                {item["reason"] for item in missing.details["failures"]},
+            )
+
+    def test_gap_convergence_binds_solver_version_tolerance_and_convergence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            _lock_a(root)
+            manifest = _experiment_manifest(root, gap=0.0001, dispersion=True)
+            payload = json.loads(manifest.read_text())
+            payload["solver_version"] = "wrong"
+            write_json(root, "reports/models/experiment_E1.json", payload)
+            _claims(root, [_claim(root, "computational", experiment=manifest)])
+            with chdir(root):
+                solver_red = quality_gates.gate_gap_convergence()
+            self.assertIn(
+                "solver_version_outside_active_lock",
+                {item["reason"] for item in solver_red.details["failures"]},
+            )
+            payload["solver_version"] = "1"
+            payload["converged"] = False
+            write_json(root, "reports/models/experiment_E1.json", payload)
+            _claims(root, [_claim(root, "computational", experiment=manifest)])
+            with chdir(root):
+                convergence_red = quality_gates.gate_gap_convergence()
+            self.assertIn(
+                "computational_claim_experiment_not_converged",
+                {item["reason"] for item in convergence_red.details["failures"]},
+            )
+
+    def test_content_binding_rejects_untracked_and_symlink_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            init_git_fixture_repo(root)
+            target = write_text(root, "reports/models/untracked.txt", "untracked\n")
+            entry = {"path": "reports/models/untracked.txt", "sha256": _sha(target)}
+            failures = quality_gates._verify_content_entry(
+                entry, subject="fixture", field="artifact", repo=root
+            )
+            self.assertIn(
+                "content_binding_target_not_git_tracked",
+                {item["reason"] for item in failures},
+            )
+            outside = Path(tmp) / "outside.txt"
+            outside.write_text("outside\n")
+            link = root / "reports/models/link.txt"
+            link.symlink_to(outside)
+            subprocess.run(["git", "add", "reports/models/link.txt"], cwd=root, check=True)
+            failures = quality_gates._verify_content_entry(
+                {"path": "reports/models/link.txt", "sha256": _sha(outside)},
+                subject="fixture",
+                field="artifact",
+                repo=root,
+            )
+            self.assertIn(
+                "content_binding_target_missing",
+                {item["reason"] for item in failures},
+            )
+
     def test_mode_matrix_skips_or_activates_modeling_and_hybrid_gates(self) -> None:
         empirical = set(quality_gates._active_gates("empirical"))
         modeling = set(quality_gates._active_gates("modeling"))
@@ -440,6 +586,33 @@ class M3aModelingBatteryTest(unittest.TestCase):
                     self.assertFalse(results["seed_budget_lock"].details.get("skipped", False))
                 else:
                     self.assertFalse(results["hybrid_interface_conformance"].details.get("skipped", False))
+
+    @staticmethod
+    def _bound_sweep_cells(
+        root: Path, cells: list[dict[str, object]]
+    ) -> list[dict[str, object]]:
+        bound: list[dict[str, object]] = []
+        for index, cell in enumerate(cells):
+            path = _experiment_manifest(
+                root,
+                seed=int(cell["seed"]),
+                budget=int(cell["budget"]),
+                gap=0.0001,
+                parameters={
+                    key: value for key, value in cell.items() if key not in {"seed", "budget"}
+                },
+                experiment_id=f"SWEEP{index}",
+            )
+            bound.append(
+                {
+                    "cell": cell,
+                    "experiment_manifest": {
+                        "path": path.relative_to(root).as_posix(),
+                        "sha256": _sha(path),
+                    },
+                }
+            )
+        return bound
 
 
 if __name__ == "__main__":

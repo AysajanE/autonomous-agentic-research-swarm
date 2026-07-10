@@ -79,6 +79,7 @@ MOCK_TRANSCRIPT_SCHEMA_VERSION = "research_swarm.mock_transcript.v1"
 EXECUTOR_SESSION_SCHEMA_VERSION = "research_swarm.executor_session.v1"
 MOCK_PLANNER_SCHEMA_VERSION = "research_swarm.mock_planner.v1"
 PLAN_APPROVAL_PENDING_PATH = Path(".swarm/plan_approval_pending.json")
+PREREG_AMENDMENT_SCHEMA_VERSION = "research_swarm.prereg_amendment.v1"
 
 EXECUTOR_LOG_MAX_BYTES = 128 * 1024
 EXECUTOR_LOG_SEGMENT_BYTES = 64 * 1024
@@ -1437,6 +1438,83 @@ def _task_has_planner_triage(task: Task) -> bool:
     )
 
 
+def _required_active_lock(task: Task, mode: str) -> str | None:
+    """Return the most advanced prereg phase that must gate this task claim."""
+    writes_processed = any(
+        _path_matches_prefix(output, "data/processed/") for output in task.outputs
+    )
+    if mode in {"empirical", "hybrid"}:
+        if task.task_kind == "etl" and writes_processed:
+            return "2a"
+        if task.task_kind == "analysis":
+            return "2b"
+    if mode == "modeling" and task.task_kind in {"model", "analysis"}:
+        return "lock_a"
+    if mode == "hybrid":
+        if task.task_kind == "bridge":
+            return "lock_a"
+        if task.task_kind == "model":
+            return "lock_b"
+    return None
+
+
+def _task_registered_claim_types(repo: Path, task: Task) -> set[str]:
+    path = repo / "contracts/claims.yaml"
+    try:
+        payload = json.loads(_read_text(path))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    claims = payload.get("claims") if isinstance(payload, dict) else None
+    if not isinstance(claims, list):
+        return set()
+    frontmatter = _task_frontmatter(task)
+    declared_claim_ids = set(
+        value
+        for value in frontmatter.get("claim_ids", [])
+        if isinstance(value, str)
+    ) if isinstance(frontmatter.get("claim_ids"), list) else set()
+    declared_claim_types = set(
+        value
+        for value in frontmatter.get("claim_types", [])
+        if isinstance(value, str)
+    ) if isinstance(frontmatter.get("claim_types"), list) else set()
+    writes_ledger = any(
+        _normalize_repo_relative_path(output) == "contracts/claims.yaml"
+        for output in task.outputs
+    )
+    claim_types: set[str] = set(declared_claim_types)
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        owner = next(
+            (
+                claim.get(key)
+                for key in ("task_id", "registered_by_task", "source_task_id")
+                if isinstance(claim.get(key), str) and claim.get(key).strip()
+            ),
+            None,
+        )
+        claim_id = claim.get("claim_id")
+        if owner == task.task_id or claim_id in declared_claim_ids or writes_ledger:
+            claim_type = claim.get("type")
+            if isinstance(claim_type, str):
+                claim_types.add(claim_type)
+    return claim_types
+
+
+def _effective_required_active_lock(
+    task: Task, contract: FrameworkContract
+) -> str | None:
+    if "counterfactual" in _task_registered_claim_types(contract.repo_root, task):
+        return "lock_b"
+    return _required_active_lock(task, contract.project_mode or "empirical")
+
+
+def _prereg_phase_is_active(repo: Path, phase: str) -> bool:
+    lock, error = load_prereg_lock(repo / PREREG_PHASE_FILES[phase], expected_phase=phase)
+    return error is None and lock is not None and lock.get("active") is True
+
+
 def _plan_approval_pending(repo: Path) -> bool:
     return (repo / PLAN_APPROVAL_PENDING_PATH).is_file()
 
@@ -1466,6 +1544,19 @@ def ready_backlog_tasks(tasks: dict[str, Task], claimed_ids: set[str], contract:
         if task.role not in set(contract.task_execution_roles):
             continue
         if task.task_id in claimed_ids:
+            continue
+        required_lock = _effective_required_active_lock(task, contract)
+        if required_lock is not None and not _prereg_phase_is_active(
+            contract.repo_root, required_lock
+        ):
+            _record_swarm_event(
+                contract.repo_root,
+                {
+                    "event": "blocked_on_prereg_lock",
+                    "task_id": task.task_id,
+                    "required_phase": required_lock,
+                },
+            )
             continue
         if plan_pending and TaskV2Fields(_task_frontmatter(task)).task_schema == TASK_SCHEMA_VERSION:
             _record_swarm_event(
@@ -2672,6 +2763,7 @@ def _run_gates(
     interpreter_allowlist: tuple[str, ...] = DEFAULT_GATE_INTERPRETER_ALLOWLIST,
     timeout_seconds: int = DEFAULT_GATE_TIMEOUT_SECONDS,
     enforce_form: bool = True,
+    task_kind: str | None = None,
 ) -> tuple[bool, list[dict[str, object]]]:
     """Constrained gate execution (§4.0 #12 + #18, hardened for M2): no shell,
     interpreter allowlist, gate-FORM policy (make <target> / python <repo .py>
@@ -2710,6 +2802,14 @@ def _run_gates(
             outputs.append(record)
             all_ok = False
             continue
+        if (
+            task_kind is not None
+            and len(argv) >= 2
+            and argv[0] in {"python", "python3", sys.executable}
+            and argv[1] == "scripts/quality_gates.py"
+            and "--task-kind" not in argv
+        ):
+            argv.extend(["--task-kind", task_kind])
         record["argv"] = argv
 
         interpreter = argv[0]
@@ -2938,6 +3038,128 @@ def cmd_ack_vendor_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+def _amendment_scalar(value: str) -> object:
+    stripped = value.strip().strip("'\"")
+    if re.fullmatch(r"\d+", stripped):
+        return int(stripped)
+    return stripped
+
+
+def _parse_amendment_record(text: str) -> dict[str, object] | None:
+    stripped = text.strip()
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        fenced = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+        if fenced is not None:
+            try:
+                payload = json.loads(fenced.group(1))
+            except json.JSONDecodeError:
+                payload = None
+        else:
+            payload = None
+    if isinstance(payload, dict):
+        return payload
+    if not stripped.startswith("---"):
+        return None
+    parts = stripped.split("---", 2)
+    if len(parts) < 3:
+        return None
+    record: dict[str, object] = {}
+    nested: dict[str, object] | None = None
+    for raw_line in parts[1].splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        line = raw_line.strip()
+        if ":" not in line:
+            return None
+        key, raw_value = line.split(":", 1)
+        key = key.strip()
+        if indent == 0:
+            if raw_value.strip():
+                record[key] = _amendment_scalar(raw_value)
+                nested = None
+            else:
+                child: dict[str, object] = {}
+                record[key] = child
+                nested = child
+        elif nested is not None:
+            nested[key] = _amendment_scalar(raw_value)
+        else:
+            return None
+    return record
+
+
+def _amendment_pointer_present(value: object) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        path = value.get("path")
+        return isinstance(path, str) and bool(path.strip())
+    return False
+
+
+def _validate_amendment_record(
+    *,
+    repo: Path,
+    phase: str,
+    from_version: int,
+    to_version: int,
+) -> tuple[Path, dict[str, object] | None, list[str]]:
+    rel_path = Path("docs/prereg/amendments") / f"{phase}_v{to_version}.md"
+    path = repo / rel_path
+    failures: list[str] = []
+    if not path.is_file() or path.is_symlink():
+        return rel_path, None, ["amendment_record_missing_or_not_regular"]
+    git_probe = _run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=repo,
+        capture=True,
+        check=False,
+    )
+    if git_probe.returncode == 0 and _run(
+        ["git", "ls-files", "--error-unmatch", "--", rel_path.as_posix()],
+        cwd=repo,
+        capture=True,
+        check=False,
+    ).returncode != 0:
+        failures.append("amendment_record_not_git_tracked")
+    try:
+        record = _parse_amendment_record(_read_text(path))
+    except OSError:
+        record = None
+    if record is None:
+        failures.append("amendment_record_invalid")
+        return rel_path, None, failures
+    expected = {
+        "schema_version": PREREG_AMENDMENT_SCHEMA_VERSION,
+        "phase": phase,
+        "from_version": from_version,
+        "to_version": to_version,
+    }
+    for field, value in expected.items():
+        if record.get(field) != value:
+            failures.append(f"amendment_record_field_mismatch:{field}")
+    rerun = record.get("dual_definition_rerun")
+    if not isinstance(rerun, dict):
+        failures.append("amendment_record_missing_dual_definition_rerun")
+    else:
+        for field in ("old_artifact", "new_artifact", "sensitivity_delta_artifact"):
+            if not _amendment_pointer_present(rerun.get(field)):
+                failures.append(f"amendment_record_missing_pointer:{field}")
+    for field in ("human_reviewer", "justification"):
+        value = record.get(field)
+        if not isinstance(value, str) or not value.strip():
+            failures.append(f"amendment_record_missing_field:{field}")
+    effective_date = record.get("effective_date")
+    try:
+        dt.date.fromisoformat(effective_date if isinstance(effective_date, str) else "")
+    except ValueError:
+        failures.append("amendment_record_invalid_effective_date")
+    return rel_path, record, failures
+
+
 def cmd_lock_prereg(args: argparse.Namespace) -> int:
     """Activate or explicitly amend one phased preregistration lock."""
     if not isinstance(args.locked_by, str) or not args.locked_by.strip():
@@ -2967,6 +3189,19 @@ def cmd_lock_prereg(args: argparse.Namespace) -> int:
     if not isinstance(current_version, int) or isinstance(current_version, bool) or current_version < 0:
         print("preregistration lock_version must be a non-negative integer", file=sys.stderr)
         return 1
+    if args.amend and current_version >= 3:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "amendment_cap_exceeded",
+                "phase": args.phase,
+                "lock_version": current_version,
+                "required_gate": "L3",
+            },
+            escalation=True,
+        )
+        print("amendment_cap_exceeded:L3_required", file=sys.stderr)
+        return 1
     body = lock.get("body")
     body_sha256 = lock.get("body_sha256")
     if not isinstance(body, str) or not isinstance(body_sha256, str):
@@ -2974,6 +3209,21 @@ def cmd_lock_prereg(args: argparse.Namespace) -> int:
         return 1
 
     version = current_version + 1
+    amendment_record_path: Path | None = None
+    amendment_record: dict[str, object] | None = None
+    if args.amend:
+        amendment_record_path, amendment_record, record_failures = _validate_amendment_record(
+            repo=repo,
+            phase=args.phase,
+            from_version=current_version,
+            to_version=version,
+        )
+        if record_failures:
+            print(
+                "amendment_record_required:" + ",".join(record_failures),
+                file=sys.stderr,
+            )
+            return 1
     locked_at_utc = _utc_now_iso()
     header = "\n".join(
         [
@@ -3001,6 +3251,16 @@ def cmd_lock_prereg(args: argparse.Namespace) -> int:
             "locked_by": args.locked_by,
             "locked_sha256": body_sha256,
             "lock_version": version,
+            "status": "locked",
+            "locked_at_utc": locked_at_utc,
+            **(
+                {
+                    "amendment_record": amendment_record_path.as_posix(),
+                    "human_reviewer": amendment_record.get("human_reviewer"),
+                }
+                if amendment_record_path is not None and amendment_record is not None
+                else {}
+            ),
         },
         escalation=True,
     )
@@ -5351,8 +5611,11 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
                 started_event, verified_event = _merge_journal_records(repo, task_id)
                 recorded_pre = (started_event or {}).get("pre_merge_sha")
                 if verified_event is None and isinstance(recorded_pre, str) and recorded_pre:
+                    quality_command = [sys.executable, "scripts/quality_gates.py"]
+                    if base_task.task_kind is not None:
+                        quality_command.extend(["--task-kind", base_task.task_kind])
                     quality_cp = _run(
-                        [sys.executable, "scripts/quality_gates.py"],
+                        quality_command,
                         cwd=repo,
                         capture=True,
                         check=False,
@@ -5804,8 +6067,11 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
         filename = merged_task.path.name
         _move_task_to_state_projection(repo, merged_task)
 
+        quality_command = [sys.executable, "scripts/quality_gates.py"]
+        if merged_task.task_kind is not None:
+            quality_command.extend(["--task-kind", merged_task.task_kind])
         quality_cp = _run(
-            [sys.executable, "scripts/quality_gates.py"],
+            quality_command,
             cwd=repo,
             capture=True,
             check=False,
@@ -5820,6 +6086,7 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
             pinned_gates,
             interpreter_allowlist=contract.gate_interpreter_allowlist,
             timeout_seconds=contract.gate_timeout_seconds,
+            task_kind=merged_task.task_kind,
         )
         if quality_cp.returncode != 0 or not pinned_ok:
             # F6: the reset target is the sha THIS step recorded, and the tip
@@ -7206,6 +7473,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         task.gates,
         interpreter_allowlist=contract.gate_interpreter_allowlist,
         timeout_seconds=contract.gate_timeout_seconds,
+        task_kind=task.task_kind,
     )
     if not gate_ok:
         blocked_reasons.append("gates_failed")
@@ -7566,6 +7834,17 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
         path for path, _ in matching_v2_manifests if _is_valid_run_manifest(path, task.task_id)
     ]
     review_bundle_failures: list[str] = []
+    required_lock = _effective_required_active_lock(task, contract)
+    if required_lock is not None and not _prereg_phase_is_active(repo, required_lock):
+        review_bundle_failures.append(f"inactive_prereg_lock:{required_lock}")
+        _record_swarm_event(
+            repo,
+            {
+                "event": "judge_prereg_lock_rejected",
+                "task_id": task.task_id,
+                "required_phase": required_lock,
+            },
+        )
     if not valid_run_manifests:
         passing_v2_manifests = [
             (path, data)
@@ -7609,6 +7888,7 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
         pinned_gates if pinned_gates else task.gates,
         interpreter_allowlist=contract.gate_interpreter_allowlist,
         timeout_seconds=contract.gate_timeout_seconds,
+        task_kind=task.task_kind,
     )
 
     integrity_failures: list[str] = []

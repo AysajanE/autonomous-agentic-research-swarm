@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import datetime as dt
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 from typing import Iterable, Mapping, Sequence
@@ -489,7 +490,7 @@ def _positive_number(value: object) -> float | None:
             return None
     else:
         return None
-    return number if number > 0 else None
+    return number if math.isfinite(number) and number > 0 else None
 
 
 def parse_wall_clock_seconds(value: object) -> float | None:
@@ -502,29 +503,32 @@ def parse_wall_clock_seconds(value: object) -> float | None:
     if match is None:
         return None
     amount = float(match.group("value"))
-    if amount <= 0:
+    if not math.isfinite(amount) or amount <= 0:
         return None
     multiplier = {"h": 3600.0, "m": 60.0, "s": 1.0}[match.group("unit").lower()]
-    return amount * multiplier
+    result = amount * multiplier
+    return result if math.isfinite(result) else None
 
 
 def parse_token_count(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value) if value > 0 else None
+        number = float(value)
+        return number if math.isfinite(number) and number > 0 else None
     if not isinstance(value, str):
         return None
     match = _TOKEN_COUNT_RE.fullmatch(value.strip())
     if match is None:
         return None
     amount = float(match.group("value"))
-    if amount <= 0:
+    if not math.isfinite(amount) or amount <= 0:
         return None
     multiplier = {"": 1.0, "k": 1_000.0, "m": 1_000_000.0, "b": 1_000_000_000.0}[
         match.group("unit").lower()
     ]
-    return amount * multiplier
+    result = amount * multiplier
+    return result if math.isfinite(result) else None
 
 
 @dataclass(frozen=True)
@@ -906,11 +910,22 @@ def lint_task_files(
                         value,
                     )
                     continue
-                ceiling = (
-                    _positive_number(tier_ceiling.get(ceiling_keys[key]))
+                raw_ceiling = (
+                    tier_ceiling.get(ceiling_keys[key])
                     if isinstance(tier_ceiling, dict)
                     else None
                 )
+                ceiling = _positive_number(raw_ceiling) if raw_ceiling is not None else None
+                if raw_ceiling is not None and ceiling is None:
+                    _diagnostic(
+                        diagnostics,
+                        task,
+                        f"complexity_tier_ceilings.{fields.complexity_tier}.{ceiling_keys[key]}",
+                        "invalid_tier_ceiling",
+                        "positive finite numeric value",
+                        raw_ceiling,
+                    )
+                    continue
                 if ceiling is not None and normalized > ceiling:
                     _diagnostic(
                         diagnostics,

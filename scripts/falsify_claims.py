@@ -8,6 +8,7 @@ import ast
 import json
 import math
 from pathlib import Path
+import random
 from typing import Any, Mapping
 
 
@@ -31,6 +32,15 @@ class NumericExpressionError(ValueError):
 
 
 _POW_EXPONENT_LIMIT = 1024
+
+
+def _finite_arithmetic(value: float | bool) -> float | bool:
+    if isinstance(value, bool):
+        return value
+    number = float(value)
+    if not math.isfinite(number):
+        raise NumericExpressionError("arithmetic produced a non-finite intermediate")
+    return number
 
 
 def _guarded_pow(base: float, exponent: float) -> float:
@@ -60,9 +70,9 @@ def _evaluate_node(node: ast.AST, names: Mapping[str, float]) -> float | bool:
     if isinstance(node, ast.UnaryOp):
         value = _evaluate_node(node.operand, names)
         if isinstance(node.op, ast.USub):
-            return -float(value)
+            return _finite_arithmetic(-float(value))
         if isinstance(node.op, ast.UAdd):
-            return float(value)
+            return _finite_arithmetic(float(value))
         if isinstance(node.op, ast.Not):
             return not bool(value)
         raise NumericExpressionError("unsupported unary operator")
@@ -80,7 +90,7 @@ def _evaluate_node(node: ast.AST, names: Mapping[str, float]) -> float | bool:
         operation = operators.get(type(node.op))
         if operation is None:
             raise NumericExpressionError("unsupported binary operator")
-        return operation()
+        return _finite_arithmetic(operation())
     if isinstance(node, ast.BoolOp):
         values = [bool(_evaluate_node(value, names)) for value in node.values]
         if isinstance(node.op, ast.And):
@@ -116,7 +126,7 @@ def _evaluate_node(node: ast.AST, names: Mapping[str, float]) -> float | bool:
         if node.keywords:
             raise NumericExpressionError("keyword arguments are not allowed")
         arguments = [float(_evaluate_node(argument, names)) for argument in node.args]
-        return float(_FUNCTIONS[node.func.id](*arguments))
+        return _finite_arithmetic(float(_FUNCTIONS[node.func.id](*arguments)))
     raise NumericExpressionError(f"unsupported expression node: {type(node).__name__}")
 
 
@@ -162,13 +172,81 @@ def _sign_holds(value: float, expected: str, tolerance: float) -> bool:
     raise NumericExpressionError(f"unknown comparative-statics sign: {expected}")
 
 
+def _kernel_sample_points(
+    domain: object,
+    seed: object,
+    sample_count: object,
+) -> tuple[list[dict[str, float]], list[dict[str, object]]]:
+    failures: list[dict[str, object]] = []
+    if not isinstance(domain, dict) or not domain:
+        return [], [{"reason": "falsification_domain_invalid"}]
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        return [], [{"reason": "falsification_seed_invalid"}]
+    if sample_count is None:
+        count = 9
+    elif (
+        not isinstance(sample_count, int)
+        or isinstance(sample_count, bool)
+        or sample_count < 3
+        or sample_count > 128
+    ):
+        return [], [{"reason": "falsification_sample_count_invalid"}]
+    else:
+        count = sample_count
+
+    bounds: dict[str, tuple[float, float]] = {}
+    for name, raw_bounds in sorted(domain.items()):
+        if (
+            not isinstance(name, str)
+            or not name.isidentifier()
+            or not isinstance(raw_bounds, list)
+            or len(raw_bounds) != 2
+            or any(
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                for value in raw_bounds
+            )
+            or float(raw_bounds[0]) >= float(raw_bounds[1])
+        ):
+            failures.append(
+                {"reason": "falsification_domain_invalid", "name": name, "bounds": raw_bounds}
+            )
+            continue
+        bounds[name] = (float(raw_bounds[0]), float(raw_bounds[1]))
+    if failures:
+        return [], failures
+
+    rng = random.Random(seed)
+    permutations: dict[str, list[int]] = {}
+    for name in bounds:
+        order = list(range(count))
+        rng.shuffle(order)
+        permutations[name] = order
+    points: list[dict[str, float]] = []
+    for index in range(count):
+        point: dict[str, float] = {}
+        for name, (low, high) in bounds.items():
+            stratum = permutations[name][index]
+            point[name] = low + ((stratum + 0.5) / count) * (high - low)
+        points.append(point)
+    points.extend(
+        {
+            name: low if position == 0 else (low + high) / 2.0 if position == 1 else high
+            for name, (low, high) in bounds.items()
+        }
+        for position in range(3)
+    )
+    return points, []
+
+
 def evaluate_falsification_spec(spec: object) -> list[dict[str, object]]:
     """Return one diagnostic per invalid declaration or falsified sampled point."""
     if not isinstance(spec, dict):
         return [{"reason": "falsification_spec_not_object"}]
     inequalities = spec.get("inequalities")
     comparative_statics = spec.get("comparative_statics")
-    sample_points = spec.get("sample_points")
+    author_sample_points = spec.get("sample_points", [])
     failures: list[dict[str, object]] = []
     if not isinstance(inequalities, list):
         failures.append({"reason": "inequalities_not_list"})
@@ -176,12 +254,21 @@ def evaluate_falsification_spec(spec: object) -> list[dict[str, object]]:
     if not isinstance(comparative_statics, list):
         failures.append({"reason": "comparative_statics_not_list"})
         comparative_statics = []
-    if not isinstance(sample_points, list) or not sample_points:
-        failures.append({"reason": "sample_points_missing"})
-        return failures
+    if not inequalities and not comparative_statics:
+        failures.append({"reason": "falsification_spec_empty"})
+    kernel_points, kernel_failures = _kernel_sample_points(
+        spec.get("domain"),
+        spec.get("seed"),
+        spec.get("kernel_sample_count"),
+    )
+    failures.extend(kernel_failures)
+    if not isinstance(author_sample_points, list):
+        failures.append({"reason": "sample_points_not_list"})
+        author_sample_points = []
 
-    points: list[dict[str, float]] = []
-    for point_index, raw_point in enumerate(sample_points):
+    points = list(kernel_points)
+    for author_index, raw_point in enumerate(author_sample_points):
+        point_index = len(kernel_points) + author_index
         if not isinstance(raw_point, dict) or not raw_point:
             failures.append({"reason": "sample_point_not_object", "point_index": point_index})
             continue
@@ -308,6 +395,10 @@ def evaluate_falsification_spec(spec: object) -> list[dict[str, object]]:
                         float(evaluate_numeric_expression(expression, plus))
                         - float(evaluate_numeric_expression(expression, minus))
                     ) / (2.0 * step)
+                    if not math.isfinite(value):
+                        raise NumericExpressionError(
+                            "comparative-static calculation produced a non-finite intermediate"
+                        )
                 passed = _sign_holds(value, expected, tolerance)
             except NumericExpressionError as exc:
                 failures.append(
