@@ -3428,6 +3428,16 @@ def _step_reap(args: argparse.Namespace) -> dict[str, object]:
         )
         reopened_task = load_task(task.path, contract)
         _move_task_to_state_projection(repo, reopened_task)
+        # durably persist the reopen BEFORE releasing the ref: a kill between
+        # the two leaves backlog+expired-claim, which the next cycle releases
+        _persist_projection_changes(
+            repo=repo,
+            remote=args.remote,
+            base_branch=args.base_branch,
+            filenames=[task.path.name],
+            message=f"{task_id}: reopen orphaned",
+            strict=bool(args.unattended),
+        )
         reopened.append(task_id)
         _release(task_id, action.sha, action.lease_id, action.reason)
 
@@ -4024,21 +4034,34 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
                     fencing_failure = "stale_lease_chain"
             else:
                 events, _ = swarm_events.read_events(repo)
-                manifest_time = _parse_utc_iso(manifest.get("generated_at_utc"))
-                orderly_release = any(
-                    event.get("event") in {"claim_released", "orphan_claim_released"}
-                    and event.get("task_id") == task_id
-                    and (
-                        manifest_time is None
-                        or (
-                            _parse_utc_iso(event.get("ts_utc")) is not None
-                            and _parse_utc_iso(event.get("ts_utc")) >= manifest_time
-                        )
-                    )
-                    for event in events
-                )
-                if not orderly_release:
+                release_binds = False
+                later_epoch = False
+                seen_release = False
+                for event in events:
+                    if event.get("task_id") != task_id:
+                        continue
+                    name = event.get("event")
+                    if name in {"claim_released", "orphan_claim_released"}:
+                        released_sha = event.get("sha")
+                        if isinstance(released_sha, str) and (
+                            released_sha == manifest_claim_sha
+                            or _run(
+                                ["git", "merge-base", "--is-ancestor", manifest_claim_sha, released_sha],
+                                cwd=repo,
+                                capture=True,
+                                check=False,
+                            ).returncode
+                            == 0
+                        ):
+                            release_binds = True
+                            seen_release = True
+                            later_epoch = False
+                    elif name == "claim_created" and seen_release:
+                        later_epoch = True
+                if not release_binds:
                     fencing_failure = "missing_claim_without_release_record"
+                elif later_epoch:
+                    fencing_failure = "newer_claim_epoch_after_release"
         if fencing_failure is not None:
             _record_swarm_event(
                 repo,
@@ -4136,17 +4159,50 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
         branch_tip_sha = _run(
             ["git", "rev-parse", branch], cwd=repo, capture=True, check=True
         ).stdout.strip()
+        # every byte the binding trusts comes from the COMMITTED tip, never
+        # the mutable worktree
+        review_rel2 = review_path.relative_to(context["worktree"]).as_posix()
+        committed_review_cp = _run(
+            ["git", "show", f"{branch}:{review_rel2}"], cwd=repo, capture=True, check=False
+        )
+        committed_manifest_cp = _run(
+            ["git", "show", f"{branch}:{manifest_rel}"], cwd=repo, capture=True, check=False
+        )
+        if committed_review_cp.returncode != 0 or committed_manifest_cp.returncode != 0:
+            continue
+        try:
+            review = json.loads(committed_review_cp.stdout)
+            manifest = json.loads(committed_manifest_cp.stdout)
+        except json.JSONDecodeError:
+            continue
         reviewed_sha = review.get("reviewed_branch_sha")
         review_manifest_sha = review.get("manifest_sha256")
-        actual_manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        actual_manifest_sha = hashlib.sha256(
+            committed_manifest_cp.stdout.encode("utf-8")
+        ).hexdigest()
         tip_parent = _run(
             ["git", "rev-parse", f"{branch}^"], cwd=repo, capture=True, check=False
         ).stdout.strip()
         binding_failure: str | None = None
+        committed_review_sha256 = hashlib.sha256(
+            committed_review_cp.stdout.encode("utf-8")
+        ).hexdigest()
+        events_all, _ = swarm_events.read_events(repo)
+        journal_backed = any(
+            event.get("event") == "review_recorded"
+            and event.get("task_id") == task_id
+            and event.get("review_sha256") == committed_review_sha256
+            for event in events_all
+        )
         if not isinstance(review_manifest_sha, str) or review_manifest_sha != actual_manifest_sha:
             binding_failure = "manifest_content_changed_after_review"
         elif not isinstance(reviewed_sha, str) or reviewed_sha != tip_parent:
             binding_failure = "post_review_commits_present"
+        elif not journal_backed:
+            # the base journal is outside the executor sandbox: a review
+            # without a matching journal record was not written by any judge
+            # this control plane ran
+            binding_failure = "review_not_journal_backed"
         if binding_failure is not None:
             _record_swarm_event(
                 repo,
@@ -4444,7 +4500,18 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
                 check=False,
             )
             if cas_cp.returncode != 0:
-                _run(["git", "reset", "--hard", pre_merge_sha], cwd=repo, check=True)
+                done_tip = _git_head_sha(repo)
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "merge_cas_push_lost",
+                        "task_id": task_id,
+                        "expected_tip": done_tip,
+                    },
+                    escalation=True,
+                )
+                if _git_head_sha(repo) == done_tip:
+                    _run(["git", "reset", "--hard", pre_merge_sha], cwd=repo, check=True)
                 _record_swarm_event(
                     repo,
                     {
@@ -4879,14 +4946,18 @@ def _step_account(args: argparse.Namespace) -> dict[str, object]:
     spend, usage_records = _usage_records(repo)
     if spend is None or contract.budget_max_program_usd is None:
         reason = "usage_unavailable" if spend is None else "budget_unconfigured"
+        budget_set_but_unverifiable = (
+            spend is None and contract.budget_max_program_usd is not None
+        )
         _record_swarm_event(
             repo,
             {
-                "event": "account_no_data",
+                "event": "budget_unverifiable" if budget_set_but_unverifiable else "account_no_data",
                 "reason": reason,
                 "spend_usd": spend,
                 "usage_records": usage_records,
             },
+            escalation=budget_set_but_unverifiable,
         )
         return {
             "status": "no_data",
@@ -5206,7 +5277,10 @@ def _lease_heartbeat(*, repo: Path, remote: str, task_id: str):
         yield
         return
     ttl = claim.payload.get("lease_ttl_seconds")
-    interval = max(5, int(ttl) // 3) if isinstance(ttl, int) and ttl > 0 else 1200
+    if isinstance(ttl, int) and ttl > 0:
+        interval = max(1, min(int(ttl) // 3, int(ttl * 0.45)) or 1)
+    else:
+        interval = 1200
     stop = threading.Event()
 
     def _beat() -> None:
@@ -5994,6 +6068,9 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
         "outcome": outcome,
         "failures": check_failures,
         "review_log": review_log_relpath,
+        # the journal (outside the executor sandbox) anchors this review's
+        # exact content — the merge queue refuses reviews without it
+        "review_sha256": hashlib.sha256(review_log_path.read_bytes()).hexdigest(),
     }
     _record_swarm_event(
         repo,

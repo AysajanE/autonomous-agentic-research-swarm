@@ -318,6 +318,7 @@ def reconcile(repo: Path) -> dict:
             continue
         if event.get("event") == "merge_started":
             merge_intents[event_task] = event
+            merge_verified_ids.discard(event_task)
         elif event.get("event") == "merge_verified":
             merge_verified_ids.add(event_task)
         elif event.get("event") in {"merge_reverted", "merge_refused_non_ff"}:

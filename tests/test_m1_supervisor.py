@@ -216,6 +216,19 @@ class M1SupervisorTests(unittest.TestCase):
         )
         _git(worktree, "add", "-A")
         _git(worktree, "commit", "-m", f"{task_id}: approved_pending_merge")
+        review_rel = f"reports/status/reviews/{task_id}_20260329T010000Z.json"
+        committed_review = _git(worktree, "show", f"HEAD:{review_rel}").stdout
+        swarm_events.append_event(
+            root,
+            {
+                "event": "review_recorded",
+                "task_id": task_id,
+                "outcome": "approve",
+                "review_log": review_rel,
+                "review_sha256": _hashlib.sha256(committed_review.encode("utf-8")).hexdigest(),
+            },
+            actor_session="fixture-judge-session",
+        )
         return task_path, worktree, manifest_path
 
     def test_full_happy_path_claims_runs_judges_merges_and_cleans(self) -> None:
