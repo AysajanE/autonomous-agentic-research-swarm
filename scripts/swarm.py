@@ -63,6 +63,11 @@ EXECUTOR_LOG_SEGMENT_BYTES = 64 * 1024
 
 DEFAULT_REVIEW_MIN_SEPARATION_SECONDS = 60
 
+GATE_OUTPUT_SEGMENT_BYTES = 8 * 1024
+DEFAULT_GATE_INTERPRETER_ALLOWLIST = ("python", "python3", "make")
+DEFAULT_GATE_TIMEOUT_SECONDS = 600
+GATE_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM")
+
 # One actor session id per process: a review written by the same session that
 # produced the run manifest it reviews is invalid (§4.0 #17 actor separation).
 _ACTOR_SESSION_ID = os.environ.get("SWARM_ACTOR_SESSION", "").strip() or uuid.uuid4().hex
@@ -144,6 +149,8 @@ class FrameworkContract:
     judge_review_dir: Path
     release_manifest_pattern: str | None
     review_min_separation_seconds: int
+    gate_interpreter_allowlist: tuple[str, ...]
+    gate_timeout_seconds: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -521,6 +528,16 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
     except (TypeError, ValueError):
         review_min_separation_seconds = DEFAULT_REVIEW_MIN_SEPARATION_SECONDS
 
+    gate_execution = raw.get("gate_execution")
+    gate_interpreter_allowlist = tuple(
+        _coerce_str_list(gate_execution.get("interpreter_allowlist") if isinstance(gate_execution, dict) else None)
+        or list(DEFAULT_GATE_INTERPRETER_ALLOWLIST)
+    )
+    try:
+        gate_timeout_seconds = int(gate_execution.get("timeout_seconds")) if isinstance(gate_execution, dict) else DEFAULT_GATE_TIMEOUT_SECONDS
+    except (TypeError, ValueError):
+        gate_timeout_seconds = DEFAULT_GATE_TIMEOUT_SECONDS
+
     return FrameworkContract(
         repo_root=repo,
         control_plane_root=control_plane_root,
@@ -540,6 +557,8 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
         judge_review_dir=_resolve_repo_relative_path(repo, judge_review_dir_raw),
         release_manifest_pattern=release_manifest_pattern,
         review_min_separation_seconds=review_min_separation_seconds,
+        gate_interpreter_allowlist=gate_interpreter_allowlist,
+        gate_timeout_seconds=gate_timeout_seconds,
     )
 
 
@@ -1651,27 +1670,124 @@ def _codex_exec_cmd(
     return cmd
 
 
-def _run_gates(repo: Path, gates: list[str]) -> tuple[bool, list[dict[str, object]]]:
+_SANDBOX_DENY_NETWORK_PROFILE = "(version 1)(allow default)(deny network*)"
+_NETWORK_DENY_WRAPPER: tuple[str, ...] | None | bool = False  # False = unprobed
+
+
+def _network_deny_wrapper() -> tuple[str, ...] | None:
+    """Argv prefix that denies network to the child process tree, or None when
+    the platform offers no supported mechanism. Probed once per process; the
+    EFFECTIVE state is recorded per gate — enforcement is never assumed."""
+    global _NETWORK_DENY_WRAPPER
+    if _NETWORK_DENY_WRAPPER is not False:
+        return _NETWORK_DENY_WRAPPER
+    wrapper: tuple[str, ...] | None = None
+    if sys.platform == "darwin" and _which_or_none("sandbox-exec"):
+        candidate = ("sandbox-exec", "-p", _SANDBOX_DENY_NETWORK_PROFILE)
+        if subprocess.run([*candidate, "true"], capture_output=True, text=True).returncode == 0:
+            wrapper = candidate
+    elif sys.platform.startswith("linux") and _which_or_none("unshare"):
+        if subprocess.run(["unshare", "-n", "true"], capture_output=True, text=True).returncode == 0:
+            wrapper = ("unshare", "-n")
+    _NETWORK_DENY_WRAPPER = wrapper
+    return wrapper
+
+
+def _gate_environment() -> dict[str, str]:
+    env = {key: os.environ[key] for key in GATE_ENV_ALLOWLIST if key in os.environ}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _clip_gate_output(output: str) -> tuple[str, str]:
+    raw = output or ""
+    head = raw[:GATE_OUTPUT_SEGMENT_BYTES]
+    tail = raw[-GATE_OUTPUT_SEGMENT_BYTES:] if len(raw) > GATE_OUTPUT_SEGMENT_BYTES else ""
+    return head, tail
+
+
+def _run_gates(
+    repo: Path,
+    gates: list[str],
+    *,
+    interpreter_allowlist: tuple[str, ...] = DEFAULT_GATE_INTERPRETER_ALLOWLIST,
+    timeout_seconds: int = DEFAULT_GATE_TIMEOUT_SECONDS,
+) -> tuple[bool, list[dict[str, object]]]:
+    """Constrained gate execution (§4.0 #12 + #18): no shell, interpreter
+    allowlist, stripped environment, per-gate timeout, network denied where
+    the OS supports it, head+tail output capture."""
     outputs: list[dict[str, object]] = []
     all_ok = True
+    deny_wrapper = _network_deny_wrapper()
+
     for gate in gates:
-        cp = subprocess.run(
-            gate,
-            cwd=str(repo),
-            shell=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        outputs.append(
-            {
-                "command": gate,
-                "returncode": cp.returncode,
-                "output_tail": (cp.stdout or "")[-4000:],
-            }
-        )
-        if cp.returncode != 0:
+        started = time.monotonic()
+        record: dict[str, object] = {
+            "command": gate,
+            "argv": None,
+            "returncode": None,
+            "duration_seconds": None,
+            "timed_out": False,
+            "network_disabled": deny_wrapper is not None,
+            "network_disable_method": deny_wrapper[0] if deny_wrapper else "none",
+            "output_head": "",
+            "output_tail": "",
+            "constraint_violation": None,
+        }
+        try:
+            argv = shlex.split(gate)
+        except ValueError as exc:
+            record["constraint_violation"] = f"gate_parse_error:{exc}"
+            outputs.append(record)
             all_ok = False
+            continue
+        if not argv:
+            record["constraint_violation"] = "gate_empty_command"
+            outputs.append(record)
+            all_ok = False
+            continue
+        record["argv"] = argv
+
+        interpreter = Path(argv[0]).name
+        if interpreter not in set(interpreter_allowlist):
+            record["constraint_violation"] = f"gate_interpreter_not_allowlisted:{interpreter}"
+            outputs.append(record)
+            all_ok = False
+            continue
+
+        full_argv = [*(deny_wrapper or ()), *argv]
+        try:
+            cp = subprocess.run(
+                full_argv,
+                cwd=str(repo),
+                shell=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=_gate_environment(),
+                timeout=timeout_seconds,
+            )
+            record["returncode"] = cp.returncode
+            head, tail = _clip_gate_output(cp.stdout or "")
+            record["output_head"] = head
+            record["output_tail"] = tail
+            if cp.returncode != 0:
+                all_ok = False
+        except subprocess.TimeoutExpired as exc:
+            record["timed_out"] = True
+            captured = exc.stdout
+            if isinstance(captured, bytes):
+                captured = captured.decode("utf-8", errors="replace")
+            head, tail = _clip_gate_output(captured or "")
+            record["output_head"] = head
+            record["output_tail"] = tail
+            all_ok = False
+        except OSError as exc:
+            record["constraint_violation"] = f"gate_exec_error:{exc}"
+            all_ok = False
+        record["duration_seconds"] = round(time.monotonic() - started, 3)
+        outputs.append(record)
+
     return all_ok, outputs
 
 
@@ -2074,7 +2190,12 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     if frontmatter_tampered:
         blocked_reasons.append("frontmatter_tampered")
 
-    gate_ok, gate_outputs = _run_gates(repo, task.gates)
+    gate_ok, gate_outputs = _run_gates(
+        repo,
+        task.gates,
+        interpreter_allowlist=contract.gate_interpreter_allowlist,
+        timeout_seconds=contract.gate_timeout_seconds,
+    )
     if not gate_ok:
         blocked_reasons.append("gates_failed")
 
@@ -2376,7 +2497,12 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
     if task.state != "ready_for_review":
         raise SystemExit(f"task_not_ready_for_review:{task.task_id}:{task.state}")
 
-    gate_ok, gate_outputs = _run_gates(repo, task.gates)
+    gate_ok, gate_outputs = _run_gates(
+        repo,
+        task.gates,
+        interpreter_allowlist=contract.gate_interpreter_allowlist,
+        timeout_seconds=contract.gate_timeout_seconds,
+    )
     outputs_ok, output_failures = _check_declared_outputs_exist(repo=repo, task=task)
     manifest_failures = required_manifest_failures(repo, task)
 
