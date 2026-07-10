@@ -1577,10 +1577,15 @@ def _reconnaissance_line_count(task_text: str) -> int:
         )
         if matched_prefix is not None:
             after = line.split(":", 1)[1].strip() if ":" in line else ""
-            words = [w for w in re.split(r"\s+", after) if w.strip(".,;:!?-")]
-            normalized = [w.strip(".,;:!?-").lower() for w in words]
-            placeholder_vocab = {"tbd", "tbc", "todo", "pending", "unknown", "n/a", "na", "none", "wip", "fixme", "xxx", "???"}
-            non_space = len(after.replace(" ", ""))
+            def _norm_token(token: str) -> str:
+                # strip markdown/wrapping punctuation so `TBD`, **pending**,
+                # (unknown), _todo_ normalize to the bare placeholder word
+                return re.sub(r"[^a-z0-9/]+", "", token.lower())
+
+            words = [w for w in re.split(r"\s+", after) if _norm_token(w)]
+            normalized = [_norm_token(w) for w in words]
+            placeholder_vocab = {"tbd", "tbc", "todo", "pending", "unknown", "na", "none", "wip", "fixme", "xxx"}
+            non_space = len(re.sub(r"[^a-z0-9]", "", after.lower()))
             distinct = {w for w in normalized if w}
             if (
                 len(words) < 2

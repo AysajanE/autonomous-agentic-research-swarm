@@ -668,5 +668,17 @@ class Tranche5RegressionsTest(unittest.TestCase):
             self.assertTrue((root / ".orchestrator/backlog/T200_task.md").exists())
 
 
+
+    def test_recon_markdown_wrapped_placeholders_do_not_count(self) -> None:
+        text = (
+            "## Reconnaissance\n"
+            "- Scope understanding: `TBD`\n"
+            "- Risks and unknowns: **pending**\n"
+            "- Decomposition pressure assessment: (unknown)\n"
+            "## Status\n"
+        )
+        self.assertLess(swarm._reconnaissance_line_count(text), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
