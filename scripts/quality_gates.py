@@ -19,6 +19,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 from pathlib import Path
 import re
 import subprocess
@@ -3271,16 +3272,17 @@ def _outcome_reported_anchor_failure(
     base, _, fragment = reported.partition("#")
     base = base.strip()
     safe = _safe_repo_relative_path(base)
-    # The anchor must live on the manuscript/deviations surface (reports/ or
-    # docs/prereg/) and be a non-symlink git-tracked file — an outcome cannot be
-    # "reported" by pointing at an arbitrary or untracked working-tree file that
-    # merely happens to contain the id string.
-    on_report_surface = base.startswith("reports/") or base.startswith("docs/prereg/")
+    # The anchor must be a non-symlink git-tracked file on the MANUSCRIPT surface
+    # (reports/paper/ — the paper and its deviations appendix). Pointing at the
+    # outcomes registry itself (docs/prereg/outcomes.yaml), a lock, a log, or a
+    # status artifact is not "reporting" — those necessarily contain the id and
+    # would make the check self-satisfying.
+    on_manuscript_surface = base.startswith("reports/paper/")
     if (
         safe is None
         or not safe.is_file()
         or safe.is_symlink()
-        or not on_report_surface
+        or not on_manuscript_surface
         or not _git_path_is_tracked(safe.as_posix(), Path.cwd().resolve())
     ):
         return _science_failure(
@@ -3864,7 +3866,13 @@ def gate_claim_evidence_ledger() -> GateResult:
                     )
                 )
             normalized_command = " ".join(command.strip().split())
-            command_tokens = normalized_command.split()
+            # shlex so a quoted path (python "scripts/quality_gates.py") is
+            # canonicalized like an unquoted one — quotes must not evade the
+            # self-reference check.
+            try:
+                command_tokens = shlex.split(command)
+            except ValueError:
+                command_tokens = normalized_command.split()
             # Self-referential by parsed semantics, not three literal strings:
             # any `make gate` target or any invocation of the gate runner itself
             # (with or without flags like --json/--gate, and with the path in any
@@ -4135,12 +4143,12 @@ _REPORTABLE_UNIT_RE = re.compile(
     r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
     r"(?:"
     r"\s*%(?!\w)"
-    r"|\s*-?\s*(?:ETH|USD|EUR|GBP|bps?|basis\s+points?|days?|weeks?|months?|years?|"
-    r"instances?|seeds?|runs?|x)\b"
-    # count nouns tolerate ONE optional descriptor word ("12,563 rent-component
-    # rows", "12,434 panel rows") so a reported count can't dodge the ledger by
-    # inserting an adjective between the number and the noun.
-    r"|\s+(?:[A-Za-z][\w-]*\s+)?(?:rollup-days?|rollups?|observations?|rows?|dates?)\b"
+    r"|\s*-?\s*(?:ETH|USD|EUR|GBP|bps?|basis\s+points?|x)\b"
+    # count/time nouns tolerate ONE optional descriptor word ("12,563
+    # rent-component rows", "7 consecutive days") so a reported quantity can't
+    # dodge the ledger by inserting an adjective between the number and the noun.
+    r"|\s+(?:[A-Za-z][\w-]*\s+)?(?:rollup-days?|rollups?|observations?|rows?|dates?|"
+    r"days?|weeks?|months?|years?|instances?|seeds?|runs?)\b"
     r")",
     flags=re.IGNORECASE,
 )
@@ -4148,16 +4156,23 @@ _REPORTABLE_DECIMAL_RE = re.compile(r"(?<![\w.])[-+]?\d+\.\d+(?![\w.])")
 
 
 def _normalize_reportable_numeric(value: object) -> str:
-    """Reduce a reportable literal to its numeric core (sign + digits + optional
-    decimal + optional %), dropping thousands separators and any trailing
-    unit/descriptor words — so `1,559 dates`, `1,559 daily observations`, and
-    `1559` all register as the same value, and a claim's declared literal need
-    not match the manuscript's exact phrasing."""
+    """Normalize a reportable literal to `<value>|<unit-class>` so binding is
+    both descriptor-independent AND unit-strict: `1,559 daily observations` and
+    `1,559 dates` differ (different head noun), while `14 ETH` can NEVER bind to
+    a registered `14 rollups` (different unit) — the numeric-core-only laundering
+    hole. The unit class is `%`, a currency, `x`, or the trailing head noun
+    (last alphabetic token, so an intervening descriptor is ignored); a bare
+    number has an empty class."""
     text = str(value)
     match = re.match(r"\s*([-+]?\d[\d,]*(?:\.\d+)?)\s*(%?)", text)
     if match is None:
         return re.sub(r"\s+", "", text).replace(",", "").casefold()
-    return match.group(1).replace(",", "") + match.group(2)
+    number = match.group(1).replace(",", "")
+    if match.group(2) == "%":
+        return f"{number}|%"
+    tail_words = re.findall(r"[A-Za-z]+", text[match.end():])
+    unit = tail_words[-1].casefold() if tail_words else ""
+    return f"{number}|{unit}"
 
 
 _CITATION_KEY_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9_:.\-]*)")

@@ -55,29 +55,39 @@ def _artifact_numbers(path: Path) -> list[float]:
     return numbers
 
 
-def _parse_literal(literal: str) -> tuple[float, bool] | None:
-    """Return (value, is_percent) for a registered literal, or None."""
+def _parse_literal(literal: str):
+    """Return (value, is_percent, decimals, is_count) for a registered literal,
+    retaining LEXICAL precision (decimals counted from the string, not the
+    float, so trailing zeros survive) and count-type (no decimal, no %), or None.
+    """
     match = re.match(r"\s*([-+]?\d[\d,]*(?:\.\d+)?)\s*(%?)", str(literal))
     if match is None:
         return None
+    digits = match.group(1).replace(",", "")
+    is_percent = match.group(2) == "%"
+    decimals = len(digits.split(".")[1]) if "." in digits else 0
+    is_count = decimals == 0 and not is_percent
     try:
-        return float(match.group(1).replace(",", "")), match.group(2) == "%"
+        return float(digits), is_percent, decimals, is_count
     except ValueError:
         return None
 
 
-def _reproduced(value: float, is_percent: bool, numbers: list[float]) -> bool:
-    decimals = len(f"{value}".split(".")[1]) if "." in f"{value}" else 0
-    targets = [value]
-    if is_percent:
-        targets.append(value / 100.0)  # artifact may store a fraction
+def _reproduced(value: float, is_percent: bool, decimals: int, is_count: bool, numbers: list[float]) -> bool:
     for candidate in numbers:
-        for target in targets:
-            # round the artifact number to the literal's stated precision
-            if is_percent and abs(round(candidate * 100.0, decimals) - value) < 10 ** (-decimals) / 2:
+        if is_count:
+            # exact integer equality — 14 must NOT be reproduced by 14.04
+            if float(candidate).is_integer() and int(candidate) == int(round(value)):
                 return True
-            if abs(round(candidate, decimals) - round(target, decimals)) < 10 ** (-decimals) / 2:
+        elif is_percent:
+            # artifact may store the percent (12.37) or the fraction (0.1237);
+            # both must reproduce at the literal's stated decimal precision
+            if round(candidate, decimals) == round(value, decimals):
                 return True
+            if round(candidate * 100.0, decimals) == round(value, decimals):
+                return True
+        elif round(candidate, decimals) == round(value, decimals):
+            return True
     return False
 
 
@@ -99,9 +109,9 @@ def main() -> int:
             if parsed is None:
                 diffs.append(f"{claim.get('claim_id')}: unparseable literal {literal!r}")
                 continue
-            value, is_percent = parsed
+            value, is_percent, decimals, is_count = parsed
             checked += 1
-            if not _reproduced(value, is_percent, numbers):
+            if not _reproduced(value, is_percent, decimals, is_count, numbers):
                 diffs.append(
                     f"{claim.get('claim_id')}: literal {literal!r} not reproduced by "
                     f"{[a['path'] for a in artifacts]}"

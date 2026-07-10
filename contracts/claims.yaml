@@ -20,7 +20,7 @@
       "citation_key": "rollup_panel_validation",
       "type": "methodological",
       "statement": "The authoritative validated panel contains 12,434 rollup-day rows across 14 rollups and 1,559 dates over the 2022-01-01 through 2026-04-08 window; the rent-component surface has 12,563 rows (the denominator-keyed panel omits rollup-days missing vendor fee denominators).",
-      "manuscript_numeric_literals": ["12,434 rollup", "14 rollups", "1,559 dates", "12,563 rows"],
+      "manuscript_numeric_literals": ["12,434 rows", "14 rollups", "1,559 dates", "1,559 observations", "12,563 rows"],
       "supporting_artifacts": [
         {"path": "reports/validation/rollup_panel_validation.json", "sha256": "9e2489263099da247582a775d0fb193baef76a108c6919e4a73809ae2c36d66c"}
       ],

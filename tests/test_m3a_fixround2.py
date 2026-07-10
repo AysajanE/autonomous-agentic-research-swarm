@@ -76,12 +76,49 @@ class FalsifyMathDomainTest(unittest.TestCase):
         with self.assertRaises(falsify_claims.NumericExpressionError):
             falsify_claims.evaluate_numeric_expression("x\x00", {"x": 1.0})
 
+    def test_deeply_nested_expression_rejected_not_crash(self) -> None:
+        # A many-term expression parses but would blow the stack in evaluation;
+        # the node-count guard rejects it cleanly (R3 finding 1).
+        expr = "+".join(["1"] * 1500) + " > 0"
+        with self.assertRaises(falsify_claims.NumericExpressionError):
+            falsify_claims.evaluate_numeric_expression(expr, {})
+
+
+class ManuscriptUnitBindingTest(unittest.TestCase):
+    def test_same_value_different_unit_does_not_launder(self) -> None:
+        # "14 ETH" must NOT bind to a registered "14 rollups" (R3 finding 3).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            write_text(root, "reports/paper/index.qmd", "# R\n\nTotal was 14 ETH [@panel].\n")
+            claim = _valid_claim(root, claim_type="methodological")
+            claim["citation_key"] = "panel"
+            claim["manuscript_numeric_literals"] = ["14 rollups"]
+            _write_claims(root, [claim])
+            with chdir(root):
+                red = quality_gates.gate_claim_evidence_ledger()
+            self.assertIn("unregistered_manuscript_numeric", _reasons(red))
+            claim["manuscript_numeric_literals"] = ["14 ETH"]
+            _write_claims(root, [claim])
+            with chdir(root):
+                self.assertTrue(quality_gates.gate_claim_evidence_ledger().ok)
+
+
+class VerifyReferencePrecisionTest(unittest.TestCase):
+    def test_count_and_percent_precision_is_sound(self) -> None:
+        import verify_reference_claims as verify
+        self.assertFalse(verify._reproduced(*verify._parse_literal("14"), [14.04]))
+        self.assertFalse(verify._reproduced(*verify._parse_literal("10.00%"), [0.1004]))
+        self.assertTrue(verify._reproduced(*verify._parse_literal("14 rows"), [14.0]))
+        self.assertTrue(verify._reproduced(*verify._parse_literal("12.37%"), [0.1236942]))
+
 
 class VerificationCommandSemanticsTest(unittest.TestCase):
     def test_self_referential_gate_runner_with_flags_is_rejected(self) -> None:
         for command in (
             "python scripts/quality_gates.py --json",
             "python ./scripts/quality_gates.py --json",  # non-canonical path (R2-10)
+            'python "scripts/quality_gates.py" --json',  # quoted path (R3 finding 6)
         ):
             with self.subTest(command=command), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp) / "repo"
@@ -249,17 +286,21 @@ class OutcomeAnchorRestrictionTest(unittest.TestCase):
             scaffold_runtime_repo(root)
             _write_lock(root, "2b", "# Plan\n\n- H1: Primary hypothesis\n")
             write_text(root, "contracts/scratch_note.md", "H1 mentioned here\n")
-            write_json(
-                root,
-                "docs/prereg/outcomes.yaml",
-                {
-                    "schema_version": "research_swarm.prereg_outcomes.v1",
-                    "outcomes": [{"hypothesis_id": "H1", "outcome": "supported", "reported_in": "contracts/scratch_note.md"}],
-                },
-            )
-            with chdir(root):
-                result = quality_gates.gate_prereg_conformance()
-            self.assertIn("outcome_reported_in_unresolvable", _reasons(result))
+            for anchor in (
+                "contracts/scratch_note.md",       # off the manuscript surface
+                "docs/prereg/outcomes.yaml",        # the registry self-satisfies (R3 finding 4)
+            ):
+                write_json(
+                    root,
+                    "docs/prereg/outcomes.yaml",
+                    {
+                        "schema_version": "research_swarm.prereg_outcomes.v1",
+                        "outcomes": [{"hypothesis_id": "H1", "outcome": "supported", "reported_in": anchor}],
+                    },
+                )
+                with chdir(root):
+                    result = quality_gates.gate_prereg_conformance()
+                self.assertIn("outcome_reported_in_unresolvable", _reasons(result), anchor)
 
 
 if __name__ == "__main__":

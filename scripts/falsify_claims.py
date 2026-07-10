@@ -32,6 +32,7 @@ class NumericExpressionError(ValueError):
 
 
 _POW_EXPONENT_LIMIT = 1024
+_MAX_EXPRESSION_NODES = 400
 
 
 def _finite_arithmetic(value: float | bool) -> float | bool:
@@ -140,14 +141,19 @@ def evaluate_numeric_expression(expression: str, point: Mapping[str, float]) -> 
         # nesting — all must degrade to a clean falsification error, never an
         # uncaught traceback out of main().
         raise NumericExpressionError(f"invalid expression: {exc}") from exc
+    # Bound the tree before recursive evaluation — a many-term expression parses
+    # fine but would blow the stack in _evaluate_node (RecursionError escaping
+    # the whole gate path). Reject up front by node count.
+    if sum(1 for _ in ast.walk(tree)) > _MAX_EXPRESSION_NODES:
+        raise NumericExpressionError("expression exceeds the node limit")
     try:
         value = _evaluate_node(tree, point)
-    except (ArithmeticError, OverflowError, ValueError, TypeError) as exc:
+    except (ArithmeticError, OverflowError, ValueError, TypeError, RecursionError, MemoryError) as exc:
         # ValueError: math-domain errors (sqrt(-1), log(0), log(-1)).
         # TypeError: float() of a complex result, e.g. (-2.0) ** 0.5 or a
-        # builtin pow() that yields a complex — a kernel-sampled boundary point
-        # must degrade to a clean falsification error, never an uncaught
-        # traceback that wedges the whole gate suite.
+        # builtin pow() that yields a complex. Recursion/MemoryError: pathological
+        # depth — a kernel-sampled boundary point must degrade to a clean
+        # falsification error, never a traceback that wedges the gate suite.
         raise NumericExpressionError(f"numeric evaluation failed: {exc}") from exc
     if isinstance(value, float) and not math.isfinite(value):
         raise NumericExpressionError("expression returned a non-finite value")
