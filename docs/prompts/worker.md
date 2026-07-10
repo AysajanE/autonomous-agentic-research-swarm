@@ -34,6 +34,7 @@ You execute exactly one assigned task in an isolated branch/worktree.
 - Workstream: `{workstream}`
 - Task kind: `{task_kind}`
 - Network enabled: `{allow_network}`
+- Reconnaissance required: `{recon_required}`
 - Repair context: `{repair_context}`
 
 ### Allowed paths

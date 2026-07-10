@@ -24,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import datetime as dt
 import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Iterable, Mapping, Sequence
@@ -91,7 +92,16 @@ def _parse_new_scalar(value: str) -> object:
     representation so existing task files remain byte-compatible at the parser
     boundary.
     """
-    stripped = value.strip().strip("'\"")
+    stripped = value.strip()
+    if stripped.startswith('"') and stripped.endswith('"'):
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(parsed, str):
+                return parsed
+    stripped = stripped.strip("'\"")
     lowered = stripped.lower()
     if lowered == "true":
         return True
@@ -110,6 +120,33 @@ def _parse_new_scalar(value: str) -> object:
     return stripped
 
 
+def _split_inline_mapping_items(value: str) -> list[str] | None:
+    items: list[str] = []
+    start = 0
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote is not None:
+            escaped = True
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char == ",":
+            items.append(value[start:index].strip())
+            start = index + 1
+    if quote is not None:
+        return None
+    items.append(value[start:].strip())
+    return items
+
+
 def _split_inline_mapping(value: str) -> dict[str, object] | None:
     if not (value.startswith("{") and value.endswith("}")):
         return None
@@ -117,7 +154,10 @@ def _split_inline_mapping(value: str) -> dict[str, object] | None:
     if not inner:
         return {}
     out: dict[str, object] = {}
-    for item in inner.split(","):
+    items = _split_inline_mapping_items(inner)
+    if items is None:
+        return None
+    for item in items:
         if ":" not in item:
             return None
         key, raw_value = item.split(":", 1)
@@ -362,6 +402,11 @@ class TaskV2Fields:
             return None
         return tuple(value)
 
+    @property
+    def triage(self) -> Mapping[str, object] | None:
+        value = self.frontmatter.get("triage")
+        return value if isinstance(value, dict) else None
+
 
 @dataclass(frozen=True)
 class TaskLintDiagnostic:
@@ -415,13 +460,24 @@ def lint_task_files(
     repo_root: Path,
     network_workstreams: Iterable[str],
     v1_exemptions: Mapping[str, Mapping[str, object]],
+    task_texts: Mapping[Path, str] | None = None,
 ) -> list[TaskLintDiagnostic]:
-    """Lint a complete task set so validation tasks can resolve construction inputs."""
+    """Lint a complete task set so validation tasks can resolve construction inputs.
+
+    ``task_texts`` supplies proposed content for paths that must be validated
+    before a Planner write reaches disk.
+    """
+    proposed_texts = {
+        Path(path).resolve(): text for path, text in (task_texts or {}).items()
+    }
     parsed: dict[Path, dict[str, object] | None] = {}
     tasks_by_id: dict[str, Mapping[str, object]] = {}
     for path in task_paths:
         try:
-            frontmatter = parse_task_frontmatter(path.read_text(encoding="utf-8"))
+            text = proposed_texts.get(path.resolve())
+            if text is None:
+                text = path.read_text(encoding="utf-8")
+            frontmatter = parse_task_frontmatter(text)
         except OSError:
             frontmatter = None
         parsed[path] = frontmatter
@@ -454,7 +510,11 @@ def lint_task_files(
                 exemption = v1_exemptions[rel_path]
                 expected_sha = _string(exemption.get("sha256"))
                 if exemption.get("schema_version") != "fixture":
-                    actual_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+                    proposed = proposed_texts.get(path.resolve())
+                    actual_bytes = (
+                        proposed.encode("utf-8") if proposed is not None else path.read_bytes()
+                    )
+                    actual_sha = hashlib.sha256(actual_bytes).hexdigest()
                     if expected_sha is None or actual_sha != expected_sha:
                         _diagnostic(
                             diagnostics,
@@ -534,6 +594,49 @@ def lint_task_files(
                 "true or false",
                 frontmatter.get("recon_required"),
             )
+
+        if "triage" in frontmatter:
+            triage = fields.triage
+            if triage is None:
+                _diagnostic(
+                    diagnostics,
+                    task,
+                    "triage",
+                    "invalid_triage",
+                    "{status: confirmed|split, by: planner, note: non-empty string}",
+                    frontmatter.get("triage"),
+                )
+            else:
+                status = _string(triage.get("status"))
+                by = _string(triage.get("by"))
+                note = _string(triage.get("note"))
+                if status not in {"confirmed", "split"}:
+                    _diagnostic(
+                        diagnostics,
+                        task,
+                        "triage.status",
+                        "invalid_triage_status",
+                        "confirmed or split",
+                        status,
+                    )
+                if by != "planner":
+                    _diagnostic(
+                        diagnostics,
+                        task,
+                        "triage.by",
+                        "invalid_triage_actor",
+                        "planner",
+                        by,
+                    )
+                if note is None:
+                    _diagnostic(
+                        diagnostics,
+                        task,
+                        "triage.note",
+                        "empty_triage_note",
+                        "non-empty string",
+                        note,
+                    )
 
         criteria = fields.success_criteria
         if not criteria:

@@ -57,8 +57,11 @@ import swarm_events
 import sweep_tasks
 from swarm_taskfile import WorktreeCollisionError
 from swarm_taskfile import REQUIRED_FRONTMATTER_KEYS
+from swarm_taskfile import TASK_SCHEMA_VERSION
+from swarm_taskfile import TaskV2Fields
 from swarm_taskfile import extract_section as _extract_section
 from swarm_taskfile import lint_task_files
+from swarm_taskfile import parse_wall_clock_seconds
 from swarm_taskfile import parse_status_value as _parse_status_value
 from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 from swarm_taskfile import parse_task_id_from_branch as _parse_task_id_from_branch
@@ -70,6 +73,8 @@ SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
 JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
 MOCK_TRANSCRIPT_SCHEMA_VERSION = "research_swarm.mock_transcript.v1"
 EXECUTOR_SESSION_SCHEMA_VERSION = "research_swarm.executor_session.v1"
+MOCK_PLANNER_SCHEMA_VERSION = "research_swarm.mock_planner.v1"
+PLAN_APPROVAL_PENDING_PATH = Path(".swarm/plan_approval_pending.json")
 
 EXECUTOR_LOG_MAX_BYTES = 128 * 1024
 EXECUTOR_LOG_SEGMENT_BYTES = 64 * 1024
@@ -189,6 +194,13 @@ class ExecutorOutcome:
     wall_clock_seconds: float
     usage: dict[str, object] | None
     transcript_path: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class PlannerOutcome:
+    returncode: int
+    stdout: str
+    proposals: list[dict[str, object]]
 
 
 def _utc_now_iso() -> str:
@@ -512,6 +524,88 @@ def _execute_task(
         usage=usage,
         transcript_path=transcript_path,
     )
+
+
+def _planner_trigger_id(context: dict[str, object]) -> str:
+    value = context.get("trigger_id")
+    if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+        raise ValueError("planner_trigger_id_invalid")
+    return value
+
+
+def _invoke_planner(
+    *,
+    mode: str,
+    context: dict[str, object],
+    repo: Path,
+    args: argparse.Namespace,
+) -> PlannerOutcome:
+    """Invoke a configured Planner backend without granting it filesystem writes."""
+    backend = getattr(args, "planner_backend", "mock")
+    trigger_id = _planner_trigger_id(context)
+    if backend == "mock":
+        relpath = f".orchestrator/mock_planner/{mode}_{trigger_id}.json"
+        path = repo / relpath
+        if not path.is_file():
+            return PlannerOutcome(
+                returncode=1,
+                stdout=f"mock_planner_missing:{relpath}",
+                proposals=[],
+            )
+        try:
+            payload = json.loads(_read_text(path))
+            if not isinstance(payload, dict):
+                raise ValueError("mock_planner_not_object")
+            if payload.get("schema_version") != MOCK_PLANNER_SCHEMA_VERSION:
+                raise ValueError(
+                    f"mock_planner_schema_invalid:{payload.get('schema_version')}"
+                )
+            proposals = payload.get("proposals")
+            returncode = payload.get("returncode")
+            stdout = payload.get("stdout", "")
+            if not isinstance(proposals, list) or not all(
+                isinstance(proposal, dict) for proposal in proposals
+            ):
+                raise ValueError("mock_planner_proposals_invalid")
+            if not isinstance(returncode, int) or isinstance(returncode, bool):
+                raise ValueError("mock_planner_returncode_invalid")
+            if not isinstance(stdout, str):
+                raise ValueError("mock_planner_stdout_invalid")
+            return PlannerOutcome(
+                returncode=returncode,
+                stdout=stdout,
+                proposals=[dict(proposal) for proposal in proposals],
+            )
+        except Exception as exc:
+            detail = str(exc).replace("\n", " ").strip()
+            return PlannerOutcome(
+                returncode=1,
+                stdout=f"mock_planner_error:{type(exc).__name__}:{detail}",
+                proposals=[],
+            )
+
+    if backend == "claude":
+        try:
+            framework = json.loads(_read_text(repo / "contracts" / "framework.json"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("planner_backend_unavailable") from exc
+        executors = framework.get("executors") if isinstance(framework, dict) else None
+        config = executors.get("planner") if isinstance(executors, dict) else None
+        if not isinstance(config, dict) or config.get("backend") != "claude":
+            raise RuntimeError("planner_backend_unavailable")
+        executable = config.get("command", "claude")
+        model = config.get("model")
+        profile = config.get("profile")
+        if not isinstance(executable, str) or not executable.strip() or not isinstance(model, str) or not model.strip():
+            raise RuntimeError("planner_backend_unavailable")
+        argv = [executable.strip(), "--model", model.strip()]
+        if isinstance(profile, str) and profile.strip():
+            argv.extend(["--profile", profile.strip()])
+        # M2 Batch B validates configuration and construction only. The real
+        # read-only Claude wrapper is intentionally supplied by the owner batch.
+        raise RuntimeError(f"planner_backend_unavailable:{shlex.join(argv)}")
+
+    raise ValueError(f"unsupported_planner_backend:{backend}")
 
 
 def _executor_output_bytes(output: object) -> bytes:
@@ -1128,18 +1222,67 @@ def _task_summary(task: Task) -> dict[str, object]:
     }
 
 
+def _load_v1_task_exemptions(repo: Path) -> dict[str, dict[str, object]]:
+    exemptions_path = repo / "contracts" / "historical_exemptions.json"
+    exemptions: dict[str, dict[str, object]] = {}
+    try:
+        payload = json.loads(_read_text(exemptions_path))
+    except (OSError, json.JSONDecodeError):
+        return exemptions
+    if not isinstance(payload, dict):
+        return exemptions
+    for entry in payload.get("tasks", []):
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+            exemptions[entry["path"]] = entry
+    return exemptions
+
+
+def _task_frontmatter(task: Task) -> dict[str, object]:
+    frontmatter = _parse_task_frontmatter(_read_text(task.path))
+    return frontmatter if isinstance(frontmatter, dict) else {}
+
+
+def _task_triage_reasons(task: Task, tasks: dict[str, Task]) -> list[str]:
+    frontmatter = _task_frontmatter(task)
+    fields = TaskV2Fields(frontmatter)
+    if fields.task_schema != TASK_SCHEMA_VERSION:
+        return []
+
+    reasons: list[str] = []
+    if fields.complexity_tier == "L":
+        reasons.append("complexity_l")
+    if fields.task_kind == "etl" and len(fields.inputs or ()) > 1:
+        reasons.append("etl_multi_input")
+    if len(task.outputs) > 2:
+        reasons.append("more_than_two_outputs")
+    backlog_peers = sorted(
+        candidate.task_id
+        for candidate in tasks.values()
+        if candidate.state == "backlog" and candidate.workstream == task.workstream
+    )
+    if backlog_peers and backlog_peers[0] == task.task_id:
+        reasons.append("first_in_workstream")
+    return reasons
+
+
+def _task_has_planner_triage(task: Task) -> bool:
+    triage = TaskV2Fields(_task_frontmatter(task)).triage
+    if triage is None:
+        return False
+    status = triage.get("status")
+    by = triage.get("by")
+    note = triage.get("note")
+    return (
+        status in {"confirmed", "split"}
+        and by == "planner"
+        and isinstance(note, str)
+        and bool(note.strip())
+    )
+
+
 def ready_backlog_tasks(tasks: dict[str, Task], claimed_ids: set[str], contract: FrameworkContract) -> list[Task]:
     ready: list[Task] = []
-    exemptions_path = contract.repo_root / "contracts" / "historical_exemptions.json"
-    v1_exemptions: dict[str, dict[str, object]] = {}
-    try:
-        exemptions_payload = json.loads(_read_text(exemptions_path))
-        if isinstance(exemptions_payload, dict):
-            for entry in exemptions_payload.get("tasks", []):
-                if isinstance(entry, dict) and isinstance(entry.get("path"), str):
-                    v1_exemptions[entry["path"]] = entry
-    except (OSError, json.JSONDecodeError):
-        pass
+    v1_exemptions = _load_v1_task_exemptions(contract.repo_root)
 
     diagnostics = lint_task_files(
         [task.path for task in tasks.values()],
@@ -1167,6 +1310,18 @@ def ready_backlog_tasks(tasks: dict[str, Task], claimed_ids: set[str], contract:
                     "task_id": task.task_id,
                     "task_path": task.path.as_posix(),
                     "diagnostics": task_diagnostics,
+                },
+            )
+            continue
+        triage_reasons = _task_triage_reasons(task, tasks)
+        if triage_reasons and not _task_has_planner_triage(task):
+            _record_swarm_event(
+                contract.repo_root,
+                {
+                    "event": "task_triage_required",
+                    "task_id": task.task_id,
+                    "task_path": task.path.as_posix(),
+                    "reasons": triage_reasons,
                 },
             )
             continue
@@ -1200,6 +1355,7 @@ def load_prompt(template_path: Path, context: dict[str, object]) -> str:
 
 
 def _build_prompt_context(task: Task, repo: Path, repair_context: str | None) -> dict[str, object]:
+    fields = TaskV2Fields(_task_frontmatter(task))
     return {
         "repo_root": repo.as_posix(),
         "task_path": task.path.relative_to(repo).as_posix(),
@@ -1208,6 +1364,7 @@ def _build_prompt_context(task: Task, repo: Path, repair_context: str | None) ->
         "workstream": task.workstream,
         "task_kind": task.task_kind or "",
         "allow_network": "true" if task.allow_network else "false",
+        "recon_required": "true" if fields.recon_required is True else "false",
         "allowed_paths": _format_bullets(task.allowed_paths),
         "disallowed_paths": _format_bullets(task.disallowed_paths),
         "outputs": _format_bullets(task.outputs),
@@ -1217,6 +1374,19 @@ def _build_prompt_context(task: Task, repo: Path, repair_context: str | None) ->
         "runner_mode": "local_swarm",
         "base_branch": "",
     }
+
+
+def _reconnaissance_line_count(task_text: str) -> int:
+    section = _extract_section(task_text, "Reconnaissance")
+    if section is None:
+        return 0
+    return sum(
+        1
+        for line in section.splitlines()
+        if line.strip()
+        and line.strip() not in {"-", "*"}
+        and not line.strip().startswith("<!--")
+    )
 
 
 def _git_current_branch(cwd: Path) -> str:
@@ -2780,6 +2950,728 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _planner_backlog_path(repo: Path, raw_path: object) -> tuple[Path | None, str | None]:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None, "planner_task_path_invalid"
+    normalized = _normalize_repo_relative_path(raw_path)
+    path = Path(normalized)
+    if (
+        path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.parent.as_posix() != ".orchestrator/backlog"
+        or path.suffix != ".md"
+        or re.fullmatch(r"T\d{3}(?:[_-][A-Za-z0-9_-]+)?\.md", path.name) is None
+    ):
+        return None, f"planner_path_outside_authority:{normalized}"
+    resolved = (repo / path).resolve()
+    try:
+        resolved.relative_to(repo.resolve())
+    except ValueError:
+        return None, f"planner_path_outside_authority:{normalized}"
+    expected_parent = repo.resolve() / ".orchestrator" / "backlog"
+    if resolved.parent != expected_parent:
+        return None, f"planner_path_outside_authority:{normalized}"
+    return resolved, None
+
+
+def _planner_repo_relpath(repo: Path, path: Path) -> str:
+    return path.resolve().relative_to(repo.resolve()).as_posix()
+
+
+def _planner_workstreams_path(repo: Path) -> tuple[Path | None, str | None]:
+    path = repo / ".orchestrator" / "workstreams.md"
+    expected = repo.resolve() / ".orchestrator" / "workstreams.md"
+    resolved = path.resolve()
+    if resolved != expected:
+        return None, "planner_path_outside_authority:.orchestrator/workstreams.md"
+    return path, None
+
+
+def _planner_task_paths(repo: Path, task_id: str) -> list[Path]:
+    matches: list[Path] = []
+    orchestrator = repo / ".orchestrator"
+    if not orchestrator.exists():
+        return matches
+    for path in sorted(orchestrator.glob(f"*/{task_id}*.md")):
+        try:
+            frontmatter = _parse_task_frontmatter(_read_text(path))
+        except OSError:
+            continue
+        if isinstance(frontmatter, dict) and frontmatter.get("task_id") == task_id:
+            matches.append(path)
+    return matches
+
+
+def _planner_backlog_task_path(repo: Path, task_id: object) -> tuple[Path | None, str | None]:
+    if not isinstance(task_id, str) or re.fullmatch(r"T\d{3}", task_id) is None:
+        return None, "planner_task_id_invalid"
+    matches = _planner_task_paths(repo, task_id)
+    backlog = [path for path in matches if path.parent == repo / ".orchestrator" / "backlog"]
+    if len(backlog) == 1 and len(matches) == 1:
+        relpath = backlog[0].relative_to(repo).as_posix()
+        return _planner_backlog_path(repo, relpath)
+    if matches and not backlog:
+        relpaths = ",".join(_planner_repo_relpath(repo, path) for path in matches)
+        return None, f"planner_path_outside_authority:{relpaths}"
+    if len(backlog) > 1 or len(matches) > 1:
+        return None, f"planner_task_ambiguous:{task_id}"
+    return None, f"planner_task_not_found:{task_id}"
+
+
+def _planner_task_payload(payload: object) -> tuple[Path | None, str | None, str | None]:
+    if not isinstance(payload, dict):
+        return None, None, "planner_task_payload_invalid"
+    allowed_keys = {"path", "content"}
+    if payload.get("action") == "create_task":
+        allowed_keys.add("action")
+    if set(payload) - allowed_keys:
+        return None, None, "planner_task_payload_invalid"
+    content = payload.get("content")
+    if not isinstance(content, str):
+        return None, None, "planner_task_content_invalid"
+    return Path(str(payload.get("path", ""))), content, None
+
+
+def _planner_proposal_authority_violations(
+    *, repo: Path, proposals: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    violations: list[dict[str, object]] = []
+    allowed_keys = {
+        "create_task": {"action", "path", "content"},
+        "update_workstreams": {"action", "content"},
+        "split_task": {"action", "task_id", "into"},
+        "triage_confirm": {"action", "task_id", "note"},
+    }
+    for index, proposal in enumerate(proposals):
+        action = proposal.get("action")
+        if action not in allowed_keys:
+            violations.append(
+                {"proposal_index": index, "reason": "planner_action_invalid", "action": action}
+            )
+            continue
+        extra_keys = sorted(set(proposal) - allowed_keys[str(action)])
+        if extra_keys:
+            violations.append(
+                {
+                    "proposal_index": index,
+                    "reason": "planner_proposal_schema_invalid",
+                    "fields": extra_keys,
+                }
+            )
+            continue
+        if action == "create_task":
+            _, reason = _planner_backlog_path(repo, proposal.get("path"))
+            if reason is not None:
+                violations.append({"proposal_index": index, "reason": reason})
+        elif action == "update_workstreams":
+            _, reason = _planner_workstreams_path(repo)
+            if reason is not None:
+                violations.append({"proposal_index": index, "reason": reason})
+        elif action in {"split_task", "triage_confirm"}:
+            _, reason = _planner_backlog_task_path(repo, proposal.get("task_id"))
+            if reason is not None and reason.startswith("planner_path_outside_authority"):
+                violations.append({"proposal_index": index, "reason": reason})
+            if action == "split_task":
+                children = proposal.get("into")
+                if not isinstance(children, list):
+                    continue
+                for child_index, child in enumerate(children):
+                    if not isinstance(child, dict):
+                        continue
+                    _, child_reason = _planner_backlog_path(repo, child.get("path"))
+                    if child_reason is not None:
+                        violations.append(
+                            {
+                                "proposal_index": index,
+                                "child_index": child_index,
+                                "reason": child_reason,
+                            }
+                        )
+    return violations
+
+
+def _set_task_triage(text: str, *, note: str) -> str:
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return text
+    end_index = next(
+        (index for index in range(1, len(lines)) if lines[index].strip() == "---"),
+        None,
+    )
+    if end_index is None:
+        return text
+    rendered = (
+        "triage: {status: confirmed, by: planner, note: "
+        + json.dumps(note.strip(), ensure_ascii=False)
+        + "}\n"
+    )
+    for index in range(1, end_index):
+        if re.match(r"^triage\s*:", lines[index]):
+            lines[index] = rendered
+            return "".join(lines)
+    lines.insert(end_index, rendered)
+    return "".join(lines)
+
+
+def _planner_lint_diagnostics(
+    *,
+    repo: Path,
+    contract: FrameworkContract,
+    task_texts: dict[Path, str],
+    deleted_paths: set[Path],
+    changed_paths: set[Path],
+) -> list[dict[str, object]]:
+    deleted_resolved = {path.resolve() for path in deleted_paths}
+    paths = [
+        path for path in _iter_task_files(contract) if path.resolve() not in deleted_resolved
+    ]
+    known_paths = {path.resolve() for path in paths}
+    for path in task_texts:
+        if path.resolve() not in known_paths and path.resolve() not in deleted_resolved:
+            paths.append(path)
+            known_paths.add(path.resolve())
+    diagnostics = lint_task_files(
+        sorted(paths),
+        repo_root=repo,
+        network_workstreams=contract.network_workstreams,
+        v1_exemptions=_load_v1_task_exemptions(repo),
+        task_texts=task_texts,
+    )
+    labels: set[str] = set()
+    relpaths = {_planner_repo_relpath(repo, path) for path in changed_paths}
+    for path in changed_paths:
+        frontmatter = _parse_task_frontmatter(task_texts.get(path, ""))
+        if isinstance(frontmatter, dict) and isinstance(frontmatter.get("task_id"), str):
+            labels.add(frontmatter["task_id"])
+    return [
+        diagnostic.as_dict()
+        for diagnostic in diagnostics
+        if diagnostic.task in labels or diagnostic.task in relpaths
+    ]
+
+
+def _persist_planner_changes(
+    *,
+    repo: Path,
+    remote: str,
+    base_branch: str,
+    paths: Iterable[Path],
+    message: str,
+    strict: bool,
+    push: bool = True,
+) -> bool:
+    candidate_paths = {_planner_repo_relpath(repo, path) for path in paths}
+    owned_paths = sorted(
+        path
+        for path in candidate_paths
+        if path == ".orchestrator/workstreams.md"
+        or Path(path).parent.as_posix() == ".orchestrator/backlog"
+    )
+    if not owned_paths:
+        return False
+    staged_before_cp = _run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        capture=True,
+        check=True,
+    )
+    staged_before = {
+        line.strip() for line in (staged_before_cp.stdout or "").splitlines() if line.strip()
+    }
+    unexpected = sorted(staged_before - set(owned_paths))
+    if unexpected:
+        raise SystemExit("planner_refused_preexisting_staged_changes:" + ",".join(unexpected))
+    _run(["git", "add", "-A", "--", *owned_paths], cwd=repo, check=True)
+    staged_after = _run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        capture=True,
+        check=True,
+    )
+    if not (staged_after.stdout or "").strip():
+        return False
+    _git_commit(cwd=repo, message=message, strict=strict, paths=owned_paths)
+    if push:
+        _git_push(
+            cwd=repo,
+            remote=remote,
+            ref=base_branch,
+            set_upstream=False,
+            strict=strict,
+        )
+    return True
+
+
+def _apply_planner_proposals(
+    *,
+    mode: str,
+    proposals: list[dict[str, object]],
+    repo: Path,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Validate, apply, and persist one bounded Planner proposal batch."""
+    authority_violations = _planner_proposal_authority_violations(
+        repo=repo, proposals=proposals
+    )
+    if authority_violations:
+        outcomes = [
+            {
+                "proposal_index": index,
+                "action": proposal.get("action"),
+                "status": "refused_batch",
+            }
+            for index, proposal in enumerate(proposals)
+        ]
+        _record_swarm_event(
+            repo,
+            {
+                "event": "planner_write_refused",
+                "mode": mode,
+                "violations": authority_violations,
+            },
+            escalation=True,
+        )
+        summary = {
+            "mode": mode,
+            "batch_refused": True,
+            "committed": False,
+            "outcomes": outcomes,
+        }
+        _record_swarm_event(repo, {"event": "planner_applied", **summary})
+        return summary
+
+    contract = load_framework_contract(repo)
+    task_texts: dict[Path, str] = {}
+    deleted_paths: set[Path] = set()
+    workstreams_text: str | None = None
+    outcomes: list[dict[str, object]] = []
+    split_events: list[dict[str, object]] = []
+
+    for index, proposal in enumerate(proposals):
+        task_texts_before = dict(task_texts)
+        deleted_paths_before = set(deleted_paths)
+        split_event_count_before = len(split_events)
+        action = str(proposal.get("action"))
+        outcome: dict[str, object] = {
+            "proposal_index": index,
+            "action": action,
+            "status": "refused",
+        }
+        changed_paths: set[Path] = set()
+
+        if action == "create_task":
+            path, path_reason = _planner_backlog_path(repo, proposal.get("path"))
+            content = proposal.get("content")
+            if path_reason is not None or path is None or not isinstance(content, str):
+                outcome["reason"] = path_reason or "planner_task_content_invalid"
+                outcomes.append(outcome)
+                continue
+            if path.exists() or path in task_texts:
+                outcome["reason"] = "planner_task_already_exists"
+                outcomes.append(outcome)
+                continue
+            task_texts[path] = content
+            changed_paths.add(path)
+
+        elif action == "update_workstreams":
+            content = proposal.get("content")
+            if not isinstance(content, str) or not content.strip():
+                outcome["reason"] = "planner_workstreams_content_invalid"
+                outcomes.append(outcome)
+                continue
+            if workstreams_text is not None:
+                outcome["reason"] = "planner_workstreams_update_conflict"
+                outcomes.append(outcome)
+                continue
+            workstreams_text = content
+            outcome["status"] = "applied"
+            outcome["path"] = ".orchestrator/workstreams.md"
+            outcomes.append(outcome)
+            continue
+
+        elif action == "triage_confirm":
+            path, reason = _planner_backlog_task_path(repo, proposal.get("task_id"))
+            note = proposal.get("note")
+            if path is None or reason is not None:
+                outcome["reason"] = reason
+                outcomes.append(outcome)
+                continue
+            if not isinstance(note, str) or not note.strip():
+                outcome["reason"] = "planner_triage_note_invalid"
+                outcomes.append(outcome)
+                continue
+            source = task_texts.get(path, _read_text(path))
+            task_texts[path] = _set_task_triage(source, note=note)
+            changed_paths.add(path)
+
+        elif action == "split_task":
+            parent, reason = _planner_backlog_task_path(repo, proposal.get("task_id"))
+            children = proposal.get("into")
+            if parent is None or reason is not None:
+                outcome["reason"] = reason
+                outcomes.append(outcome)
+                continue
+            parent_frontmatter = _parse_task_frontmatter(
+                task_texts.get(parent, _read_text(parent))
+            )
+            hypothesis_id = (
+                parent_frontmatter.get("hypothesis_id")
+                if isinstance(parent_frontmatter, dict)
+                else None
+            )
+            if isinstance(hypothesis_id, str) and hypothesis_id.strip():
+                outcome["reason"] = "hypothesis_retirement_requires_human"
+                outcomes.append(outcome)
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "hypothesis_retirement_escalated",
+                        "level": "L3",
+                        "task_id": proposal.get("task_id"),
+                        "hypothesis_id": hypothesis_id,
+                        "mode": mode,
+                    },
+                    escalation=True,
+                )
+                continue
+            if not isinstance(children, list) or not children:
+                outcome["reason"] = "planner_split_children_invalid"
+                outcomes.append(outcome)
+                continue
+            child_ids: list[str] = []
+            child_paths: list[Path] = []
+            child_error: str | None = None
+            for child in children:
+                raw_path, content, payload_reason = _planner_task_payload(child)
+                path, path_reason = _planner_backlog_path(
+                    repo, raw_path.as_posix() if raw_path is not None else None
+                )
+                if payload_reason is not None or path_reason is not None or path is None or content is None:
+                    child_error = payload_reason or path_reason or "planner_task_payload_invalid"
+                    break
+                if path.exists() or path in task_texts or path in child_paths:
+                    child_error = "planner_task_already_exists"
+                    break
+                frontmatter = _parse_task_frontmatter(content)
+                child_id = frontmatter.get("task_id") if isinstance(frontmatter, dict) else None
+                if not isinstance(child_id, str) or re.fullmatch(r"T\d{3}", child_id) is None:
+                    child_error = "planner_split_child_task_id_invalid"
+                    break
+                child_paths.append(path)
+                child_ids.append(child_id)
+                task_texts[path] = content
+                changed_paths.add(path)
+            if child_error is not None:
+                for path in child_paths:
+                    task_texts.pop(path, None)
+                outcome["reason"] = child_error
+                outcomes.append(outcome)
+                continue
+            deleted_paths.add(parent)
+            changed_paths.update(child_paths)
+            outcome["children"] = child_ids
+            split_events.append(
+                {
+                    "event": "task_split",
+                    "parent": proposal.get("task_id"),
+                    "children": child_ids,
+                    "mode": mode,
+                }
+            )
+
+        diagnostics = _planner_lint_diagnostics(
+            repo=repo,
+            contract=contract,
+            task_texts=task_texts,
+            deleted_paths=deleted_paths,
+            changed_paths=changed_paths,
+        )
+        if diagnostics:
+            task_texts = task_texts_before
+            deleted_paths = deleted_paths_before
+            del split_events[split_event_count_before:]
+            outcome["status"] = "lint_failed"
+            outcome["diagnostics"] = diagnostics
+            outcomes.append(outcome)
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "planner_proposal_lint_failed",
+                    "mode": mode,
+                    "proposal_index": index,
+                    "action": action,
+                    "diagnostics": diagnostics,
+                },
+            )
+            continue
+
+        outcome["status"] = "applied"
+        outcome["paths"] = sorted(_planner_repo_relpath(repo, path) for path in changed_paths)
+        outcomes.append(outcome)
+
+    applied_task_relpaths = {
+        raw_path
+        for outcome in outcomes
+        if outcome.get("status") == "applied"
+        for raw_path in outcome.get("paths", [])
+        if isinstance(raw_path, str)
+    }
+    task_texts_by_relpath = {
+        _planner_repo_relpath(repo, path): text for path, text in task_texts.items()
+    }
+    applied_task_paths = {repo / relpath for relpath in applied_task_relpaths}
+    for path in sorted(applied_task_paths):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            task_texts_by_relpath[_planner_repo_relpath(repo, path)],
+            encoding="utf-8",
+        )
+    applied_deletes = {
+        path
+        for path in deleted_paths
+        if any(
+            outcome.get("status") == "applied"
+            and outcome.get("action") == "split_task"
+            for outcome in outcomes
+        )
+    }
+    for path in sorted(applied_deletes):
+        path.unlink()
+    touched_paths = set(applied_task_paths) | applied_deletes
+    if workstreams_text is not None and any(
+        outcome.get("status") == "applied"
+        and outcome.get("action") == "update_workstreams"
+        for outcome in outcomes
+    ):
+        workstreams_path, workstreams_reason = _planner_workstreams_path(repo)
+        if workstreams_path is None:
+            raise RuntimeError(workstreams_reason or "planner_workstreams_path_invalid")
+        workstreams_path.write_text(workstreams_text, encoding="utf-8")
+        touched_paths.add(workstreams_path)
+
+    committed = _persist_planner_changes(
+        repo=repo,
+        remote=getattr(args, "remote", "origin"),
+        base_branch=getattr(args, "base_branch", "main"),
+        paths=touched_paths,
+        message=f"planner: {mode}",
+        strict=bool(getattr(args, "unattended", False)),
+        push=not bool(getattr(args, "no_push", False)),
+    )
+    for event in split_events:
+        _record_swarm_event(repo, event)
+    summary = {
+        "mode": mode,
+        "batch_refused": False,
+        "committed": committed,
+        "outcomes": outcomes,
+    }
+    _record_swarm_event(repo, {"event": "planner_applied", **summary})
+    return summary
+
+
+def _plan_program_context(repo: Path, contract: FrameworkContract) -> dict[str, object]:
+    tasks, quarantined = load_tasks_quarantined(contract)
+    backlog = [
+        _task_summary(task)
+        for task in sorted(tasks.values(), key=lambda item: item.task_id)
+        if task.state == "backlog"
+    ]
+    return {
+        "trigger_id": "launch",
+        "project_contract": _read_text(repo / "contracts" / "project.yaml"),
+        "framework_contract": _read_text(repo / "contracts" / "framework.json"),
+        "protocol": _read_text(repo / "docs" / "protocol.md"),
+        "workstreams": _read_text(repo / ".orchestrator" / "workstreams.md"),
+        "backlog_summary": backlog,
+        "quarantined": quarantined,
+    }
+
+
+def cmd_plan_program(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    contract = load_framework_contract(repo)
+    outcome = _invoke_planner(
+        mode="launch",
+        context=_plan_program_context(repo, contract),
+        repo=repo,
+        args=args,
+    )
+    application: dict[str, object] | None = None
+    approval_pending = False
+    if outcome.returncode == 0:
+        application = _apply_planner_proposals(
+            mode="launch",
+            proposals=outcome.proposals,
+            repo=repo,
+            args=args,
+        )
+        if not application["batch_refused"]:
+            pending_path = repo / PLAN_APPROVAL_PENDING_PATH
+            _write_json(
+                pending_path,
+                {
+                    "schema_version": "research_swarm.plan_approval_pending.v1",
+                    "created_at_utc": _utc_now_iso(),
+                    "planner_backend": getattr(args, "planner_backend", "mock"),
+                    "proposal_count": len(outcome.proposals),
+                },
+            )
+            approval_pending = True
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "plan_awaiting_human_approval",
+                    "pending_path": PLAN_APPROVAL_PENDING_PATH.as_posix(),
+                    "proposal_count": len(outcome.proposals),
+                },
+                escalation=True,
+            )
+    else:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "planner_invocation_failed",
+                "mode": "launch",
+                "returncode": outcome.returncode,
+                "stdout": outcome.stdout[:2048],
+            },
+            escalation=True,
+        )
+
+    print(
+        json.dumps(
+            {
+                "mode": "launch",
+                "planner": {
+                    "returncode": outcome.returncode,
+                    "stdout": outcome.stdout,
+                    "proposal_count": len(outcome.proposals),
+                },
+                "application": application,
+                "approval_pending": approval_pending,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0 if outcome.returncode == 0 and application is not None and not application["batch_refused"] else 1
+
+
+def cmd_approve_plan(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    pending_path = repo / PLAN_APPROVAL_PENDING_PATH
+    if not pending_path.is_file():
+        print(
+            json.dumps(
+                {"status": "no_pending_plan", "approved_by": args.approved_by},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 1
+    pending_path.unlink()
+    _record_swarm_event(
+        repo,
+        {
+            "event": "plan_approved",
+            "approved_by": args.approved_by,
+            "pending_path": PLAN_APPROVAL_PENDING_PATH.as_posix(),
+        },
+    )
+    print(
+        json.dumps(
+            {"status": "approved", "approved_by": args.approved_by},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _recent_planner_failures(contract: FrameworkContract, task_id: str) -> list[dict[str, object]]:
+    failures: list[dict[str, object]] = []
+    manifests = _matching_v2_run_manifest_data(
+        _matching_task_jsons(contract.run_manifest_dir, task_id),
+        task_id,
+    )
+    for path, manifest in manifests[-2:]:
+        result = manifest.get("result") if isinstance(manifest.get("result"), dict) else {}
+        if result.get("status") != "blocked":
+            continue
+        failures.append(
+            {
+                "manifest": path.relative_to(contract.repo_root).as_posix(),
+                "failure_context": _failure_context_from_manifest(manifest),
+            }
+        )
+    return failures
+
+
+def _workstream_excerpt(repo: Path, workstream: str) -> str:
+    text = _read_text(repo / ".orchestrator" / "workstreams.md")
+    lines = [line for line in text.splitlines() if workstream in line]
+    return "\n".join(lines) or text
+
+
+def cmd_triage(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    contract = load_framework_contract(repo)
+    task_path, reason = _planner_backlog_task_path(repo, args.task)
+    if task_path is None:
+        raise SystemExit(reason or f"planner_task_not_found:{args.task}")
+    task = load_task(task_path, contract)
+    context = {
+        "trigger_id": task.task_id,
+        "task_id": task.task_id,
+        "task_file": _read_text(task.path),
+        "workstream": _workstream_excerpt(repo, task.workstream),
+        "recent_failures": _recent_planner_failures(contract, task.task_id),
+        "triage_rule": (
+            "The T035 rule: discovery and construction never combine. If reconnaissance "
+            "shows unclear ground truth, split the task instead of widening its diff."
+        ),
+    }
+    outcome = _invoke_planner(mode="triage", context=context, repo=repo, args=args)
+    application: dict[str, object] | None = None
+    if outcome.returncode == 0:
+        application = _apply_planner_proposals(
+            mode="triage",
+            proposals=outcome.proposals,
+            repo=repo,
+            args=args,
+        )
+    else:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "planner_invocation_failed",
+                "mode": "triage",
+                "task_id": task.task_id,
+                "returncode": outcome.returncode,
+                "stdout": outcome.stdout[:2048],
+            },
+            escalation=True,
+        )
+    print(
+        json.dumps(
+            {
+                "mode": "triage",
+                "task_id": task.task_id,
+                "planner": {
+                    "returncode": outcome.returncode,
+                    "stdout": outcome.stdout,
+                    "proposal_count": len(outcome.proposals),
+                },
+                "application": application,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0 if outcome.returncode == 0 and application is not None and not application["batch_refused"] else 1
+
+
 @contextlib.contextmanager
 def _runtime_repo_context(repo: Path, *, event_repo: Path):
     global _REPO_ROOT_CACHE
@@ -3047,8 +3939,28 @@ def cmd_tick(args: argparse.Namespace) -> int:
     claimed_ids = claimed_task_ids(repo, args.remote, args.base_branch)
     ready = ready_backlog_tasks(tasks, claimed_ids, contract)
 
+    dispatchable = list(ready)
+    plan_skipped: list[dict[str, str]] = []
+    pending_path = repo / PLAN_APPROVAL_PENDING_PATH
+    if pending_path.is_file():
+        dispatchable = []
+        for task in ready:
+            fields = TaskV2Fields(_task_frontmatter(task))
+            if fields.task_schema == TASK_SCHEMA_VERSION:
+                plan_skipped.append({"task_id": task.task_id, "reason": "plan_unapproved"})
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "plan_unapproved",
+                        "task_id": task.task_id,
+                        "pending_path": PLAN_APPROVAL_PENDING_PATH.as_posix(),
+                    },
+                )
+            else:
+                dispatchable.append(task)
+
     capacity = max(0, int(args.max_workers))
-    selected = choose_tasks_heuristic(ready, capacity)
+    selected = choose_tasks_heuristic(dispatchable, capacity)
 
     summary = {
         "done": sorted(task_id for task_id, task in tasks.items() if task.state == "done"),
@@ -3057,7 +3969,7 @@ def cmd_tick(args: argparse.Namespace) -> int:
         "quarantined": quarantined,
         "ready": [task.task_id for task in ready],
         "selected": [task.task_id for task in selected],
-        "skipped": [],
+        "skipped": plan_skipped,
         "dry_run": bool(args.dry_run),
     }
 
@@ -4779,32 +5691,69 @@ def _step_clean(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def _repair_context_from_manifest(manifest: dict[str, object]) -> str:
+def _utf8_prefix(value: object, max_bytes: int) -> str:
+    return str(value).encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _failure_context_from_manifest(
+    manifest: dict[str, object], *, max_bytes: int = 2048
+) -> dict[str, object]:
     result = manifest.get("result") if isinstance(manifest.get("result"), dict) else {}
     gates = manifest.get("gates") if isinstance(manifest.get("gates"), list) else []
+    blocked_reasons = [
+        _utf8_prefix(reason, 128)
+        for reason in result.get("blocked_reasons", [])
+        if isinstance(reason, str)
+    ][:8]
     diagnostics: list[dict[str, object]] = []
     for gate in gates:
         if not isinstance(gate, dict):
             continue
         if gate.get("returncode") in {0, None} and not gate.get("timed_out") and not gate.get("constraint_violation"):
             continue
-        diagnostics.append(
-            {
-                "command": gate.get("command"),
-                "returncode": gate.get("returncode"),
-                "timed_out": gate.get("timed_out"),
-                "constraint_violation": gate.get("constraint_violation"),
-                "output_head": str(gate.get("output_head", ""))[:700],
-                "output_tail": str(gate.get("output_tail", ""))[-700:],
-            }
-        )
+        diagnostic = {
+            "command": _utf8_prefix(gate.get("command", ""), 256),
+            "returncode": gate.get("returncode"),
+            "timed_out": gate.get("timed_out"),
+            "constraint_violation": gate.get("constraint_violation"),
+            "output_head": _utf8_prefix(gate.get("output_head", ""), 384),
+            "output_tail": _utf8_prefix(gate.get("output_tail", ""), 384),
+        }
+        candidate = {
+            "blocked_reasons": blocked_reasons,
+            "gate_diagnostics": [*diagnostics, diagnostic],
+        }
+        if len(json.dumps(candidate, separators=(",", ":"), sort_keys=True).encode("utf-8")) <= max_bytes:
+            diagnostics.append(diagnostic)
+            continue
+        compact = {
+            key: value
+            for key, value in diagnostic.items()
+            if key not in {"output_head", "output_tail"}
+        }
+        candidate["gate_diagnostics"] = [*diagnostics, compact]
+        if len(json.dumps(candidate, separators=(",", ":"), sort_keys=True).encode("utf-8")) <= max_bytes:
+            diagnostics.append(compact)
+
     payload = {
-        "blocked_reasons": [
-            reason for reason in result.get("blocked_reasons", []) if isinstance(reason, str)
-        ],
+        "blocked_reasons": blocked_reasons,
         "gate_diagnostics": diagnostics,
     }
-    return json.dumps(payload, separators=(",", ":"), sort_keys=True)[:2048]
+    while (
+        len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        > max_bytes
+        and payload["blocked_reasons"]
+    ):
+        payload["blocked_reasons"].pop()
+    return payload
+
+
+def _repair_context_from_manifest(manifest: dict[str, object]) -> str:
+    return json.dumps(
+        _failure_context_from_manifest(manifest),
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _step_repair(
@@ -4930,10 +5879,155 @@ def _step_repair(
     }
 
 
+def _planner_marker_on_last_note(task: Task) -> bool:
+    try:
+        notes = _extract_section(_read_text(task.path), "Notes / Decisions")
+    except OSError:
+        return False
+    if notes is None:
+        return False
+    lines = [line.strip() for line in notes.splitlines() if line.strip()]
+    return bool(lines and "@planner" in lines[-1])
+
+
+def _manifest_wall_clock_seconds(manifest: dict[str, object]) -> float:
+    usage = manifest.get("usage") if isinstance(manifest.get("usage"), dict) else {}
+    value = usage.get("wall_clock_seconds")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return 0.0
+
+
+def _planner_replan_contexts(repo: Path) -> dict[str, dict[str, object]]:
+    contract = load_framework_contract(repo)
+    tasks, _ = load_tasks_quarantined(contract)
+    contexts: dict[str, dict[str, object]] = {
+        task_id: {
+            "task": task,
+            "contract": contract,
+            "manifests": _matching_v2_run_manifest_data(
+                _matching_task_jsons(contract.run_manifest_dir, task_id), task_id
+            ),
+        }
+        for task_id, task in tasks.items()
+    }
+    for task_id, branch_context in _task_branch_contexts(repo).items():
+        task = branch_context.get("task")
+        branch_contract = branch_context.get("contract")
+        if not isinstance(task, Task) or not isinstance(branch_contract, FrameworkContract):
+            continue
+        contexts[task_id] = {
+            "task": task,
+            "contract": branch_contract,
+            "manifests": _matching_v2_run_manifest_data(
+                _matching_task_jsons(branch_contract.run_manifest_dir, task_id), task_id
+            ),
+        }
+    return contexts
+
+
 def _step_plan(args: argparse.Namespace) -> dict[str, object]:
     repo = _repo_root()
-    _record_swarm_event(repo, {"event": "plan_step_noop"})
-    return {"status": "noop", "reason": "planner_runtime_arrives_in_m2"}
+    dispatched: list[dict[str, object]] = []
+    for task_id, runtime_context in sorted(_planner_replan_contexts(repo).items()):
+        task = runtime_context.get("task")
+        contract = runtime_context.get("contract")
+        manifests = runtime_context.get("manifests")
+        if (
+            not isinstance(task, Task)
+            or not isinstance(contract, FrameworkContract)
+            or not isinstance(manifests, list)
+        ):
+            continue
+        typed_manifests = [
+            (path, manifest)
+            for path, manifest in manifests
+            if isinstance(path, Path) and isinstance(manifest, dict)
+        ]
+        failed = [
+            (path, manifest)
+            for path, manifest in typed_manifests
+            if isinstance(manifest.get("result"), dict)
+            and manifest["result"].get("status") == "blocked"
+        ]
+        wall_clock_seconds = sum(
+            _manifest_wall_clock_seconds(manifest) for _, manifest in typed_manifests
+        )
+        fields = TaskV2Fields(_task_frontmatter(task))
+        budget_seconds = (
+            parse_wall_clock_seconds(fields.budgets.get("max_wall_clock"))
+            if fields.budgets is not None
+            else None
+        )
+
+        triggers: list[str] = []
+        if (
+            task.state == "blocked"
+            and failed
+            and len(failed) >= contract.repair_max_attempts
+        ):
+            triggers.append("failed_runs")
+        if _planner_marker_on_last_note(task):
+            triggers.append("planner_marker")
+        if budget_seconds is not None and wall_clock_seconds > budget_seconds:
+            triggers.append("timebox_exceeded")
+
+        last_manifest = failed[-1][1] if failed else (typed_manifests[-1][1] if typed_manifests else {})
+        failure_context = _failure_context_from_manifest(last_manifest)
+        for trigger in triggers:
+            context = {
+                "trigger_id": f"{task_id}_{trigger}",
+                "trigger": trigger,
+                "task_id": task_id,
+                "task_file": _read_text(task.path),
+                "blocked_reasons": failure_context["blocked_reasons"],
+                "last_gate_diagnostics": failure_context["gate_diagnostics"],
+                "failed_runs": len(failed),
+                "repair_max_attempts": contract.repair_max_attempts,
+                "wall_clock_seconds": wall_clock_seconds,
+                "max_wall_clock_seconds": budget_seconds,
+            }
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "replan_dispatched",
+                    "trigger": trigger,
+                    "task_id": task_id,
+                },
+            )
+            outcome = _invoke_planner(
+                mode="replan", context=context, repo=repo, args=args
+            )
+            application: dict[str, object] | None = None
+            if outcome.returncode == 0:
+                application = _apply_planner_proposals(
+                    mode="replan",
+                    proposals=outcome.proposals,
+                    repo=repo,
+                    args=args,
+                )
+            else:
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "planner_invocation_failed",
+                        "mode": "replan",
+                        "trigger": trigger,
+                        "task_id": task_id,
+                        "returncode": outcome.returncode,
+                        "stdout": outcome.stdout[:2048],
+                    },
+                    escalation=True,
+                )
+            dispatched.append(
+                {
+                    "task_id": task_id,
+                    "trigger": trigger,
+                    "returncode": outcome.returncode,
+                    "application": application,
+                }
+            )
+    return {"status": "ok", "dispatched": dispatched}
 
 
 def _step_escalate(args: argparse.Namespace) -> dict[str, object]:
@@ -5579,6 +6673,16 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     if frontmatter_tampered:
         blocked_reasons.append("frontmatter_tampered")
 
+    pinned_fields = TaskV2Fields(pinned_frontmatter)
+    if (
+        args.final_state == "ready_for_review"
+        and pinned_fields.task_schema == TASK_SCHEMA_VERSION
+        and pinned_fields.complexity_tier in {"M", "L"}
+        and pinned_fields.recon_required is True
+        and _reconnaissance_line_count(task_text_after_executor) < 3
+    ):
+        blocked_reasons.append("recon_missing")
+
     gate_ok, gate_outputs = _run_gates(
         repo,
         task.gates,
@@ -6179,6 +7283,32 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--base-branch", default="main")
     plan.set_defaults(func=cmd_plan)
 
+    plan_program = subparsers.add_parser(
+        "plan-program",
+        help="Invoke the bounded Planner launch pass and require human approval",
+    )
+    plan_program.add_argument("--planner-backend", choices=["mock", "claude"], default="mock")
+    plan_program.add_argument("--remote", default="origin")
+    plan_program.add_argument("--base-branch", default="main")
+    plan_program.add_argument("--unattended", action="store_true")
+    plan_program.set_defaults(func=cmd_plan_program)
+
+    triage = subparsers.add_parser(
+        "triage", help="Invoke Planner pre-launch triage for one backlog task"
+    )
+    triage.add_argument("--task", required=True, metavar="T###")
+    triage.add_argument("--planner-backend", choices=["mock", "claude"], default="mock")
+    triage.add_argument("--remote", default="origin")
+    triage.add_argument("--base-branch", default="main")
+    triage.add_argument("--unattended", action="store_true")
+    triage.set_defaults(func=cmd_triage)
+
+    approve_plan = subparsers.add_parser(
+        "approve-plan", help="Record human approval of the current launch plan"
+    )
+    approve_plan.add_argument("--approved-by", required=True)
+    approve_plan.set_defaults(func=cmd_approve_plan)
+
     tick = subparsers.add_parser("tick", help="Start ready tasks")
     tick.add_argument("--planner", choices=["heuristic"], default="heuristic")
     tick.add_argument("--runner", choices=["tmux", "local"], default="tmux")
@@ -6210,6 +7340,7 @@ def build_parser() -> argparse.ArgumentParser:
     supervise.add_argument("--remote", default="origin")
     supervise.add_argument("--base-branch", default="main")
     supervise.add_argument("--executor-backend", choices=["codex", "mock"], default="codex")
+    supervise.add_argument("--planner-backend", choices=["mock", "claude"], default="mock")
     supervise.add_argument("--codex-model", default=None)
     supervise.add_argument(
         "--codex-sandbox",

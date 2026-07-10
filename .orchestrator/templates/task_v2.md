@@ -1,4 +1,5 @@
 ---
+# Planner triage is mandatory before claim for every L task and any heuristic-flagged task (multi-input ETL, more than two outputs, or first backlog task in a workstream); M/L tasks with recon_required must then record at least three non-empty reconnaissance lines covering scope, risks, and decomposition pressure before promotion to ready_for_review.
 task_schema: research_swarm.task.v2
 task_id: T___  # replace with T###
 title: "<concise task title>"
@@ -13,6 +14,7 @@ budgets: {max_wall_clock: 1h, max_tokens: 100000, max_cost_usd: 10}
 checkpoint_contract: none  # none|progress_file
 recon_required: false  # true for M/L unless recon_waiver is non-empty
 recon_waiver: ""  # explain an explicit false for M/L; leave empty otherwise
+# triage: {status: confirmed, by: planner, note: "<why this task is bounded>"}  # required only when triage flags apply
 constructed_by: ""  # validation only: T### for the construction task
 inputs:
   - path: "<upstream manifest path>"  # `manifest` is also accepted
@@ -98,7 +100,7 @@ Describe why this task exists and which stage of the artifact DAG it advances.
 
 ## Edit rules
 
-- Workers and Operators edit only `## Status` and `## Notes / Decisions` after claim.
+- Workers fill `## Reconnaissance` before implementation when required, then edit only `## Status` and `## Notes / Decisions`.
 - Planner and Operator handle folder moves via sweep or `git mv`.
 - `integration_ready` may be used only for interface/export tasks named in downstream `integration_ready_dependencies`.
 
