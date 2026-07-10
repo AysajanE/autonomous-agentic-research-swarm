@@ -1,0 +1,12 @@
+{
+  "schema_version": "research_swarm.rubric.v1",
+  "task_kind": "manuscript",
+  "checks": [
+    {"id": "MANUSCRIPT_UNREGISTERED_ASSERTION_SWEEP", "prompt": "Enumerate every substantive manuscript assertion and map it to a specific claim-ledger id. Adjudicate every kernel-prefiltered sentence as a floor; any unmatched assertion is not_supported.", "severity": "major", "evidence_required": true},
+    {"id": "MANUSCRIPT_SEMANTIC_VALUE_ROLE", "prompt": "For every numeric assertion, verify the number against the specific claim statement and semantic role. Reject same-unit value swaps even when the value, unit, and citation all occur elsewhere in the ledger.", "severity": "major", "evidence_required": true},
+    {"id": "MANUSCRIPT_CLAIM_TYPING", "prompt": "Adjudicate claim types from substance, catching causal paraphrases without lexicon triggers and requiring identification evidence where warranted.", "severity": "major", "evidence_required": true},
+    {"id": "MANUSCRIPT_MECHANISM_CONSISTENCY", "prompt": "Open primary artifacts and verify that each stated mechanism matches actual data, code, and logs.", "severity": "major", "evidence_required": true},
+    {"id": "MANUSCRIPT_STATISTICAL_VALIDITY", "prompt": "Check estimands, uncertainty, denominators, multiple testing, and robustness claims.", "severity": "major", "evidence_required": true},
+    {"id": "MANUSCRIPT_LIMITATIONS_AND_POSITIONING", "prompt": "Check limitations, alternative explanations, citation alignment, and novelty positioning against the evidence corpus.", "severity": "major", "evidence_required": true}
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": "research_swarm.rubric.v1",
+  "task_kind": "model",
+  "checks": [
+    {"id": "MODEL_SPEC_CONFORMANCE", "prompt": "Verify instance, seed, budget, solver, and experiment-grid conformance to locked specifications.", "severity": "major", "evidence_required": true},
+    {"id": "MODEL_RESULT_VALIDITY", "prompt": "Check that reported results follow from solver artifacts and are not selected from failed or omitted runs.", "severity": "major", "evidence_required": true},
+    {"id": "MODEL_MECHANISM_CONSISTENCY", "prompt": "Verify that the stated mechanism matches comparative statics, logs, and counterexamples.", "severity": "major", "evidence_required": true},
+    {"id": "MODEL_ROBUSTNESS", "prompt": "Check sensitivity to kernel-sampled parameter points and declared alternative specifications.", "severity": "major", "evidence_required": true},
+    {"id": "MODEL_LIMITATIONS", "prompt": "Check that computational and external-validity limits are explicit.", "severity": "minor", "evidence_required": true}
+  ]
+}

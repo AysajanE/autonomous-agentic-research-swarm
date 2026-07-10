@@ -12,6 +12,7 @@ Canonical schemas for this project:
 - `instance_manifest_v1.json` (bridge-generated and synthetic variants)
 - `experiment_spec_v1.json` (Lock A experiment-design surface)
 - `experiment_manifest_v1.json` (solver-run registration surface)
+- `referee_report_v1.json` (cross-family per-criterion/check findings surface)
 
 The three M3a JSON Schemas above are loaded directly by
 `scripts/quality_gates.py`; do not duplicate their required-field lists in

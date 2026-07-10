@@ -1,0 +1,14 @@
+{
+  "schema_version": "research_swarm.mock_referee_gold.v1",
+  "profile": "calibrated",
+  "predictions": [
+    {"case_id": "G001", "position_a": "not_supported", "position_b": "not_supported"},
+    {"case_id": "G002", "position_a": "not_supported", "position_b": "not_supported"},
+    {"case_id": "G003", "position_a": "not_supported", "position_b": "not_supported"},
+    {"case_id": "G004", "position_a": "not_supported", "position_b": "not_supported"},
+    {"case_id": "G005", "position_a": "not_supported", "position_b": "not_supported"},
+    {"case_id": "G006", "position_a": "not_supported", "position_b": "not_supported"},
+    {"case_id": "G007", "position_a": "supported", "position_b": "supported"},
+    {"case_id": "G008", "position_a": "supported", "position_b": "supported"}
+  ]
+}

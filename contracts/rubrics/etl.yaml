@@ -1,0 +1,10 @@
+{
+  "schema_version": "research_swarm.rubric.v1",
+  "task_kind": "etl",
+  "checks": [
+    {"id": "ETL_SOURCE_FIDELITY", "prompt": "Verify that each output field and row-selection rule is supported by the declared source artifacts and protocol.", "severity": "major", "evidence_required": true},
+    {"id": "ETL_DECISION_LOG_COMPLETENESS", "prompt": "Check that discretionary keying, filtering, missingness, deduplication, and outlier choices are recorded and match locked clauses.", "severity": "major", "evidence_required": true},
+    {"id": "ETL_LINEAGE", "prompt": "Trace outputs through hash-bound raw and processed manifests without relying on author summaries.", "severity": "major", "evidence_required": true},
+    {"id": "ETL_LIMITATIONS", "prompt": "Check that material coverage and source limitations are stated precisely.", "severity": "minor", "evidence_required": true}
+  ]
+}

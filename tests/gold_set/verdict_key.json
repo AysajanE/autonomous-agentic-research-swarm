@@ -1,0 +1,15 @@
+{
+  "schema_version": "research_swarm.referee_gold_key.v1",
+  "graded_by": "M3b human gold-set grader",
+  "graded_at_utc": "2026-07-10T00:05:00Z",
+  "cases": [
+    {"case_id": "G001", "kind": "artifact", "artifact": "artifacts/wrong_same_unit_value_swap.md", "human_verdict": "not_supported", "blocking": true, "defect": "semantic_value_role_swap"},
+    {"case_id": "G002", "kind": "artifact", "artifact": "artifacts/wrong_paraphrased_causal_type.md", "human_verdict": "not_supported", "blocking": true, "defect": "causal_claim_mistyped_descriptive"},
+    {"case_id": "G003", "kind": "artifact", "artifact": "artifacts/wrong_h055_fabricated_artifact.md", "human_verdict": "not_supported", "blocking": true, "defect": "fabricated_but_internally_coherent"},
+    {"case_id": "G004", "kind": "proof", "artifact": "artifacts/wrong_proof_cancel_zero.md", "human_verdict": "not_supported", "blocking": true, "defect": "division_by_zero"},
+    {"case_id": "G005", "kind": "proof", "artifact": "artifacts/wrong_proof_jensen_direction.md", "human_verdict": "not_supported", "blocking": true, "defect": "reversed_convexity_inequality"},
+    {"case_id": "G006", "kind": "proof", "artifact": "artifacts/wrong_proof_hidden_sign.md", "human_verdict": "not_supported", "blocking": true, "defect": "unstated_domain_and_wrong_sign"},
+    {"case_id": "G007", "kind": "artifact", "artifact": "artifacts/correct_registered_result.md", "human_verdict": "supported", "blocking": true, "defect": null},
+    {"case_id": "G008", "kind": "proof", "artifact": "artifacts/correct_proof_control.md", "human_verdict": "supported", "blocking": true, "defect": null}
+  ]
+}

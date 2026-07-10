@@ -57,6 +57,24 @@ INSTANCE_MANIFEST_SCHEMA_VERSION = "research_swarm.instance_manifest.v1"
 EXPERIMENT_SPEC_SCHEMA_VERSION = "research_swarm.experiment_spec.v1"
 EXPERIMENT_MANIFEST_SCHEMA_VERSION = "research_swarm.experiment_manifest.v1"
 SWEEP_ARTIFACT_SCHEMA_VERSION = "research_swarm.sweep_artifact.v1"
+REFEREE_REPORT_SCHEMA_VERSION = "research_swarm.referee_report.v1"
+REFEREE_CALIBRATION_SCHEMA_VERSION = "research_swarm.referee_calibration.v1"
+REFEREE_RUBRIC_SCHEMA_VERSION = "research_swarm.rubric.v1"
+REFEREE_GOLD_KEY_SCHEMA_VERSION = "research_swarm.referee_gold_key.v1"
+REFEREE_VERDICTS = {"supported", "not_supported", "cannot_verify"}
+REFEREE_REPORT_DIR = Path("reports/status/referee_reports")
+REFEREE_CALIBRATION_REPORT = Path("reports/status/referee_calibration.json")
+REFEREE_RUBRIC_TASK_KINDS = {
+    "etl": "etl",
+    "analysis": "analysis",
+    "writing": "writing",
+    "validation": "validation",
+    "proof": "proof_review",
+    "model": "model",
+    "bridge": "bridge",
+    "lit_review": "lit_review",
+    "manuscript": "manuscript",
+}
 
 DEFAULT_ALLOWED_STATES = (
     "backlog",
@@ -2425,6 +2443,368 @@ def gate_judge_review_log_validity() -> GateResult:
         failures.extend(_validate_judge_review_log(path, contract))
 
     return GateResult(ok=len(failures) == 0, details={"count": len(review_paths), "failures": failures})
+
+
+def _referee_family(tool: object) -> str | None:
+    if not isinstance(tool, str) or not tool.strip():
+        return None
+    normalized = tool.strip().lower()
+    if "claude" in normalized or "anthropic" in normalized:
+        return "claude"
+    if "codex" in normalized or "openai" in normalized:
+        return "codex"
+    if "gemini" in normalized or "google" in normalized:
+        return "gemini"
+    return normalized
+
+
+def _load_referee_bar(path: Path) -> tuple[dict[str, object] | None, list[str]]:
+    payload, error = _load_json_file(path)
+    if error is not None or not isinstance(payload, dict):
+        return None, [f"{path}:{error or 'not_object'}"]
+    failures: list[str] = []
+    required = {"agreement_floor", "position_flip_ceiling", "committed_by", "committed_at_utc"}
+    if set(payload) != required:
+        failures.append(f"{path}:fields:{sorted(payload)}")
+    for key in ("agreement_floor", "position_flip_ceiling"):
+        value = payload.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= float(value) <= 1:
+            failures.append(f"{path}:{key}:invalid")
+    if not isinstance(payload.get("committed_by"), str) or not payload["committed_by"].strip():
+        failures.append(f"{path}:committed_by:invalid")
+    if _parse_utc_iso(payload.get("committed_at_utc")) is None:
+        failures.append(f"{path}:committed_at_utc:invalid")
+    return payload, failures
+
+
+def gate_referee_rubrics() -> GateResult:
+    failures: list[str] = []
+    rubric_dir = Path("contracts/rubrics")
+    for filename, expected_kind in REFEREE_RUBRIC_TASK_KINDS.items():
+        path = rubric_dir / f"{filename}.yaml"
+        payload, error = _load_json_file(path)
+        if error is not None or not isinstance(payload, dict):
+            failures.append(f"{path}:{error or 'not_object'}")
+            continue
+        if set(payload) != {"schema_version", "task_kind", "checks"}:
+            failures.append(f"{path}:invalid_fields:{sorted(payload)}")
+        if payload.get("schema_version") != REFEREE_RUBRIC_SCHEMA_VERSION:
+            failures.append(f"{path}:invalid_schema_version")
+        if payload.get("task_kind") != expected_kind:
+            failures.append(f"{path}:invalid_task_kind:{payload.get('task_kind')}")
+        checks = payload.get("checks")
+        if not isinstance(checks, list) or not checks:
+            failures.append(f"{path}:invalid_checks")
+            continue
+        seen: set[str] = set()
+        for index, check in enumerate(checks):
+            if not isinstance(check, dict) or set(check) != {"id", "prompt", "severity", "evidence_required"}:
+                failures.append(f"{path}:check_{index}:invalid_fields")
+                continue
+            check_id = check.get("id")
+            if not isinstance(check_id, str) or not check_id.strip() or check_id in seen:
+                failures.append(f"{path}:check_{index}:invalid_id:{check_id}")
+            else:
+                seen.add(check_id)
+            if not isinstance(check.get("prompt"), str) or not check["prompt"].strip():
+                failures.append(f"{path}:check_{index}:invalid_prompt")
+            if check.get("severity") not in {"major", "minor"}:
+                failures.append(f"{path}:check_{index}:invalid_severity")
+            if not isinstance(check.get("evidence_required"), bool):
+                failures.append(f"{path}:check_{index}:invalid_evidence_required")
+    _, bar_failures = _load_referee_bar(rubric_dir / "calibration.yaml")
+    failures.extend(bar_failures)
+    seed_path = rubric_dir / "sampling_seed.txt"
+    if not seed_path.is_file() or not seed_path.read_text(encoding="utf-8").strip():
+        failures.append(f"{seed_path}:missing_or_empty")
+
+    try:
+        framework = json.loads(Path("contracts/framework.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        framework = {}
+    executors = framework.get("executors") if isinstance(framework, dict) else None
+    panel = executors.get("referee_panel") if isinstance(executors, dict) else None
+    if not isinstance(panel, list) or not panel:
+        failures.append("contracts/framework.json:missing_referee_panel")
+    else:
+        families: list[str] = []
+        for index, item in enumerate(panel):
+            if not isinstance(item, dict):
+                failures.append(f"contracts/framework.json:referee_panel_{index}:invalid")
+                continue
+            family = item.get("family")
+            if not isinstance(family, str) or not family.strip():
+                failures.append(f"contracts/framework.json:referee_panel_{index}:family_invalid")
+            else:
+                families.append(family)
+            if item.get("profile") != "read-only":
+                failures.append(f"contracts/framework.json:referee_panel_{index}:profile_not_read_only")
+            tools = item.get("tools")
+            if tools is not None and tools != ["Read", "Glob", "Grep"]:
+                failures.append(f"contracts/framework.json:referee_panel_{index}:tools_not_read_only")
+        if len(families) != len(set(families)):
+            failures.append("contracts/framework.json:referee_panel_duplicate_family_vote")
+    return GateResult(ok=not failures, details={"rubric_count": len(REFEREE_RUBRIC_TASK_KINDS), "failures": failures})
+
+
+def _kernel_referee_sample(task_id: str) -> list[dict[str, str]]:
+    try:
+        seed = Path("contracts/rubrics/sampling_seed.txt").read_text(encoding="utf-8").strip()
+        ledger = json.loads(Path("contracts/claims.yaml").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    claims = ledger.get("claims") if isinstance(ledger, dict) else None
+    if not isinstance(claims, list):
+        return []
+    ranked: list[tuple[str, dict[str, str]]] = []
+    for claim in claims:
+        if not isinstance(claim, dict) or not isinstance(claim.get("claim_id"), str):
+            continue
+        artifacts = claim.get("supporting_artifacts")
+        if not isinstance(artifacts, list):
+            continue
+        for artifact in artifacts:
+            if not isinstance(artifact, dict) or not isinstance(artifact.get("path"), str) or not isinstance(artifact.get("sha256"), str):
+                continue
+            item = {
+                "claim_id": claim["claim_id"],
+                "path": artifact["path"],
+                "sha256": artifact["sha256"].lower(),
+            }
+            score = hashlib.sha256(
+                f"{seed}\0{task_id}\0{item['claim_id']}\0{item['path']}".encode("utf-8")
+            ).hexdigest()
+            ranked.append((score, item))
+    ranked.sort(key=lambda item: (item[0], item[1]["path"]))
+    return [item for _, item in ranked[:3]]
+
+
+def gate_referee_report_validity() -> GateResult:
+    if not REFEREE_REPORT_DIR.exists():
+        return GateResult(ok=True, details={"skipped": True, "reason": "referee_report_dir_missing"})
+    report_paths = sorted(REFEREE_REPORT_DIR.glob("*.json"))
+    if not report_paths:
+        return GateResult(ok=True, details={"skipped": True, "reason": "no_referee_reports"})
+    failures: list[str] = []
+    panel_votes: dict[tuple[str, str], set[str]] = {}
+    panel_authors: dict[tuple[str, str], set[str]] = {}
+    try:
+        contract = load_framework_contract()
+        tasks, _ = _collect_tasks(contract)
+    except Exception as exc:
+        return GateResult(ok=False, details={"failures": [f"task_load_failed:{exc}"]})
+
+    for path in report_paths:
+        report, error = _load_json_file(path)
+        prefix = path.as_posix()
+        if error is not None or not isinstance(report, dict):
+            failures.append(f"{prefix}:{error or 'not_object'}")
+            continue
+        required_fields = {
+            "schema_version", "task_id", "referee_family", "rubric_version",
+            "verdicts", "opened_artifacts", "overall",
+        }
+        missing = sorted(required_fields - set(report))
+        if missing:
+            failures.append(f"{prefix}:missing_fields:{','.join(missing)}")
+        if report.get("schema_version") != REFEREE_REPORT_SCHEMA_VERSION:
+            failures.append(f"{prefix}:invalid_schema_version")
+        task_id = report.get("task_id")
+        if not isinstance(task_id, str) or task_id not in tasks:
+            failures.append(f"{prefix}:unknown_task:{task_id}")
+            continue
+        task = tasks[task_id]
+        if report.get("valid") is not True:
+            failures.append(f"{prefix}:report_marked_invalid")
+        family = report.get("referee_family")
+        authoring = report.get("authoring_family")
+        if not isinstance(family, str) or not family.strip():
+            failures.append(f"{prefix}:referee_family_invalid")
+        if family == authoring:
+            failures.append(f"{prefix}:referee_family_of_author:{family}")
+        manifest_rel = report.get("run_manifest_path")
+        if isinstance(manifest_rel, str):
+            panel_key = (task_id, manifest_rel)
+            if isinstance(family, str) and family.strip():
+                panel_votes.setdefault(panel_key, set()).add(family)
+            if isinstance(authoring, str) and authoring.strip():
+                panel_authors.setdefault(panel_key, set()).add(authoring)
+            manifest, manifest_error = _load_json_file(Path(manifest_rel))
+            if manifest_error is not None or not isinstance(manifest, dict):
+                failures.append(f"{prefix}:run_manifest_unreadable:{manifest_rel}")
+            else:
+                executor = manifest.get("executor") if isinstance(manifest.get("executor"), dict) else {}
+                derived_author = _referee_family(executor.get("tool"))
+                if derived_author != authoring:
+                    failures.append(f"{prefix}:authoring_family_mismatch:{authoring}!={derived_author}")
+                expected_manifest_sha = report.get("run_manifest_sha256")
+                if isinstance(expected_manifest_sha, str):
+                    actual_manifest_sha, _ = _sha256_and_bytes(Path(manifest_rel))
+                    if expected_manifest_sha != actual_manifest_sha:
+                        failures.append(f"{prefix}:run_manifest_sha256_mismatch")
+        else:
+            failures.append(f"{prefix}:run_manifest_path_invalid")
+
+        sampled = _kernel_referee_sample(task_id)
+        reported_sample = report.get("sampled_artifacts")
+        if reported_sample != sampled:
+            failures.append(f"{prefix}:kernel_sample_mismatch")
+        opened = report.get("opened_artifacts")
+        opened_pairs = {
+            (item.get("path"), str(item.get("sha256", "")).lower())
+            for item in opened
+            if isinstance(item, dict)
+        } if isinstance(opened, list) else set()
+        missing_opened = [item["path"] for item in sampled if (item["path"], item["sha256"]) not in opened_pairs]
+        if missing_opened:
+            failures.append(f"{prefix}:referee_did_not_open_sampled:{','.join(missing_opened)}")
+
+        frontmatter = _parse_task_frontmatter(_read_text(task.path)) or {}
+        expected_ids: dict[str, tuple[str, str]] = {}
+        criteria = frontmatter.get("success_criteria")
+        if isinstance(criteria, list):
+            for item in criteria:
+                if isinstance(item, dict) and isinstance(item.get("id"), str):
+                    expected_ids[item["id"]] = ("success_criterion_id", "major")
+        rubric_files = report.get("rubric_files")
+        if not isinstance(rubric_files, list) or not rubric_files:
+            failures.append(f"{prefix}:rubric_files_invalid")
+            rubric_files = []
+        for rubric_rel in rubric_files:
+            if not isinstance(rubric_rel, str) or not rubric_rel.startswith("contracts/rubrics/"):
+                failures.append(f"{prefix}:rubric_path_invalid:{rubric_rel}")
+                continue
+            rubric, rubric_error = _load_json_file(Path(rubric_rel))
+            if rubric_error is not None or not isinstance(rubric, dict):
+                failures.append(f"{prefix}:rubric_unreadable:{rubric_rel}")
+                continue
+            for check in rubric.get("checks", []):
+                if isinstance(check, dict) and isinstance(check.get("id"), str):
+                    expected_ids[check["id"]] = ("check_id", str(check.get("severity")))
+        assertion_floor = report.get("assertion_prefilter_floor")
+        if isinstance(assertion_floor, list):
+            for assertion in assertion_floor:
+                if isinstance(assertion, dict) and isinstance(assertion.get("check_id"), str):
+                    expected_ids[assertion["check_id"]] = ("check_id", "major")
+
+        verdicts = report.get("verdicts")
+        seen: set[str] = set()
+        major: list[dict[str, object]] = []
+        if not isinstance(verdicts, list):
+            failures.append(f"{prefix}:verdicts_invalid")
+            verdicts = []
+        for index, verdict in enumerate(verdicts):
+            if not isinstance(verdict, dict):
+                failures.append(f"{prefix}:verdict_{index}:invalid")
+                continue
+            identifier_keys = [key for key in ("success_criterion_id", "check_id") if isinstance(verdict.get(key), str)]
+            if len(identifier_keys) != 1:
+                failures.append(f"{prefix}:verdict_{index}:identifier_invalid")
+                continue
+            key = identifier_keys[0]
+            identifier = verdict[key]
+            if identifier not in expected_ids or expected_ids[identifier][0] != key:
+                failures.append(f"{prefix}:verdict_unexpected:{identifier}")
+                continue
+            if identifier in seen:
+                failures.append(f"{prefix}:verdict_duplicate:{identifier}")
+            seen.add(identifier)
+            if verdict.get("verdict") not in REFEREE_VERDICTS:
+                failures.append(f"{prefix}:verdict_value_invalid:{identifier}")
+            if verdict.get("severity") != expected_ids[identifier][1]:
+                failures.append(f"{prefix}:verdict_severity_mismatch:{identifier}")
+            if not isinstance(verdict.get("evidence_pointer"), str) or not verdict["evidence_pointer"].strip():
+                failures.append(f"{prefix}:evidence_pointer_missing:{identifier}")
+            if not isinstance(verdict.get("note"), str) or not verdict["note"].strip():
+                failures.append(f"{prefix}:note_missing:{identifier}")
+            if expected_ids[identifier][1] == "major":
+                major.append(verdict)
+        for missing_id in sorted(set(expected_ids) - seen):
+            failures.append(f"{prefix}:verdict_missing:{missing_id}")
+        computed_overall = (
+            "cannot_verify" if any(item.get("verdict") == "cannot_verify" for item in major)
+            else "not_supported" if any(item.get("verdict") == "not_supported" for item in major)
+            else "supported"
+        )
+        if report.get("overall") != computed_overall:
+            failures.append(f"{prefix}:overall_mismatch:{report.get('overall')}!={computed_overall}")
+        if task.state == "done":
+            for item in major:
+                identifier = item.get("success_criterion_id", item.get("check_id"))
+                if item.get("verdict") == "cannot_verify":
+                    failures.append(f"{prefix}:done_with_cannot_verify:{identifier}")
+                if item.get("verdict") == "not_supported" and (task.workstream in {"W6", "W7"} or task.task_kind == "writing"):
+                    failures.append(f"{prefix}:done_with_not_supported:{identifier}")
+                if item.get("verdict") == "not_supported" and isinstance(item.get("check_id"), str) and item["check_id"].startswith("ASSERTION-"):
+                    failures.append(f"{prefix}:done_with_unregistered_assertion:{identifier}")
+    for (task_id, manifest_rel), families in sorted(panel_votes.items()):
+        task = tasks.get(task_id)
+        if task is None or task.state != "done" or task.task_kind != "writing":
+            continue
+        if not any(_path_matches_prefix(output, "reports/paper/") for output in task.outputs):
+            continue
+        non_authoring = families - panel_authors.get((task_id, manifest_rel), set())
+        if len(non_authoring) < 2:
+            failures.append(
+                f"{task_id}:{manifest_rel}:referee_manuscript_panel_family_quorum:{len(non_authoring)}<2"
+            )
+    return GateResult(ok=not failures, details={"count": len(report_paths), "failures": failures})
+
+
+def gate_referee_calibration() -> GateResult:
+    report_paths = sorted(REFEREE_REPORT_DIR.glob("*.json")) if REFEREE_REPORT_DIR.exists() else []
+    if not report_paths and not REFEREE_CALIBRATION_REPORT.exists():
+        return GateResult(ok=True, details={"skipped": True, "reason": "no_referee_reports"})
+    failures: list[str] = []
+    calibration_path = Path("contracts/rubrics/calibration.yaml")
+    bar, bar_failures = _load_referee_bar(calibration_path)
+    failures.extend(bar_failures)
+    gold_path = Path("tests/gold_set/verdict_key.json")
+    gold, gold_error = _load_json_file(gold_path)
+    if gold_error is not None or not isinstance(gold, dict):
+        failures.append(f"{gold_path}:{gold_error or 'not_object'}")
+    elif gold.get("schema_version") != REFEREE_GOLD_KEY_SCHEMA_VERSION:
+        failures.append(f"{gold_path}:invalid_schema_version")
+    else:
+        cases = gold.get("cases") if isinstance(gold.get("cases"), list) else []
+        wrong_artifacts = sum(
+            1 for item in cases if isinstance(item, dict) and item.get("kind") == "artifact" and item.get("human_verdict") == "not_supported"
+        )
+        wrong_proofs = sum(
+            1 for item in cases if isinstance(item, dict) and item.get("kind") == "proof" and item.get("human_verdict") == "not_supported"
+        )
+        if wrong_artifacts < 3:
+            failures.append(f"{gold_path}:wrong_artifact_floor:{wrong_artifacts}")
+        if wrong_proofs < 3:
+            failures.append(f"{gold_path}:wrong_proof_floor:{wrong_proofs}")
+        committed = _parse_utc_iso(bar.get("committed_at_utc")) if isinstance(bar, dict) else None
+        graded = _parse_utc_iso(gold.get("graded_at_utc"))
+        if committed is None or graded is None or committed > graded:
+            failures.append("calibration_bar_not_committed_before_grading")
+
+    calibration_report, report_error = _load_json_file(REFEREE_CALIBRATION_REPORT)
+    if report_error is not None or not isinstance(calibration_report, dict):
+        failures.append(f"{REFEREE_CALIBRATION_REPORT}:{report_error or 'not_object'}")
+    else:
+        if calibration_report.get("schema_version") != REFEREE_CALIBRATION_SCHEMA_VERSION:
+            failures.append(f"{REFEREE_CALIBRATION_REPORT}:invalid_schema_version")
+        expected_sha, _ = _sha256_and_bytes(calibration_path)
+        if calibration_report.get("calibration_sha256") != expected_sha:
+            failures.append(f"{REFEREE_CALIBRATION_REPORT}:calibration_sha256_mismatch")
+        agreement = calibration_report.get("agreement")
+        flip_rate = calibration_report.get("position_flip_rate")
+        if isinstance(bar, dict):
+            if not isinstance(agreement, (int, float)) or float(agreement) < float(bar["agreement_floor"]):
+                failures.append(f"{REFEREE_CALIBRATION_REPORT}:agreement_below_floor:{agreement}")
+            if not isinstance(flip_rate, (int, float)) or float(flip_rate) > float(bar["position_flip_ceiling"]):
+                failures.append(f"{REFEREE_CALIBRATION_REPORT}:position_flip_above_ceiling:{flip_rate}")
+        if calibration_report.get("wrong_artifact_count", 0) < 3:
+            failures.append(f"{REFEREE_CALIBRATION_REPORT}:wrong_artifact_floor")
+        if calibration_report.get("wrong_proof_count", 0) < 3:
+            failures.append(f"{REFEREE_CALIBRATION_REPORT}:wrong_proof_floor")
+        if calibration_report.get("calibrated") is not True:
+            failures.append(f"{REFEREE_CALIBRATION_REPORT}:calibrated_false")
+    return GateResult(ok=not failures, details={"reports_present": len(report_paths), "failures": failures})
 
 
 HISTORICAL_EXEMPTIONS_SCHEMA_VERSION = "research_swarm.historical_exemptions.v1"
@@ -6360,6 +6740,9 @@ _CORE_GATE_NAMES = (
     "processed_manifest_validity",
     "swarm_run_manifest_validity",
     "judge_review_log_validity",
+    "referee_rubrics",
+    "referee_report_validity",
+    "referee_calibration",
     "review_bundle_integrity",
     "processed_manifest_hashes",
     "raw_manifest_hashes",
@@ -6454,6 +6837,9 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
         "processed_manifest_validity": gate_processed_manifest_validity,
         "swarm_run_manifest_validity": gate_swarm_run_manifest_validity,
         "judge_review_log_validity": gate_judge_review_log_validity,
+        "referee_rubrics": gate_referee_rubrics,
+        "referee_report_validity": gate_referee_report_validity,
+        "referee_calibration": gate_referee_calibration,
         "review_bundle_integrity": gate_review_bundle_integrity,
         "processed_manifest_hashes": gate_processed_manifest_hashes,
         "raw_manifest_hashes": gate_raw_manifest_hashes,

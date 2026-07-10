@@ -1,0 +1,11 @@
+{
+  "schema_version": "research_swarm.rubric.v1",
+  "task_kind": "analysis",
+  "checks": [
+    {"id": "ANALYSIS_PROTOCOL_CONFORMANCE", "prompt": "Verify that the analysis implements the locked estimand, sample, regime, and exclusions.", "severity": "major", "evidence_required": true},
+    {"id": "ANALYSIS_STATISTICAL_VALIDITY", "prompt": "Check computations, uncertainty treatment, denominators, and inferential wording against primary artifacts.", "severity": "major", "evidence_required": true},
+    {"id": "ANALYSIS_CLAIM_TYPING", "prompt": "Adjudicate claim types from their substance, including causal claims paraphrased without causal trigger words; do not accept an author's descriptive label as evidence.", "severity": "major", "evidence_required": true},
+    {"id": "ANALYSIS_ALTERNATIVES", "prompt": "Check whether material confounds and alternative explanations are tested or bounded.", "severity": "major", "evidence_required": true},
+    {"id": "ANALYSIS_LIMITATIONS", "prompt": "Check that limitations match the actual design and evidence surface.", "severity": "minor", "evidence_required": true}
+  ]
+}

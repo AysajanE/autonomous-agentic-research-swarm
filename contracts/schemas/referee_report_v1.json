@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "research_swarm.referee_report.v1.schema",
+  "title": "Cross-family referee report v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "task_id",
+    "referee_family",
+    "rubric_version",
+    "verdicts",
+    "opened_artifacts",
+    "overall"
+  ],
+  "properties": {
+    "schema_version": {"const": "research_swarm.referee_report.v1"},
+    "task_id": {"type": "string", "pattern": "^T[0-9]{3}$"},
+    "referee_family": {"type": "string", "minLength": 1},
+    "rubric_version": {"type": "string", "minLength": 1},
+    "verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["verdict", "evidence_pointer", "note"],
+        "properties": {
+          "success_criterion_id": {"type": "string", "minLength": 1},
+          "check_id": {"type": "string", "minLength": 1},
+          "verdict": {"enum": ["supported", "not_supported", "cannot_verify"]},
+          "severity": {"enum": ["major", "minor"]},
+          "evidence_pointer": {"type": "string"},
+          "note": {"type": "string", "minLength": 1}
+        },
+        "oneOf": [
+          {"required": ["success_criterion_id"], "not": {"required": ["check_id"]}},
+          {"required": ["check_id"], "not": {"required": ["success_criterion_id"]}}
+        ]
+      }
+    },
+    "opened_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "overall": {"enum": ["supported", "not_supported", "cannot_verify"]}
+  }
+}

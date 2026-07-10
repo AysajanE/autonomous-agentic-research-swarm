@@ -1,0 +1,11 @@
+{
+  "schema_version": "research_swarm.rubric.v1",
+  "task_kind": "proof_review",
+  "checks": [
+    {"id": "PROOF_ASSUMPTIONS", "prompt": "Enumerate every assumption and verify that each is used within its stated domain.", "severity": "major", "evidence_required": true},
+    {"id": "PROOF_DERIVATION", "prompt": "Independently follow each load-bearing derivation; a coherent narrative is not a proof.", "severity": "major", "evidence_required": true},
+    {"id": "PROOF_EDGE_CASES", "prompt": "Test boundary cases, sign changes, quantifier order, and hidden division or existence conditions.", "severity": "major", "evidence_required": true},
+    {"id": "PROOF_MACHINE_COMPANION", "prompt": "Check the machine-verification or numeric-falsification companion against the theorem actually stated.", "severity": "major", "evidence_required": true},
+    {"id": "PROOF_PRESENTATION", "prompt": "Flag notation or exposition defects that do not alter validity.", "severity": "minor", "evidence_required": true}
+  ]
+}

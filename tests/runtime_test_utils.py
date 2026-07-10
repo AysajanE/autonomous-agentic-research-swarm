@@ -199,6 +199,24 @@ def _default_framework_json(mode: str) -> dict[str, Any]:
                 "reports/paper/",
             ],
         },
+        "executors": {
+            "planner": {
+                "backend": "claude",
+                "command": "claude",
+                "model": "fixture-planner",
+                "profile": "read-only+backlog-write",
+            },
+            "referee_panel": [
+                {
+                    "backend": "claude",
+                    "family": "claude",
+                    "command": "claude",
+                    "model": "fixture-referee",
+                    "profile": "read-only",
+                    "tools": ["Read", "Glob", "Grep"],
+                }
+            ],
+        },
     }
 
 
@@ -280,6 +298,13 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
         },
     )
     write_text(root, "contracts/schemas/claims_v1.yaml", "type: object\n")
+    for rubric_path in sorted((REPO_ROOT / "contracts/rubrics").glob("*")):
+        if rubric_path.is_file():
+            write_text(
+                root,
+                f"contracts/rubrics/{rubric_path.name}",
+                rubric_path.read_text(encoding="utf-8"),
+            )
     write_project_yaml(root, mode=mode)
     write_framework_json(root, mode=mode)
 
