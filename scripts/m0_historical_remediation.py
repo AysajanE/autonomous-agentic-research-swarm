@@ -18,6 +18,7 @@ import datetime as dt
 import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 
 REPO = Path(__file__).resolve().parents[1]
@@ -200,6 +201,23 @@ def main(argv: list[str]) -> int:
         _collect_section(REPO / "data/processed_manifest/rebaselines", "*.rebaseline.json")
         + _collect_section(REPO / "data/raw_manifest/rebaselines", "*.rebaseline.json")
     )
+    exemptions["tasks"] = []
+    orchestrator_dir = REPO / ".orchestrator"
+    for state_dir in ("backlog", "active", "integration_ready", "ready_for_review", "blocked", "done"):
+        for task_path in sorted((orchestrator_dir / state_dir).glob("*.md")):
+            if task_path.name == "README.md":
+                continue
+            text = task_path.read_text(encoding="utf-8")
+            frontmatter = text.split("---", 2)[1] if text.startswith("---") and text.count("---") >= 2 else ""
+            if re.search(r"^task_schema\s*:", frontmatter, flags=re.MULTILINE):
+                continue
+            exemptions["tasks"].append(
+                {
+                    "path": task_path.relative_to(REPO).as_posix(),
+                    "sha256": sha256_file(task_path),
+                    "schema_version": "v1",
+                }
+            )
 
     exemptions_payload = {
         "schema_version": EXEMPTIONS_SCHEMA,
@@ -216,6 +234,7 @@ def main(argv: list[str]) -> int:
         "raw_manifests": exemptions["raw_manifests"],
         "validation_reports": exemptions["validation_reports"],
         "rebaselines": exemptions["rebaselines"],
+        "tasks": exemptions["tasks"],
     }
     write_json(REPO / "contracts/historical_exemptions.json", exemptions_payload, write)
 

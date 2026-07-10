@@ -13,6 +13,7 @@ from unittest import mock
 from runtime_test_utils import SWARM_PATH
 from runtime_test_utils import attest_containment_fixture
 from runtime_test_utils import init_git_fixture_repo
+from runtime_test_utils import write_text
 from runtime_test_utils import load_swarm_module
 from runtime_test_utils import scaffold_runtime_repo
 from runtime_test_utils import write_framework_json
@@ -33,8 +34,8 @@ import swarm_reconcile
 
 
 swarm = load_swarm_module()
-GREEN_GATE = 'python -c "raise SystemExit(0)";'
-SLOW_GATE = 'python -c "import time; time.sleep(2)";'
+GREEN_GATE = 'python scripts/noop_gate.py'
+SLOW_GATE = "python scripts/slow_gate.py"
 REVIEW_BUNDLE_IMMEDIATE = {
     "run_manifest_dir": "reports/status/swarm_runs",
     "judge_review_dir": "reports/status/reviews",
@@ -87,6 +88,8 @@ class M1ChaosReconcileTests(unittest.TestCase):
         write_framework_json(root, overrides=overrides)
         for task_id in task_ids:
             output = f"src/{task_id.lower()}_result.txt"
+            if task_id == slow_gate_task:
+                write_text(root, "scripts/slow_gate.py", "import time, sys\ntime.sleep(2)\nsys.exit(0)\n")
             gate = SLOW_GATE if task_id == slow_gate_task else GREEN_GATE
             write_task(
                 root,

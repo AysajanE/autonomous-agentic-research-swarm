@@ -13,12 +13,16 @@ swarm = load_swarm_module()
 
 
 class ConstrainedGateExecutionTest(unittest.TestCase):
-    def _run(self, gates: list[str], **kwargs):
+    def _run(self, gates: list[str], *, enforce_form: bool = False, **kwargs):
+        # these exercise the raw sandbox primitive with synthetic python -c
+        # commands; enforce_form defaults False here. The form policy itself
+        # is covered by test_gate_form_policy_rejects_code_execution below.
         with tempfile.TemporaryDirectory() as tmp:
-            return swarm._run_gates(Path(tmp), gates, **kwargs)
+            return swarm._run_gates(Path(tmp), gates, enforce_form=enforce_form, **kwargs)
 
     def test_green_python_gate_passes(self) -> None:
-        ok, outputs = self._run(['python -c "raise SystemExit(0)";'])
+        # raw sandbox mechanics: a trivially-green synthetic command
+        ok, outputs = self._run(['python -c "raise SystemExit(0)"'])
         self.assertTrue(ok, outputs)
         self.assertEqual(outputs[0]["returncode"], 0)
         self.assertIsNone(outputs[0]["constraint_violation"])
@@ -98,7 +102,7 @@ class ConstrainedGateExecutionTest(unittest.TestCase):
 
     def test_custom_allowlist_from_contract_is_honored(self) -> None:
         ok, outputs = self._run(
-            ['python -c "raise SystemExit(0)";'],
+            ['python scripts/noop_gate.py'],
             interpreter_allowlist=("make",),
         )
         self.assertFalse(ok)
@@ -106,6 +110,17 @@ class ConstrainedGateExecutionTest(unittest.TestCase):
             outputs[0]["constraint_violation"],
             "gate_interpreter_not_allowlisted:python",
         )
+
+
+    def test_gate_form_policy_rejects_code_execution(self) -> None:
+        ok, outputs = self._run(['python -c "print(1)"'], enforce_form=True)
+        self.assertFalse(ok)
+        self.assertTrue(str(outputs[0]["constraint_violation"]).startswith("gate_form_forbidden:"))
+        ok2, outputs2 = self._run(["python scripts/noop_gate.py"], enforce_form=True)
+        # noop_gate.py does not exist in the temp dir, so it runs and fails
+        # (returncode set) rather than being form-rejected — the point is the
+        # FORM passes: no constraint_violation.
+        self.assertIsNone(outputs2[0]["constraint_violation"])
 
 
 if __name__ == "__main__":

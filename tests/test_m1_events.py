@@ -23,7 +23,7 @@ from runtime_test_utils import write_task
 
 swarm = load_swarm_module()
 swarm_events = swarm.swarm_events
-GREEN_GATE = 'python -c "raise SystemExit(0)";'
+GREEN_GATE = 'python scripts/noop_gate.py'
 RED_GATE = 'python -c "raise SystemExit(7)";'
 
 

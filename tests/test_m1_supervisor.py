@@ -29,7 +29,7 @@ import swarm_events
 
 swarm = load_swarm_module()
 quality_gates = load_quality_gates_module()
-GREEN_GATE = 'python -c "raise SystemExit(0)";'
+GREEN_GATE = 'python scripts/noop_gate.py'
 REVIEW_BUNDLE_IMMEDIATE = {
     "run_manifest_dir": "reports/status/swarm_runs",
     "judge_review_dir": "reports/status/reviews",

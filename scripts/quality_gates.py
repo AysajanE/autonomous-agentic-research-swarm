@@ -27,6 +27,9 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from swarm_taskfile import NETWORK_COMMAND_TOKENS
+from swarm_taskfile import REQUIRED_FRONTMATTER_KEYS
+from swarm_taskfile import lint_task_files
 from swarm_taskfile import parse_status_value as _parse_status_value
 from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 from sweep_tasks import plan_sweep as _plan_sweep
@@ -77,19 +80,6 @@ FORBIDDEN_INTEGRATION_READY_OUTPUT_PREFIXES = (
     "reports/validation/",
     "reports/figures/",
     "reports/tables/",
-)
-REQUIRED_FRONTMATTER_KEYS = (
-    "task_id",
-    "title",
-    "workstream",
-    "role",
-    "priority",
-    "dependencies",
-    "allowed_paths",
-    "disallowed_paths",
-    "outputs",
-    "gates",
-    "stop_conditions",
 )
 REQUIRED_TASK_HEADINGS = (
     "## Context",
@@ -2380,9 +2370,6 @@ def gate_review_bundle_integrity() -> GateResult:
     return GateResult(ok=len(failures) == 0, details={"failures": failures})
 
 
-NETWORK_COMMAND_TOKENS = ("curl", "wget", "http://", "https://")
-
-
 def gate_network_strings() -> GateResult:
     """§9.4 (M1): gate-command strings in non-network workstreams must not
     reference network tools or URLs — deterministic gates stay offline."""
@@ -2403,6 +2390,29 @@ def gate_network_strings() -> GateResult:
             if hits:
                 failures.append(f"{task.path}:network_string_in_gate:{','.join(hits)}:{gate}")
     return GateResult(ok=len(failures) == 0, details={"failures": failures})
+
+
+def gate_task_lint() -> GateResult:
+    """§4.4 (M2): strict schema-v2 specification and independence checks."""
+    try:
+        contract = load_framework_contract()
+    except ValueError as exc:
+        return GateResult(ok=False, details={"failures": [str(exc)]})
+
+    task_paths = _iter_task_files(contract)
+    diagnostics = lint_task_files(
+        task_paths,
+        repo_root=Path.cwd(),
+        network_workstreams=contract.network_workstreams,
+        v1_exemptions=_historical_exemption_entries("tasks"),
+    )
+    return GateResult(
+        ok=not diagnostics,
+        details={
+            "count": len(task_paths),
+            "failures": [diagnostic.as_dict() for diagnostic in diagnostics],
+        },
+    )
 
 
 def _collect_gate_results() -> dict[str, GateResult]:
@@ -2427,6 +2437,7 @@ def _collect_gate_results() -> dict[str, GateResult]:
         "projection_drift": gate_projection_drift(),
         "historical_exemptions": gate_historical_exemptions(),
         "network_strings": gate_network_strings(),
+        "task_lint": gate_task_lint(),
     }
 
 

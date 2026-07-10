@@ -28,7 +28,7 @@ swarm = load_swarm_module()
 quality_gates = load_quality_gates_module()
 # Trailing ';' keeps the closing quote out of the frontmatter parser's
 # strip("'\"") — a known wart the task-lint gate will reject at M2.
-GREEN_GATE = 'python -c "raise SystemExit(0)";'
+GREEN_GATE = 'python scripts/noop_gate.py'
 
 
 def _git(root: Path, *args: str) -> str:
