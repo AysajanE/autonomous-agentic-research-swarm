@@ -56,7 +56,9 @@ import swarm_claims
 import swarm_events
 import sweep_tasks
 from swarm_taskfile import WorktreeCollisionError
+from swarm_taskfile import REQUIRED_FRONTMATTER_KEYS
 from swarm_taskfile import extract_section as _extract_section
+from swarm_taskfile import lint_task_files
 from swarm_taskfile import parse_status_value as _parse_status_value
 from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 from swarm_taskfile import parse_task_id_from_branch as _parse_task_id_from_branch
@@ -123,19 +125,6 @@ FORBIDDEN_INTEGRATION_READY_OUTPUT_PREFIXES = (
     "reports/validation/",
     "reports/figures/",
     "reports/tables/",
-)
-REQUIRED_FRONTMATTER_KEYS = (
-    "task_id",
-    "title",
-    "workstream",
-    "role",
-    "priority",
-    "dependencies",
-    "allowed_paths",
-    "disallowed_paths",
-    "outputs",
-    "gates",
-    "stop_conditions",
 )
 VALID_TASK_PRIORITIES = {"low", "medium", "high"}
 
@@ -1141,12 +1130,45 @@ def _task_summary(task: Task) -> dict[str, object]:
 
 def ready_backlog_tasks(tasks: dict[str, Task], claimed_ids: set[str], contract: FrameworkContract) -> list[Task]:
     ready: list[Task] = []
+    exemptions_path = contract.repo_root / "contracts" / "historical_exemptions.json"
+    v1_exemptions: dict[str, dict[str, object]] = {}
+    try:
+        exemptions_payload = json.loads(_read_text(exemptions_path))
+        if isinstance(exemptions_payload, dict):
+            for entry in exemptions_payload.get("tasks", []):
+                if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                    v1_exemptions[entry["path"]] = entry
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    diagnostics = lint_task_files(
+        [task.path for task in tasks.values()],
+        repo_root=contract.repo_root,
+        network_workstreams=contract.network_workstreams,
+        v1_exemptions=v1_exemptions,
+    )
+    diagnostics_by_task: dict[str, list[dict[str, object]]] = {}
+    for diagnostic in diagnostics:
+        diagnostics_by_task.setdefault(diagnostic.task, []).append(diagnostic.as_dict())
+
     for task in tasks.values():
         if task.state != "backlog":
             continue
         if task.role not in set(contract.task_execution_roles):
             continue
         if task.task_id in claimed_ids:
+            continue
+        task_diagnostics = diagnostics_by_task.get(task.task_id, [])
+        if task_diagnostics:
+            _record_swarm_event(
+                contract.repo_root,
+                {
+                    "event": "task_lint_rejected",
+                    "task_id": task.task_id,
+                    "task_path": task.path.as_posix(),
+                    "diagnostics": task_diagnostics,
+                },
+            )
             continue
         if _dependencies_satisfied(task, tasks, contract):
             ready.append(task)

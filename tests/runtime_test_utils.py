@@ -348,6 +348,32 @@ def _emit_list(key: str, values: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _emit_unquoted_list(key: str, values: list[str]) -> str:
+    if not values:
+        return f"{key}: []"
+    return "\n".join([f"{key}:", *(f"  - {value}" for value in values)])
+
+
+def _emit_mapping_list(key: str, values: list[dict[str, object]]) -> str:
+    if not values:
+        return f"{key}: []"
+    lines = [f"{key}:"]
+    for item in values:
+        for index, (item_key, item_value) in enumerate(item.items()):
+            prefix = "  - " if index == 0 else "    "
+            if isinstance(item_value, bool):
+                rendered = "true" if item_value else "false"
+            else:
+                rendered = f'"{item_value}"'
+            lines.append(f"{prefix}{item_key}: {rendered}")
+    return "\n".join(lines)
+
+
+def _emit_inline_mapping(key: str, values: dict[str, object]) -> str:
+    rendered = ", ".join(f"{item_key}: {item_value}" for item_key, item_value in values.items())
+    return f"{key}: {{{rendered}}}"
+
+
 def write_task(
     root: Path,
     folder: str,
@@ -369,7 +395,18 @@ def write_task(
     state: str = "backlog",
     last_updated: str = "2026-03-29",
     slug: str = "task",
+    schema: str = "v1",
+    complexity_tier: str = "S",
+    success_criteria: list[dict[str, object]] | None = None,
+    budgets: dict[str, object] | None = None,
+    checkpoint_contract: str = "none",
+    recon_required: bool = False,
+    recon_waiver: str | None = None,
+    inputs: list[dict[str, object]] | None = None,
+    constructed_by: str | None = None,
 ) -> Path:
+    if schema not in {"v1", "v2"}:
+        raise ValueError(f"unsupported task fixture schema: {schema}")
     title = title or f"{task_id} title"
     dependencies = dependencies or []
     integration_ready_dependencies = integration_ready_dependencies or []
@@ -378,14 +415,44 @@ def write_task(
     outputs = outputs or ["src/example.py"]
     gates = gates or ["make gate"]
     stop_conditions = stop_conditions or ["Need @human"]
+    success_criteria = success_criteria or [
+        {"id": "SC1", "statement": "Declared output exists", "verification": "make gate"}
+    ]
+    budgets = budgets or {"max_wall_clock": "1h", "max_tokens": 100000, "max_cost_usd": 10}
+    inputs = inputs or [
+        {
+            "path": "data/processed_manifest/input.json",
+            "sha256": "1" * 64,
+            "comparison_basis": False,
+        }
+    ]
 
-    frontmatter = "\n".join(
+    frontmatter_lines = ["---"]
+    if schema == "v2":
+        frontmatter_lines.append('task_schema: "research_swarm.task.v2"')
+    frontmatter_lines.extend(
         [
-            "---",
             f'task_id: "{task_id}"',
             f'title: "{title}"',
             f'workstream: "{workstream}"',
             f'task_kind: "{task_kind or ""}"',
+        ]
+    )
+    if schema == "v2":
+        frontmatter_lines.extend(
+            [
+                f'complexity_tier: "{complexity_tier}"',
+                _emit_mapping_list("success_criteria", success_criteria),
+                _emit_inline_mapping("budgets", budgets),
+                f'checkpoint_contract: "{checkpoint_contract}"',
+                f"recon_required: {'true' if recon_required else 'false'}",
+                *([f'recon_waiver: "{recon_waiver}"'] if recon_waiver is not None else []),
+                *([f'constructed_by: "{constructed_by}"'] if constructed_by is not None else []),
+                _emit_mapping_list("inputs", inputs),
+            ]
+        )
+    frontmatter_lines.extend(
+        [
             f"allow_network: {'true' if allow_network else 'false'}",
             f'role: "{role}"',
             f'priority: "{priority}"',
@@ -394,11 +461,12 @@ def write_task(
             _emit_list("allowed_paths", allowed_paths),
             _emit_list("disallowed_paths", disallowed_paths),
             _emit_list("outputs", outputs),
-            _emit_list("gates", gates),
+            _emit_unquoted_list("gates", gates) if schema == "v2" else _emit_list("gates", gates),
             _emit_list("stop_conditions", stop_conditions),
             "---",
         ]
     )
+    frontmatter = "\n".join(frontmatter_lines)
 
     body = "\n".join(
         [
@@ -441,7 +509,14 @@ def write_task(
     )
 
     rel = f".orchestrator/{folder}/{task_id}_{slug}.md"
-    return write_text(root, rel, frontmatter + "\n" + body)
+    path = write_text(root, rel, frontmatter + "\n" + body)
+    # Claimability now lints backlog tasks. Register historical v1 backlog
+    # fixtures automatically so existing claim-path tests keep exercising v1.
+    # Active fixtures bypass claimability and must not dirty this contract file:
+    # direct-run ownership tests correctly treat that as an out-of-scope write.
+    if schema == "v1" and folder == "backlog" and state == "backlog":
+        register_historical_exemption(root, section="tasks", rel_path=rel)
+    return path
 
 
 def write_run_manifest(

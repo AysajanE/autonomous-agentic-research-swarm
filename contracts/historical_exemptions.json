@@ -1,5 +1,5 @@
 {
-  "created_at_utc": "2026-07-10T03:07:03Z",
+  "created_at_utc": "2026-07-10T07:23:54Z",
   "processed_manifests": [
     {
       "path": "data/processed_manifest/daily_l1_rent_decomposition_2026-04-01.json",
@@ -523,6 +523,108 @@
     }
   ],
   "schema_version": "research_swarm.historical_exemptions.v1",
+  "tasks": [
+    {
+      "path": ".orchestrator/done/T000_protocol_lock.md",
+      "schema_version": "v1",
+      "sha256": "057cbcd56040e838dae098f6d2f009d941b9d7eb0ef6e4bdaa4840f0064027a7"
+    },
+    {
+      "path": ".orchestrator/done/T005_define_workstreams.md",
+      "schema_version": "v1",
+      "sha256": "76f2e197bc3ae64ac69b972796d08890585ef82b737a4baf0fa23e4db98837eb"
+    },
+    {
+      "path": ".orchestrator/done/T010_initialize_repo_skeleton.md",
+      "schema_version": "v1",
+      "sha256": "43d7a6cdb9c49f354da291519d8e991606ed22632ea7bc0eb226425af577cac6"
+    },
+    {
+      "path": ".orchestrator/done/T015_expand_quality_gates.md",
+      "schema_version": "v1",
+      "sha256": "f0aca2acf31eb5654f6ba1acdd2a224b69c47efc7e19d7f8e490c0ee718b8000"
+    },
+    {
+      "path": ".orchestrator/done/T020_define_panel_schema_and_data_dictionary.md",
+      "schema_version": "v1",
+      "sha256": "b6a58aac47f427c8f7c84daf2d1632c4008186abeca1588eb05002457f0b3627"
+    },
+    {
+      "path": ".orchestrator/done/T025_populate_rollup_registry.md",
+      "schema_version": "v1",
+      "sha256": "e54821fc3e21005668b5a3bb8667030276693ccdb6875f2960e63d7253c5a8aa"
+    },
+    {
+      "path": ".orchestrator/done/T030_growthepie_etl_snapshot_and_vendor_panel.md",
+      "schema_version": "v1",
+      "sha256": "49ce080bad75ea20808b11892e4c0f1f28b0cd9c5f146d0e5cad699280030bff"
+    },
+    {
+      "path": ".orchestrator/done/T035_onchain_l1_rent_etl_and_decomposition.md",
+      "schema_version": "v1",
+      "sha256": "8dacccde5a21aa57903749baade30d2c658c727d43bfdaefa49d617903b2759b"
+    },
+    {
+      "path": ".orchestrator/done/T040_metrics_str_module_and_tests.md",
+      "schema_version": "v1",
+      "sha256": "90dce0f7dc8f50b7715e917d973270e084e2ffb8243b365821bf902c50b37c12"
+    },
+    {
+      "path": ".orchestrator/done/T045_repair_registry_attribution_hooks_for_reconciliation.md",
+      "schema_version": "v1",
+      "sha256": "7fb758e08cad7850d29849a949543eb53956e30dcf12907cd35f65733a7d501b"
+    },
+    {
+      "path": ".orchestrator/done/T046_rebuild_canonical_panel_after_attribution_repair.md",
+      "schema_version": "v1",
+      "sha256": "ba07dd3f7613285b7ea7670811161c51d062ec5d1f1854c4330e09e838455ed0"
+    },
+    {
+      "path": ".orchestrator/done/T047_make_vendor_profit_contract_compatible.md",
+      "schema_version": "v1",
+      "sha256": "1a381eb025a63da418ece68876f53a1dfcee17ec4bc60dd6f2621f812f2dd792"
+    },
+    {
+      "path": ".orchestrator/done/T048_lock_rent_paid_contract_and_vendor_benchmark_policy.md",
+      "schema_version": "v1",
+      "sha256": "fe2f1fc3d3a04f1f34b834477a556689561ce77558b897740e19bfe551e8852d"
+    },
+    {
+      "path": ".orchestrator/done/T049_emit_rollup_day_rent_components_for_auditability.md",
+      "schema_version": "v1",
+      "sha256": "62d2bd20b1117e2f4f485d99147207306cdbb29af8eadb44758c05b0a3f001ad"
+    },
+    {
+      "path": ".orchestrator/done/T050_validation_str_pipeline_checks.md",
+      "schema_version": "v1",
+      "sha256": "9484bd96c78a8830d2ef84555e3af907f63e2304b00a2868ce023b113e9b2c34"
+    },
+    {
+      "path": ".orchestrator/done/T051_lock_starknet_shared_settlement_attribution_contract.md",
+      "schema_version": "v1",
+      "sha256": "e21b27894ced6324b11ca6bfe604a602752a0c38cc671eec86faf1edeffc8612"
+    },
+    {
+      "path": ".orchestrator/done/T052_repair_starknet_shared_sharp_allocation_in_canonical_etl.md",
+      "schema_version": "v1",
+      "sha256": "d47f9c7c29c987cd8850b139c80c49aab9594cdac7afe834a69be78db6839eea"
+    },
+    {
+      "path": ".orchestrator/done/T060_analysis_str_figures_and_tables.md",
+      "schema_version": "v1",
+      "sha256": "136b42957be01911eb2aac7864b58a8effdd8eec5fe8805a8fad74f52caf74b3"
+    },
+    {
+      "path": ".orchestrator/done/T070_quarto_paper_build.md",
+      "schema_version": "v1",
+      "sha256": "7c38f3097e7ddcd7f8f0dbb089cfd8a9b27dc6fa7b23315f4cda9fc6a2133d9e"
+    },
+    {
+      "path": ".orchestrator/done/T080_release_candidate_assembly.md",
+      "schema_version": "v1",
+      "sha256": "cf2b7c72306a3f2538d8b572af4f50eb0f6747c6922314587dd1d2989db2b86c"
+    }
+  ],
   "validation_reports": [
     {
       "path": "reports/validation/cross_source_reconciliation.json",
