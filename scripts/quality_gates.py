@@ -5634,17 +5634,11 @@ def _authoritative_integrity_audit_path(paths: list[Path]) -> Path | None:
         candidate = by_relpath.get(raw_path) if isinstance(raw_path, str) else None
         if candidate is not None and isinstance(digest, str) and _sha256_and_bytes(candidate)[0] == digest:
             return candidate
-    if _repo_has_git_worktree(Path.cwd()):
-        cp = subprocess.run(
-            ["git", "ls-files", "--", "reports/status/integrity_audit/*.json"],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        committed = sorted(by_relpath[path] for path in cp.stdout.splitlines() if path in by_relpath)
-        if committed:
-            return committed[-1]
-    return paths[-1] if paths else None
+    # No fallback to a bare committed/latest report: only a report bound to a
+    # kernel-emitted `integrity_audit_recorded` event (the events journal is
+    # kernel-only, so the event cannot be forged on a task branch) is
+    # authoritative. A hand-authored report with no matching event is rejected.
+    return None
 
 
 def _configured_integrity_executor() -> dict[str, str] | None:
@@ -5732,6 +5726,15 @@ def gate_integrity_audit() -> GateResult:
     failures: list[dict[str, object]] = []
     path = _authoritative_integrity_audit_path(paths)
     if path is None:
+        # Reports exist but none is bound to a kernel-emitted journal event —
+        # a hand-authored report cannot authorize a release.
+        failures.append(
+            _science_failure(
+                "integrity_audit_unjournaled",
+                subject="reports/status/integrity_audit",
+                expected="a report bound to a kernel integrity_audit_recorded event",
+            )
+        )
         return GateResult(ok=False, details={"status": "invalid", "failures": failures})
     payload, error = _load_json_file(path)
     if error is not None or payload is None:

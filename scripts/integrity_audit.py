@@ -23,6 +23,9 @@ import sys
 import tempfile
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import swarm_events  # noqa: E402
+
 
 SCHEMA_VERSION = "research_swarm.integrity_audit.v1"
 MOCK_SCHEMA_VERSION = "research_swarm.mock_integrity_audit.v1"
@@ -898,6 +901,24 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Emit the kernel-authored journal event that binds this report — the gate
+    # accepts ONLY a report bound to such an event (the events journal is
+    # kernel-only), so a hand-authored report cannot authorize a release.
+    try:
+        report_rel = output.resolve().relative_to(repo.resolve()).as_posix()
+    except ValueError:
+        report_rel = output.as_posix()
+    report_sha = hashlib.sha256(output.read_bytes()).hexdigest()
+    swarm_events.append_event(
+        repo,
+        {
+            "event": "integrity_audit_recorded",
+            "report_path": report_rel,
+            "report_sha256": report_sha,
+            "status": report.get("status"),
+            "mode": report.get("mode"),
+        },
+    )
     return report
 
 

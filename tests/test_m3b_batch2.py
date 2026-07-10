@@ -41,8 +41,28 @@ integrity_audit = _load("m3b_batch2_integrity_audit", REPO / "scripts/integrity_
 literature = _load("m3b_batch2_literature", REPO / "scripts/literature.py")
 
 
+_swarm_events = _load("m3b_batch2_swarm_events", REPO / "scripts/swarm_events.py")
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_audit(root: Path, relpath: str, report: dict) -> None:
+    """Write an integrity-audit report AND emit the kernel-authored
+    `integrity_audit_recorded` journal event that binds it — the gate accepts
+    only journal-bound reports (as a real `integrity_audit.py` run does)."""
+    write_json(root, relpath, report)
+    _swarm_events.append_event(
+        root,
+        {
+            "event": "integrity_audit_recorded",
+            "report_path": relpath,
+            "report_sha256": _sha(root / relpath),
+            "status": report.get("status"),
+            "mode": report.get("mode"),
+        },
+    )
 
 
 def _reasons(result) -> set[str]:
@@ -349,7 +369,7 @@ class IntegrityAuditTest(unittest.TestCase):
                 ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
             ).stdout.strip()
             report = _valid_report(root, audited_sha=audited)
-            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            _write_audit(root, "reports/status/integrity_audit/audit.json", report)
             write_text(root, "unrelated.txt", "out of band\n")
             subprocess.run(["git", "add", "unrelated.txt"], cwd=root, check=True)
             subprocess.run(["git", "commit", "-m", "out of band"], cwd=root, check=True, capture_output=True)
@@ -364,7 +384,7 @@ class IntegrityAuditTest(unittest.TestCase):
             report = _valid_report(root)
             report["executor"]["audit_family"] = "codex"
             report["surface_rebuilds"][0]["outputs"][0]["matches_manifest"] = False
-            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            _write_audit(root, "reports/status/integrity_audit/audit.json", report)
             with chdir(root):
                 result = quality_gates.gate_integrity_audit()
             self.assertIn("integrity_audit_family_of_builder", _reasons(result))
@@ -375,12 +395,12 @@ class IntegrityAuditTest(unittest.TestCase):
             root = Path(tmp) / "repo"
             root.mkdir()
             report = _valid_report(root)
-            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            _write_audit(root, "reports/status/integrity_audit/audit.json", report)
             with chdir(root):
                 self.assertTrue(quality_gates.gate_integrity_audit().ok)
             report["executor"]["backend"] = "mock"
             report["executor"]["model"] = None
-            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            _write_audit(root, "reports/status/integrity_audit/audit.json", report)
             with chdir(root):
                 result = quality_gates.gate_integrity_audit()
             self.assertIn("integrity_audit_executor_contract_mismatch", _reasons(result))
@@ -390,7 +410,7 @@ class IntegrityAuditTest(unittest.TestCase):
             root = Path(tmp) / "repo"
             root.mkdir()
             report = _valid_report(root)
-            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            _write_audit(root, "reports/status/integrity_audit/audit.json", report)
             write_text(root, "data/processed/result.txt", "tampered\n")
             with chdir(root):
                 result = quality_gates.gate_integrity_audit()
@@ -404,7 +424,7 @@ class IntegrityAuditTest(unittest.TestCase):
             root.mkdir()
             report = _valid_report(root)
             write_text(root, "contracts/project.yaml", "mode: hybrid\n")
-            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            _write_audit(root, "reports/status/integrity_audit/audit.json", report)
             with chdir(root):
                 result = quality_gates.gate_integrity_audit()
             self.assertIn("integrity_audit_mode_mismatch", _reasons(result))
@@ -444,7 +464,7 @@ class IntegrityAuditTest(unittest.TestCase):
             run["executor"] = {"tool": "manual", "family": "codex"}
             write_json(root, run_path.relative_to(root).as_posix(), run)
             report["executor"]["builder_run_manifest_evidence"][0]["family"] = "codex"
-            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            _write_audit(root, "reports/status/integrity_audit/audit.json", report)
             with chdir(root):
                 result = quality_gates.gate_integrity_audit()
             self.assertIn("builder_family_unverified", _reasons(result))
@@ -463,7 +483,7 @@ class IntegrityAuditTest(unittest.TestCase):
                     "ownership": {"changed_paths": ["data/processed/result.txt"]},
                 },
             )
-            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            _write_audit(root, "reports/status/integrity_audit/audit.json", report)
             with chdir(root):
                 result = quality_gates.gate_integrity_audit()
             reasons = _reasons(result)
@@ -490,7 +510,7 @@ class IntegrityAuditTest(unittest.TestCase):
             root = Path(tmp) / "repo"
             root.mkdir()
             report = _valid_report(root)
-            write_json(root, "reports/status/integrity_audit/real.json", report)
+            _write_audit(root, "reports/status/integrity_audit/real.json", report)
             subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "test"], cwd=root, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
@@ -596,7 +616,7 @@ class IntegrityAuditTest(unittest.TestCase):
             report["experiment_recomputations"] = [{"status": "pass"}]
             report["theoretical_rederivations"] = [{"status": "pass"}]
             report["seam_audits"] = []
-            write_json(root, "reports/status/integrity_audit/audit.json", report)
+            _write_audit(root, "reports/status/integrity_audit/audit.json", report)
             with chdir(root):
                 result = quality_gates.gate_integrity_audit()
             self.assertIn("integrity_audit_seam_failed", _reasons(result))
