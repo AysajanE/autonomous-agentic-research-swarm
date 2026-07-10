@@ -589,5 +589,84 @@ class Tranche4RegressionsTest(unittest.TestCase):
             self.assertFalse((root / ".orchestrator/backlog/T210_a.md").exists())
 
 
+
+
+class Tranche5RegressionsTest(unittest.TestCase):
+    """Convergence-pass fixes (tranche 5) — using the PRODUCTION doc format."""
+
+    def test_workstream_parser_reads_production_id_label_cells(self) -> None:
+        content = (
+            "# Workstreams\n\n"
+            "| Workstream | Purpose | Owns | Not |\n|---|---|---|---|\n"
+            "| W0 Protocol/Contracts | Lock protocol | docs/ | src/ |\n"
+            "| W1 Data: off-chain | Pull metrics | src/etl/ | protocol |\n"
+        )
+        ids, ok = swarm._workstream_row_ids(content)
+        self.assertEqual(ids, {"W0", "W1"})
+        self.assertTrue(ok)
+
+    def test_production_format_clobber_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            (root / ".orchestrator/workstreams.md").write_text(
+                "# Workstreams\n\n"
+                "| Workstream | Purpose | Owns | Not |\n|---|---|---|---|\n"
+                "| W0 Protocol/Contracts | Lock protocol | docs/ | src/ |\n"
+                "| W1 Data: off-chain | Pull metrics | src/etl/ | protocol |\n",
+                encoding="utf-8",
+            )
+            init_git_fixture_repo(root)
+            clobber = (
+                "# Workstreams\n\n| W | P | O | N |\n|---|---|---|---|\n"
+                "| W999 Fake | takeover | / | / |\n"
+            )
+            with _fixture_root(root):
+                summary = swarm._apply_planner_proposals(
+                    mode="launch",
+                    proposals=[{"action": "update_workstreams", "content": clobber}],
+                    repo=root,
+                    args=_supervise_args(),
+                )
+            self.assertEqual(
+                summary["outcomes"][0]["reason"], "planner_workstreams_content_invalid"
+            )
+
+    def test_placeholder_only_ownership_cell_is_rejected(self) -> None:
+        content = (
+            "# Workstreams\n\n| W | P | O | N |\n|---|---|---|---|\n"
+            "| W0 Real | - | - | - |\n"
+        )
+        _, ok = swarm._workstream_row_ids(content)
+        self.assertFalse(ok)
+
+    def test_recon_repeated_token_placeholders_do_not_count(self) -> None:
+        text = (
+            "## Reconnaissance\n"
+            "- Scope understanding: pending pending\n"
+            "- Risks and unknowns: unknown unknown\n"
+            "- Decomposition pressure assessment: TBD TBD TBD\n"
+            "## Status\n"
+        )
+        self.assertLess(swarm._reconnaissance_line_count(text), 3)
+
+    def test_split_with_non_list_into_refuses_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            write_task(root, "backlog", "T200", schema="v2", task_kind="etl",
+                       complexity_tier="S", gates=["python scripts/noop_gate.py"], outputs=["README.md"])
+            init_git_fixture_repo(root)
+            with _fixture_root(root):
+                summary = swarm._apply_planner_proposals(
+                    mode="replan",
+                    proposals=[{"action": "split_task", "task_id": "T200", "into": 1}],
+                    repo=root,
+                    args=_supervise_args(),
+                )
+            self.assertIn(summary["outcomes"][0]["status"], {"refused", "refused_batch"})
+            self.assertTrue((root / ".orchestrator/backlog/T200_task.md").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

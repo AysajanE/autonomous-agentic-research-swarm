@@ -1578,8 +1578,16 @@ def _reconnaissance_line_count(task_text: str) -> int:
         if matched_prefix is not None:
             after = line.split(":", 1)[1].strip() if ":" in line else ""
             words = [w for w in re.split(r"\s+", after) if w.strip(".,;:!?-")]
+            normalized = [w.strip(".,;:!?-").lower() for w in words]
+            placeholder_vocab = {"tbd", "tbc", "todo", "pending", "unknown", "n/a", "na", "none", "wip", "fixme", "xxx", "???"}
             non_space = len(after.replace(" ", ""))
-            if len(words) < 2 or non_space < 8:
+            distinct = {w for w in normalized if w}
+            if (
+                len(words) < 2
+                or non_space < 8
+                or len(distinct) < 2  # repeated single token ("pending pending")
+                or all(w in placeholder_vocab for w in normalized if w)  # all-placeholder
+            ):
                 continue
         count += 1
     return count
@@ -3435,10 +3443,15 @@ def _task_hypothesis_links(frontmatter: object) -> list[str]:
     return links
 
 
+_ROW_PLACEHOLDER_CELLS = {"-", "--", "n/a", "na", "tbd", "todo", "none", "...", "???", "xxx", "wip"}
+
+
 def _workstream_row_ids(content: str) -> tuple[set[str], bool]:
     """(set of well-formed workstream ids, all-rows-well-formed). A row is a
-    | W# | purpose | owns | not-owns | line with non-blank first three data
-    cells. Prose lines are ignored; a malformed W#-looking row fails."""
+    table line whose FIRST cell LEADS with a workstream id (production format
+    is `W0 Protocol/Contracts`, id + label in one cell). The purpose/owns/
+    not-owns cells must be non-blank and not placeholder-only. Prose lines are
+    ignored; a malformed W#-leading row fails the batch."""
     ids: set[str] = set()
     ok = True
     for raw in content.splitlines():
@@ -3447,13 +3460,21 @@ def _workstream_row_ids(content: str) -> tuple[set[str], bool]:
             continue
         cells = [c.strip() for c in line.strip("|").split("|")]
         first = cells[0] if cells else ""
-        if re.fullmatch(r"W\d+", first):
-            if len(cells) >= 4 and all(cells[1:4]):
-                if first in ids:
-                    ok = False
-                ids.add(first)
-            else:
-                ok = False
+        id_match = re.match(r"^(W\d+)(?:\s|$)", first)
+        if id_match is None:
+            continue
+        wid = id_match.group(1)
+        data_cells = cells[1:4]
+        cells_ok = (
+            len(cells) >= 4
+            and all(cell for cell in data_cells)
+            and all(cell.strip("`").lower() not in _ROW_PLACEHOLDER_CELLS for cell in data_cells)
+        )
+        if not cells_ok:
+            ok = False
+        if wid in ids:
+            ok = False
+        ids.add(wid)
     return ids, ok
 
 
@@ -3554,7 +3575,8 @@ def _apply_planner_proposals(
             if claimed:
                 declared_ids.append(claimed)
         elif action == "split_task":
-            for child in (proposal.get("into") or []):
+            into = proposal.get("into")
+            for child in (into if isinstance(into, list) else []):
                 if isinstance(child, dict):
                     child_id = _parse_task_id_from_branch(Path(str(child.get("path") or "")).stem)
                     if child_id:
