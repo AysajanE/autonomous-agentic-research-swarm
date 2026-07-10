@@ -54,6 +54,23 @@ The locked W6 regime table is included directly from the durable table surface s
 
 {{< include ../tables/str_regime_summary.md >}}
 
+## Evidence table
+
+| Reported result | Evidence surface |
+|---|---|
+| Pre-/post-Dencun STR regime means | `reports/tables/str_regime_summary.md` |
+| Ecosystem STR time series | `reports/figures/str_ecosystem_timeseries.svg` |
+| Panel and rent-component identities | `reports/validation/rollup_panel_validation.md` |
+| Canonical/vendor reconciliation | `reports/validation/cross_source_reconciliation.md` |
+
+## Alternative explanations considered
+
+The observed regime difference may reflect denominator coverage and source-specific measurement differences in addition to the Dencun boundary. The denominator-keyed inclusion rule and the documented `2025-05` vendor gap are therefore retained as limitations rather than resolved as causal alternatives by this descriptive release.
+
+## Uncertainty statement
+
+The reported values are validated descriptive summaries of the committed panel, not causal estimates. Their scope is limited by the locked sample construction, missing-denominator exclusions, and the source-reconciliation residuals described above.
+
 ## Provenance And Limitations
 
 This manuscript is downstream of the locked repository control plane, not a parallel analysis channel. Protocol definitions come from `docs/protocol.md`, project-level release requirements come from `contracts/project.yaml`, and the empirical claims quoted here are limited to validated report artifacts and their provenance manifests [@protocol_lock; @project_contract; @rollup_panel_validation; @l1_rent_decomposition_validation].

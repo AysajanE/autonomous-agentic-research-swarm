@@ -1,0 +1,5 @@
+{
+  "schema_version": "research_swarm.claims.v1",
+  "description": "Registered manuscript claims. Keep claims empty until evidence and verification commands are committed.",
+  "claims": []
+}

@@ -121,6 +121,24 @@ def _default_framework_json(mode: str) -> dict[str, Any]:
             "paper": True,
             "release": True,
         },
+        "citation_policy": {"staleness_days": 90},
+        "complexity_tier_ceilings": {
+            "S": {
+                "max_wall_clock_seconds": 7200,
+                "max_tokens": 250000,
+                "max_cost_usd": 25,
+            },
+            "M": {
+                "max_wall_clock_seconds": 28800,
+                "max_tokens": 1000000,
+                "max_cost_usd": 100,
+            },
+            "L": {
+                "max_wall_clock_seconds": 86400,
+                "max_tokens": 4000000,
+                "max_cost_usd": 400,
+            },
+        },
         "roles": {
             "allowed": ["Planner", "Worker", "Judge", "Operator"],
             "task_execution_roles": ["Worker", "Operator"],
@@ -242,6 +260,16 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     write_text(root, "contracts/schemas/panel_schema_decomp_v1.yaml", "version: 1\nfields: []\n")
     write_text(root, "contracts/schemas/swarm_run_manifest_v1.yaml", "version: 1\nartifact: swarm_run_manifest\n")
     write_text(root, "contracts/schemas/judge_review_log_v1.yaml", "version: 1\nartifact: judge_review_log\n")
+    write_json(
+        root,
+        "contracts/claims.yaml",
+        {
+            "schema_version": "research_swarm.claims.v1",
+            "description": "Empty test claim ledger.",
+            "claims": [],
+        },
+    )
+    write_text(root, "contracts/schemas/claims_v1.yaml", "type: object\n")
     write_project_yaml(root, mode=mode)
     write_framework_json(root, mode=mode)
 
@@ -288,13 +316,60 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     write_text(root, "docs/prompts/worker.md", "# worker prompt\n")
     write_text(root, "docs/prompts/judge.md", "# judge prompt\n")
     write_text(root, "docs/prompts/operator.md", "# operator prompt\n")
+    write_text(
+        root,
+        "docs/prereg/data_construction.lock.md",
+        "\n".join(
+            [
+                "---",
+                "schema_version: research_swarm.prereg_lock.v1",
+                "phase: 2a",
+                "status: draft",
+                "locked_at_utc: null",
+                "locked_sha256: null",
+                "locked_by: null",
+                "lock_version: 0",
+                "---",
+                "",
+                "# Data construction",
+                "",
+            ]
+        ),
+    )
+    write_text(
+        root,
+        "docs/prereg/analysis_plan.lock.md",
+        "\n".join(
+            [
+                "---",
+                "schema_version: research_swarm.prereg_lock.v1",
+                "phase: 2b",
+                "status: draft",
+                "locked_at_utc: null",
+                "locked_sha256: null",
+                "locked_by: null",
+                "lock_version: 0",
+                "---",
+                "",
+                "# Analysis plan",
+                "",
+            ]
+        ),
+    )
+    write_json(
+        root,
+        "docs/prereg/outcomes.yaml",
+        {"schema_version": "research_swarm.prereg_outcomes.v1", "outcomes": []},
+    )
 
     mkdir(root, "data/raw_manifest")
     mkdir(root, "data/processed_manifest")
     mkdir(root, "data/samples")
+    mkdir(root, "data/citations")
     write_text(root, "data/raw_manifest/README.md", "# raw manifests\n")
     write_text(root, "data/processed_manifest/README.md", "# processed manifests\n")
     write_text(root, "data/samples/README.md", "# samples\n")
+    write_text(root, "data/citations/README.md", "# citation snapshots\n")
 
     mkdir(root, "reports/validation/manifests")
     mkdir(root, "reports/figures")
@@ -317,6 +392,7 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     write_text(root, "scripts/swarm.py", "# placeholder\n")
     write_text(root, "scripts/sweep_tasks.py", "# placeholder\n")
     write_text(root, "scripts/quality_gates.py", "# placeholder\n")
+    write_text(root, "scripts/refresh_citations.py", "# placeholder\n")
     write_text(root, "scripts/noop_gate.py", "import sys\nif __name__ == '__main__':\n    sys.exit(0)\n")
 
     mkdir(root, "tests")

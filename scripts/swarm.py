@@ -56,12 +56,15 @@ import swarm_claims
 import swarm_events
 import sweep_tasks
 from swarm_taskfile import WorktreeCollisionError
+from swarm_taskfile import PREREG_LOCK_SCHEMA_VERSION
+from swarm_taskfile import PREREG_PHASE_FILES
 from swarm_taskfile import gate_command_violation
 from swarm_taskfile import REQUIRED_FRONTMATTER_KEYS
 from swarm_taskfile import TASK_SCHEMA_VERSION
 from swarm_taskfile import TaskV2Fields
 from swarm_taskfile import extract_section as _extract_section
 from swarm_taskfile import lint_task_files
+from swarm_taskfile import load_prereg_lock
 from swarm_taskfile import parse_wall_clock_seconds
 from swarm_taskfile import parse_status_value as _parse_status_value
 from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
@@ -2932,6 +2935,88 @@ def cmd_ack_vendor_policy(args: argparse.Namespace) -> int:
         {"event": "vendor_policy_acked", "vendor": args.vendor, "acked_by": args.acked_by},
     )
     print(json.dumps({"written": VENDOR_ACK_RELPATH}, sort_keys=True))
+    return 0
+
+
+def cmd_lock_prereg(args: argparse.Namespace) -> int:
+    """Activate or explicitly amend one phased preregistration lock."""
+    if not isinstance(args.locked_by, str) or not args.locked_by.strip():
+        print("--locked-by must be a non-empty name", file=sys.stderr)
+        return 1
+    args.locked_by = args.locked_by.strip()
+    repo = _repo_root()
+    rel_path = Path(PREREG_PHASE_FILES[args.phase])
+    path = repo / rel_path
+    lock, error = load_prereg_lock(path, expected_phase=args.phase)
+    if error is not None or lock is None:
+        print(f"cannot lock preregistration: {error}", file=sys.stderr)
+        return 1
+
+    already_locked = lock.get("status") == "locked"
+    if already_locked and not args.amend:
+        print(
+            "preregistration phase is already locked; pass --amend for an explicit amendment",
+            file=sys.stderr,
+        )
+        return 1
+    if args.amend and not already_locked:
+        print("--amend requires an already-locked preregistration phase", file=sys.stderr)
+        return 1
+
+    current_version = lock.get("lock_version")
+    if not isinstance(current_version, int) or isinstance(current_version, bool) or current_version < 0:
+        print("preregistration lock_version must be a non-negative integer", file=sys.stderr)
+        return 1
+    body = lock.get("body")
+    body_sha256 = lock.get("body_sha256")
+    if not isinstance(body, str) or not isinstance(body_sha256, str):
+        print("preregistration body could not be hashed", file=sys.stderr)
+        return 1
+
+    version = current_version + 1
+    locked_at_utc = _utc_now_iso()
+    header = "\n".join(
+        [
+            "---",
+            f"schema_version: {PREREG_LOCK_SCHEMA_VERSION}",
+            f"phase: {args.phase}",
+            "status: locked",
+            f"locked_at_utc: {locked_at_utc}",
+            f"locked_sha256: {body_sha256}",
+            f"locked_by: {args.locked_by}",
+            f"lock_version: {version}",
+            "---",
+            "",
+        ]
+    )
+    path.write_text(header + body, encoding="utf-8")
+
+    event_name = "prereg_amendment" if args.amend else "prereg_locked"
+    _record_swarm_event(
+        repo,
+        {
+            "event": event_name,
+            "phase": args.phase,
+            "lock_path": rel_path.as_posix(),
+            "locked_by": args.locked_by,
+            "locked_sha256": body_sha256,
+            "lock_version": version,
+        },
+        escalation=True,
+    )
+    print(
+        json.dumps(
+            {
+                "event": event_name,
+                "phase": args.phase,
+                "lock_path": rel_path.as_posix(),
+                "locked_sha256": body_sha256,
+                "lock_version": version,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -7741,6 +7826,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     approve_plan.add_argument("--approved-by", required=True)
     approve_plan.set_defaults(func=cmd_approve_plan)
+
+    lock_prereg = subparsers.add_parser(
+        "lock-prereg",
+        help="Hash and activate a phased preregistration lock (L3 human gate)",
+    )
+    lock_prereg.add_argument("--phase", choices=["2a", "2b"], required=True)
+    lock_prereg.add_argument("--locked-by", required=True, help="Human lock approver")
+    lock_prereg.add_argument(
+        "--amend",
+        action="store_true",
+        help="Explicitly amend an already-active lock and increment its version",
+    )
+    lock_prereg.set_defaults(func=cmd_lock_prereg)
 
     tick = subparsers.add_parser("tick", help="Start ready tasks")
     tick.add_argument("--planner", choices=["heuristic"], default="heuristic")

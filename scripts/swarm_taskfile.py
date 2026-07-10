@@ -76,12 +76,21 @@ TASK_V2_REQUIRED_FRONTMATTER_KEYS = (
 SUCCESS_CRITERION_KEYS = ("id", "statement", "verification")
 TASK_BUDGET_KEYS = ("max_wall_clock", "max_tokens", "max_cost_usd")
 TASK_INPUT_REFERENCE_KEYS = ("path", "manifest")
+PREREG_LOCK_SCHEMA_VERSION = "research_swarm.prereg_lock.v1"
+PREREG_PHASE_FILES = {
+    "2a": "docs/prereg/data_construction.lock.md",
+    "2b": "docs/prereg/analysis_plan.lock.md",
+}
 
 _NESTED_MAPPING_LIST_KEYS = {"success_criteria", "inputs"}
 _NESTED_MAPPING_BLOCK_KEYS = {"budgets", "triage"}
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _DURATION_RE = re.compile(r"^(?P<value>(?:\d+(?:\.\d*)?|\.\d+))(?P<unit>[hms])$", re.IGNORECASE)
 _TOKEN_COUNT_RE = re.compile(r"^(?P<value>(?:\d+(?:\.\d*)?|\.\d+))(?P<unit>[kmb]?)$", re.IGNORECASE)
+_PREREG_HYPOTHESIS_RE = re.compile(
+    r"^\s*-\s+(?P<id>H[A-Za-z0-9._-]+):\s+(?P<statement>\S.*)$",
+    re.MULTILINE,
+)
 
 
 import shlex as _shlex
@@ -228,6 +237,102 @@ def _parse_nested_mapping_scalar(list_key: str, field_key: str, value: str) -> o
 def parse_task_id_from_branch(branch_name: str) -> str | None:
     match = TASK_ID_BRANCH_RE.match(branch_name)
     return match.group(1) if match else None
+
+
+def parse_prereg_lock_text(
+    text: str,
+    *,
+    expected_phase: str | None = None,
+) -> tuple[dict[str, object] | None, str | None]:
+    """Parse one phased preregistration lock without a YAML dependency.
+
+    The body hash is over the exact UTF-8 bytes following the closing header
+    delimiter. Header fields are intentionally scalar-only.
+    """
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return None, "missing_prereg_header"
+    end_index = next(
+        (index for index in range(1, len(lines)) if lines[index].strip() == "---"),
+        None,
+    )
+    if end_index is None:
+        return None, "unterminated_prereg_header"
+
+    header: dict[str, object] = {}
+    for raw_line in lines[1:end_index]:
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if ":" not in line:
+            return None, f"invalid_prereg_header_line:{line}"
+        key, raw_value = line.split(":", 1)
+        key = key.strip()
+        value = raw_value.strip().strip("'\"")
+        if not key or key in header:
+            return None, f"invalid_prereg_header_key:{key}"
+        if value.lower() in {"null", "~"}:
+            header[key] = None
+        elif key == "lock_version" and re.fullmatch(r"\d+", value):
+            header[key] = int(value)
+        else:
+            header[key] = value
+
+    if header.get("schema_version") != PREREG_LOCK_SCHEMA_VERSION:
+        return None, f"invalid_prereg_schema:{header.get('schema_version')}"
+    phase = header.get("phase")
+    if phase not in PREREG_PHASE_FILES:
+        return None, f"invalid_prereg_phase:{phase}"
+    if expected_phase is not None and phase != expected_phase:
+        return None, f"prereg_phase_mismatch:{phase}!={expected_phase}"
+    if header.get("status") not in {"draft", "locked"}:
+        return None, f"invalid_prereg_status:{header.get('status')}"
+
+    body = "".join(lines[end_index + 1 :])
+    body_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    locked_sha256 = header.get("locked_sha256")
+    active = (
+        header.get("status") == "locked"
+        and isinstance(locked_sha256, str)
+        and bool(_SHA256_RE.fullmatch(locked_sha256))
+        and locked_sha256.lower() == body_sha256
+    )
+    hypotheses = [
+        {"hypothesis_id": match.group("id"), "statement": match.group("statement").strip()}
+        for match in _PREREG_HYPOTHESIS_RE.finditer(body)
+    ]
+    return {
+        **header,
+        "body": body,
+        "body_sha256": body_sha256,
+        "active": active,
+        "hypotheses": hypotheses,
+    }, None
+
+
+def load_prereg_lock(
+    path: Path,
+    *,
+    expected_phase: str | None = None,
+) -> tuple[dict[str, object] | None, str | None]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, f"prereg_lock_read_error:{type(exc).__name__}:{exc}"
+    return parse_prereg_lock_text(text, expected_phase=expected_phase)
+
+
+def active_prereg_hypothesis_ids(repo_root: Path) -> set[str] | None:
+    """Return the active analysis-lock namespace, or None while still draft."""
+    path = repo_root / PREREG_PHASE_FILES["2b"]
+    lock, error = load_prereg_lock(path, expected_phase="2b")
+    if error is not None or lock is None or lock.get("active") is not True:
+        return None
+    return {
+        item["hypothesis_id"]
+        for item in lock.get("hypotheses", [])
+        if isinstance(item, dict) and isinstance(item.get("hypothesis_id"), str)
+    }
 
 
 def parse_task_frontmatter(text: str) -> dict[str, object] | None:
@@ -541,6 +646,18 @@ def lint_task_files(
     proposed_texts = {
         Path(path).resolve(): text for path, text in (task_texts or {}).items()
     }
+    framework: dict[str, object] = {}
+    try:
+        loaded_framework = json.loads(
+            (repo_root / "contracts" / "framework.json").read_text(encoding="utf-8")
+        )
+        if isinstance(loaded_framework, dict):
+            framework = loaded_framework
+    except (OSError, json.JSONDecodeError):
+        pass
+    raw_tier_ceilings = framework.get("complexity_tier_ceilings")
+    tier_ceilings = raw_tier_ceilings if isinstance(raw_tier_ceilings, dict) else {}
+    active_hypotheses = active_prereg_hypothesis_ids(repo_root)
     parsed: dict[Path, dict[str, object] | None] = {}
     tasks_by_id: dict[str, Mapping[str, object]] = {}
     for path in task_paths:
@@ -763,17 +880,21 @@ def lint_task_files(
                 diagnostics, task, "budgets", "invalid_budgets", "mapping", frontmatter.get("budgets")
             )
         else:
-            # M3a-scheduled: per-complexity-tier NUMERIC ceilings (S|M|L caps on
-            # each budget) enforced against a framework-contract shape; today
-            # only positivity/format is checked. See the M3a milestone tracker.
             budget_validators = {
                 "max_wall_clock": parse_wall_clock_seconds,
                 "max_tokens": parse_token_count,
                 "max_cost_usd": _positive_number,
             }
+            ceiling_keys = {
+                "max_wall_clock": "max_wall_clock_seconds",
+                "max_tokens": "max_tokens",
+                "max_cost_usd": "max_cost_usd",
+            }
+            tier_ceiling = tier_ceilings.get(fields.complexity_tier)
             for key, validator in budget_validators.items():
                 value = budgets.get(key)
-                if validator(value) is None:
+                normalized = validator(value)
+                if normalized is None:
                     _diagnostic(
                         diagnostics,
                         task,
@@ -782,10 +903,22 @@ def lint_task_files(
                         "positive numeric value" + (" or duration such as 4h/90m/3600s" if key == "max_wall_clock" else ""),
                         value,
                     )
+                    continue
+                ceiling = (
+                    _positive_number(tier_ceiling.get(ceiling_keys[key]))
+                    if isinstance(tier_ceiling, dict)
+                    else None
+                )
+                if ceiling is not None and normalized > ceiling:
+                    _diagnostic(
+                        diagnostics,
+                        task,
+                        f"budgets.{key}",
+                        "budget_exceeds_tier_ceiling",
+                        {"tier": fields.complexity_tier, "maximum": ceiling},
+                        normalized,
+                    )
 
-        # M3a-scheduled: the canonical hypothesis-id namespace lives in the
-        # preregistration/claim-ledger artifacts; hypothesis_ids here is the
-        # interim link the planner's retirement guard resolves against.
         hypothesis_ids = frontmatter.get("hypothesis_ids")
         if hypothesis_ids is not None:
             if not isinstance(hypothesis_ids, list) or not all(
@@ -799,6 +932,17 @@ def lint_task_files(
                     "list of non-empty hypothesis id strings",
                     hypothesis_ids,
                 )
+            elif active_hypotheses is not None:
+                for index, hypothesis_id in enumerate(hypothesis_ids):
+                    if hypothesis_id.strip() not in active_hypotheses:
+                        _diagnostic(
+                            diagnostics,
+                            task,
+                            f"hypothesis_ids[{index}]",
+                            "hypothesis_id_not_in_prereg",
+                            sorted(active_hypotheses),
+                            hypothesis_id,
+                        )
 
         gates = frontmatter.get("gates")
         if not isinstance(gates, list) or not gates:
