@@ -80,6 +80,8 @@ PREREG_LOCK_SCHEMA_VERSION = "research_swarm.prereg_lock.v1"
 PREREG_PHASE_FILES = {
     "2a": "docs/prereg/data_construction.lock.md",
     "2b": "docs/prereg/analysis_plan.lock.md",
+    "lock_a": "docs/prereg/lock_a.md",
+    "lock_b": "docs/prereg/lock_b.md",
 }
 
 _NESTED_MAPPING_LIST_KEYS = {"success_criteria", "inputs"}

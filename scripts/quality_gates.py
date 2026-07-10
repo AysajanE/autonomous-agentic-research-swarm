@@ -14,8 +14,10 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import datetime as dt
+import difflib
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -37,6 +39,8 @@ from swarm_taskfile import load_prereg_lock
 from swarm_taskfile import parse_status_value as _parse_status_value
 from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 from sweep_tasks import plan_sweep as _plan_sweep
+from falsify_claims import evaluate_falsification_spec
+from sweep_harness import enumerate_cells
 
 
 SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
@@ -46,6 +50,10 @@ JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1 = "research_swarm.judge_review_log.v1"
 PROCESSED_MANIFEST_SCHEMA_VERSION = "research_swarm.processed_manifest.v2"
 MANIFEST_REBASELINE_SCHEMA_VERSION = "research_swarm.manifest_rebaseline.v1"
 VALIDATION_REPORT_SCHEMA_VERSION = "research_swarm.validation_report.v2"
+INSTANCE_MANIFEST_SCHEMA_VERSION = "research_swarm.instance_manifest.v1"
+EXPERIMENT_SPEC_SCHEMA_VERSION = "research_swarm.experiment_spec.v1"
+EXPERIMENT_MANIFEST_SCHEMA_VERSION = "research_swarm.experiment_manifest.v1"
+SWEEP_ARTIFACT_SCHEMA_VERSION = "research_swarm.sweep_artifact.v1"
 
 DEFAULT_ALLOWED_STATES = (
     "backlog",
@@ -736,11 +744,252 @@ def required_manifest_failures(task: Task, repo: Path = Path(".")) -> list[str]:
 def _load_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         payload = json.loads(_read_text(path))
+    except OSError as exc:
+        return None, f"read_error:{type(exc).__name__}:{exc}"
     except json.JSONDecodeError as exc:
         return None, f"invalid_json:{exc}"
     if not isinstance(payload, dict):
         return None, "top_level_not_object"
     return payload, None
+
+
+def _json_type_matches(value: object, expected: str) -> bool:
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "null":
+        return value is None
+    return False
+
+
+def _json_pointer(document: object, pointer: str) -> object:
+    if pointer in {"", "#"}:
+        return document
+    raw = pointer[1:] if pointer.startswith("#") else pointer
+    if not raw.startswith("/"):
+        raise ValueError(f"invalid_json_pointer:{pointer}")
+    current = document
+    for token in raw[1:].split("/"):
+        key = token.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or key not in current:
+            raise ValueError(f"unresolved_json_pointer:{pointer}")
+        current = current[key]
+    return current
+
+
+def _load_schema_document(path: Path) -> dict[str, Any]:
+    payload, error = _load_json_file(path)
+    if error is not None or payload is None:
+        raise ValueError(f"schema_load_error:{path.as_posix()}:{error}")
+    return payload
+
+
+def _validate_json_schema(
+    value: object,
+    schema: object,
+    *,
+    schema_path: Path,
+    document: dict[str, Any] | None = None,
+    value_path: str = "$",
+) -> list[dict[str, object]]:
+    """Validate the dependency-free JSON-Schema subset used by M3a contracts."""
+    if not isinstance(schema, dict):
+        return [{"path": value_path, "reason": "schema_not_object"}]
+    if document is None:
+        document = schema
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        file_part, separator, fragment = reference.partition("#")
+        try:
+            if file_part:
+                target_path = (schema_path.parent / file_part).resolve()
+                target_document = _load_schema_document(target_path)
+                target_schema = _json_pointer(target_document, f"#{fragment}" if separator else "#")
+                return _validate_json_schema(
+                    value,
+                    target_schema,
+                    schema_path=target_path,
+                    document=target_document,
+                    value_path=value_path,
+                )
+            target_schema = _json_pointer(document, f"#{fragment}" if separator else reference)
+            return _validate_json_schema(
+                value,
+                target_schema,
+                schema_path=schema_path,
+                document=document,
+                value_path=value_path,
+            )
+        except ValueError as exc:
+            return [{"path": value_path, "reason": str(exc)}]
+
+    failures: list[dict[str, object]] = []
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for child in all_of:
+            failures.extend(
+                _validate_json_schema(
+                    value,
+                    child,
+                    schema_path=schema_path,
+                    document=document,
+                    value_path=value_path,
+                )
+            )
+    for keyword in ("oneOf", "anyOf"):
+        variants = schema.get(keyword)
+        if not isinstance(variants, list):
+            continue
+        variant_failures = [
+            _validate_json_schema(
+                value,
+                child,
+                schema_path=schema_path,
+                document=document,
+                value_path=value_path,
+            )
+            for child in variants
+        ]
+        passing = sum(not item for item in variant_failures)
+        valid = passing == 1 if keyword == "oneOf" else passing >= 1
+        if not valid:
+            best = min(variant_failures, key=len, default=[])
+            failures.append(
+                {
+                    "path": value_path,
+                    "reason": f"{keyword}_mismatch",
+                    "passing_variants": passing,
+                    "best_variant_failures": best,
+                }
+            )
+        return failures
+
+    expected_type = schema.get("type")
+    if isinstance(expected_type, str):
+        types = [expected_type]
+    elif isinstance(expected_type, list):
+        types = [item for item in expected_type if isinstance(item, str)]
+    else:
+        types = []
+    if types and not any(_json_type_matches(value, item) for item in types):
+        failures.append(
+            {"path": value_path, "reason": "type", "expected": types, "actual": type(value).__name__}
+        )
+        return failures
+    if "const" in schema and value != schema["const"]:
+        failures.append(
+            {"path": value_path, "reason": "const", "expected": schema["const"], "actual": value}
+        )
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        failures.append({"path": value_path, "reason": "enum", "expected": enum, "actual": value})
+
+    if isinstance(value, dict):
+        required = schema.get("required")
+        if isinstance(required, list):
+            for key in required:
+                if isinstance(key, str) and key not in value:
+                    failures.append({"path": f"{value_path}.{key}", "reason": "required"})
+        min_properties = schema.get("minProperties")
+        if isinstance(min_properties, int) and len(value) < min_properties:
+            failures.append(
+                {"path": value_path, "reason": "minProperties", "expected": min_properties, "actual": len(value)}
+            )
+        properties = schema.get("properties")
+        properties = properties if isinstance(properties, dict) else {}
+        additional = schema.get("additionalProperties", True)
+        for key, child_value in value.items():
+            child_schema = properties.get(key)
+            if child_schema is None:
+                if additional is False:
+                    failures.append({"path": f"{value_path}.{key}", "reason": "additionalProperty"})
+                    continue
+                if isinstance(additional, dict):
+                    child_schema = additional
+            if isinstance(child_schema, dict):
+                failures.extend(
+                    _validate_json_schema(
+                        child_value,
+                        child_schema,
+                        schema_path=schema_path,
+                        document=document,
+                        value_path=f"{value_path}.{key}",
+                    )
+                )
+
+    if isinstance(value, list):
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            failures.append(
+                {"path": value_path, "reason": "minItems", "expected": min_items, "actual": len(value)}
+            )
+        if schema.get("uniqueItems") is True:
+            rendered = [json.dumps(item, sort_keys=True, separators=(",", ":")) for item in value]
+            if len(rendered) != len(set(rendered)):
+                failures.append({"path": value_path, "reason": "uniqueItems"})
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for index, child_value in enumerate(value):
+                failures.extend(
+                    _validate_json_schema(
+                        child_value,
+                        items,
+                        schema_path=schema_path,
+                        document=document,
+                        value_path=f"{value_path}[{index}]",
+                    )
+                )
+
+    if isinstance(value, str):
+        min_length = schema.get("minLength")
+        if isinstance(min_length, int) and len(value) < min_length:
+            failures.append({"path": value_path, "reason": "minLength", "expected": min_length})
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            failures.append({"path": value_path, "reason": "pattern", "expected": pattern, "actual": value})
+        if schema.get("format") == "date-time" and _parse_utc_z(value) is None:
+            failures.append({"path": value_path, "reason": "format", "expected": "UTC date-time", "actual": value})
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        if isinstance(minimum, (int, float)) and value < minimum:
+            failures.append({"path": value_path, "reason": "minimum", "expected": minimum, "actual": value})
+        exclusive_minimum = schema.get("exclusiveMinimum")
+        if isinstance(exclusive_minimum, (int, float)) and value <= exclusive_minimum:
+            failures.append(
+                {"path": value_path, "reason": "exclusiveMinimum", "expected": exclusive_minimum, "actual": value}
+            )
+        maximum = schema.get("maximum")
+        if isinstance(maximum, (int, float)) and value > maximum:
+            failures.append({"path": value_path, "reason": "maximum", "expected": maximum, "actual": value})
+    return failures
+
+
+def _schema_failures(payload: object, schema_path: Path) -> list[dict[str, object]]:
+    try:
+        schema = _load_schema_document(schema_path)
+    except ValueError as exc:
+        return [{"path": "$", "reason": str(exc)}]
+    return _validate_json_schema(payload, schema, schema_path=schema_path)
+
+
+def _safe_repo_relative_path(raw_path: object) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    normalized = _normalize_repo_relative_path(raw_path)
+    parts = normalized.split("/")
+    if Path(normalized).is_absolute() or normalized.startswith("~") or ".." in parts:
+        return None
+    return Path(normalized)
 
 
 def _validate_required_keys(data: object, required_keys: set[str], prefix: str) -> list[str]:
@@ -1536,7 +1785,12 @@ def gate_repo_structure() -> GateResult:
         "contracts/decisions.md",
         "contracts/model_spec.md",
         "contracts/hybrid_interface_v1.yaml",
+        "contracts/instances/README.md",
+        "contracts/experiments/README.md",
         "contracts/schemas/README.md",
+        "contracts/schemas/instance_manifest_v1.json",
+        "contracts/schemas/experiment_spec_v1.json",
+        "contracts/schemas/experiment_manifest_v1.json",
         "contracts/schemas/panel_schema.yaml",
         "contracts/schemas/panel_schema_str_v1.yaml",
         "contracts/schemas/panel_schema_decomp_v1.yaml",
@@ -1546,6 +1800,8 @@ def gate_repo_structure() -> GateResult:
         "docs/protocol.md",
         "docs/prereg/data_construction.lock.md",
         "docs/prereg/analysis_plan.lock.md",
+        "docs/prereg/lock_a.md",
+        "docs/prereg/lock_b.md",
         "docs/prereg/outcomes.yaml",
         "docs/runbook_swarm.md",
         "docs/runbook_swarm_automation.md",
@@ -1561,6 +1817,8 @@ def gate_repo_structure() -> GateResult:
         "scripts/sweep_tasks.py",
         "scripts/quality_gates.py",
         "scripts/refresh_citations.py",
+        "scripts/falsify_claims.py",
+        "scripts/sweep_harness.py",
         "tests/README.md",
     ]
 
@@ -2694,9 +2952,229 @@ def _verify_claim_artifact(
     return []
 
 
-def gate_prereg_conformance() -> GateResult:
+_LOCK_BINDING_RE = re.compile(
+    r"^\s*-\s+path:\s*(?P<path>\S+)\s*$\n"
+    r"^\s+sha256:\s*(?P<sha256>[0-9a-f]{64}|pending)\s*$",
+    flags=re.MULTILINE,
+)
+
+
+def _lock_bindings(lock: dict[str, object] | None) -> list[dict[str, str]]:
+    if lock is None:
+        return []
+    body = lock.get("body")
+    if not isinstance(body, str):
+        return []
+    return [match.groupdict() for match in _LOCK_BINDING_RE.finditer(body)]
+
+
+def _active_prereg_lock(phase: str) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+    path = Path(PREREG_PHASE_FILES[phase])
+    lock, error = load_prereg_lock(path, expected_phase=phase)
+    failures: list[dict[str, object]] = []
+    if error is not None or lock is None:
+        failures.append(
+            _science_failure(
+                f"invalid_{phase}_lock",
+                subject=path.as_posix(),
+                actual=error,
+            )
+        )
+        return None, failures
+    if lock.get("status") == "locked" and lock.get("active") is not True:
+        failures.append(
+            _science_failure(
+                f"{phase}_lock_hash_mismatch",
+                subject=path.as_posix(),
+                field="locked_sha256",
+                expected=lock.get("body_sha256"),
+                actual=lock.get("locked_sha256"),
+            )
+        )
+    return (lock if lock.get("active") is True else None), failures
+
+
+def _verify_lock_bindings(
+    lock: dict[str, object],
+    *,
+    phase: str,
+    repo: Path = Path("."),
+) -> tuple[dict[str, str], list[dict[str, object]]]:
+    failures: list[dict[str, object]] = []
+    by_path: dict[str, str] = {}
+    for binding in _lock_bindings(lock):
+        raw_path = binding["path"]
+        expected_sha = binding["sha256"]
+        subject = f"{PREREG_PHASE_FILES[phase]}:{raw_path}"
+        path = _safe_repo_relative_path(raw_path)
+        if path is None:
+            failures.append(_science_failure("invalid_lock_binding_path", subject=subject))
+            continue
+        normalized = path.as_posix()
+        if normalized in by_path:
+            failures.append(_science_failure("duplicate_lock_binding", subject=subject))
+            continue
+        by_path[normalized] = expected_sha
+        if expected_sha == "pending":
+            failures.append(_science_failure("pending_lock_binding", subject=subject))
+            continue
+        disk_path = repo / path
+        if not disk_path.is_file():
+            failures.append(_science_failure("missing_lock_binding_target", subject=subject))
+            continue
+        actual_sha, _ = _sha256_and_bytes(disk_path)
+        if actual_sha != expected_sha:
+            failures.append(
+                _science_failure(
+                    "lock_binding_sha256_mismatch",
+                    subject=subject,
+                    expected=expected_sha,
+                    actual=actual_sha,
+                )
+            )
+    return by_path, failures
+
+
+def _active_experiment_spec() -> tuple[
+    dict[str, object] | None,
+    Path | None,
+    dict[str, object] | None,
+    list[dict[str, object]],
+]:
+    lock, failures = _active_prereg_lock("lock_a")
+    if lock is None:
+        return None, None, None, failures
+    bindings, binding_failures = _verify_lock_bindings(lock, phase="lock_a")
+    failures.extend(binding_failures)
+    model_paths = [path for path in bindings if path == "contracts/model_spec.md"]
+    experiment_paths = [
+        path
+        for path in bindings
+        if path.startswith("contracts/experiments/") and Path(path).suffix in {".json", ".yaml"}
+    ]
+    if len(model_paths) != 1:
+        failures.append(
+            _science_failure(
+                "lock_a_model_spec_binding_required",
+                subject=PREREG_PHASE_FILES["lock_a"],
+                expected="exactly contracts/model_spec.md",
+                actual=model_paths,
+            )
+        )
+    if len(experiment_paths) != 1:
+        failures.append(
+            _science_failure(
+                "lock_a_experiment_spec_binding_required",
+                subject=PREREG_PHASE_FILES["lock_a"],
+                expected="exactly one contracts/experiments/*.json|yaml",
+                actual=experiment_paths,
+            )
+        )
+        return None, None, lock, failures
+    spec_path = Path(experiment_paths[0])
+    payload, error = _load_json_file(spec_path)
+    if error is not None or payload is None:
+        failures.append(
+            _science_failure(
+                "invalid_experiment_spec_json",
+                subject=spec_path.as_posix(),
+                actual=error,
+            )
+        )
+        return None, spec_path, lock, failures
+    for issue in _schema_failures(payload, Path("contracts/schemas/experiment_spec_v1.json")):
+        failures.append(
+            _science_failure(
+                "experiment_spec_schema_violation",
+                subject=spec_path.as_posix(),
+                field=str(issue.get("path")),
+                actual=issue,
+            )
+        )
+    return payload, spec_path, lock, failures
+
+
+def _model_spec_is_ambiguous(path: Path = Path("contracts/model_spec.md")) -> bool:
+    if not path.is_file():
+        return True
+    text = _read_text(path)
+    lowered = text.lower()
+    if any(token in lowered for token in ("tbd", "todo", "fill it", "declare-before-lock")):
+        return True
+    headings = (
+        "## Objective / question",
+        "## Decision variables",
+        "## Constraints",
+        "## Objective function",
+        "## Assumptions (explicit)",
+        "## Solver / method",
+    )
+    return any(not _section_has_content(text, heading) for heading in headings)
+
+
+def _modeling_prereg_result(claims: list[dict[str, object]]) -> GateResult:
+    spec, spec_path, lock, failures = _active_experiment_spec()
+    active_hash = lock.get("body_sha256") if lock is not None else None
+    applicable = [
+        claim for claim in claims if claim.get("type") in {"computational", "counterfactual"}
+    ]
+    if lock is not None and _model_spec_is_ambiguous():
+        failures.append(
+            _science_failure(
+                "ambiguous_locked_model_spec",
+                subject="contracts/model_spec.md",
+            )
+        )
+    for index, claim in enumerate(applicable):
+        subject = str(claim.get("claim_id") or f"claims[{index}]")
+        if active_hash is None:
+            failures.append(
+                _science_failure(
+                    "modeling_claim_without_active_lock_a",
+                    subject=subject,
+                    field="lock_a_sha256",
+                )
+            )
+            continue
+        recorded_hash = claim.get("lock_a_sha256", claim.get("prereg_lock_sha256"))
+        if recorded_hash != active_hash:
+            failures.append(
+                _science_failure(
+                    "modeling_claim_lock_a_hash_mismatch",
+                    subject=subject,
+                    field="lock_a_sha256",
+                    expected=active_hash,
+                    actual=recorded_hash,
+                )
+            )
+    if not applicable and lock is None:
+        failures = [
+            failure
+            for failure in failures
+            if failure.get("reason") not in {"invalid_lock_a_lock", "lock_a_lock_hash_mismatch"}
+        ]
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_modeling_claims_or_lock" if not applicable and lock is None else "ok",
+            "active_lock_a_sha256": active_hash,
+            "experiment_spec": spec_path.as_posix() if spec_path is not None else None,
+            "experiment_spec_valid": spec is not None,
+            "modeling_claim_count": len(applicable),
+            "failures": failures,
+        },
+    )
+
+
+def gate_prereg_conformance(*, form: str | None = None) -> GateResult:
     """Confirmatory claims bind to phase 2b and every locked hypothesis terminates."""
     claims, failures = _load_claim_ledger()
+    mode = _parse_project_mode(Path("contracts/project.yaml")) or "empirical"
+    selected = form or ("modeling" if mode == "modeling" else "union" if mode == "hybrid" else "empirical")
+    if selected == "modeling":
+        result = _modeling_prereg_result(claims)
+        combined = failures + list(result.details.get("failures", []))
+        return GateResult(ok=not combined, details={**result.details, "failures": combined})
     lock_path = Path(PREREG_PHASE_FILES["2b"])
     lock, lock_error = load_prereg_lock(lock_path, expected_phase="2b")
     if lock_error is not None or lock is None:
@@ -2723,7 +3201,8 @@ def gate_prereg_conformance() -> GateResult:
     active_hash = active_lock.get("body_sha256") if active_lock is not None else None
     confirmatory_count = 0
     for index, claim in enumerate(claims):
-        if claim.get("type") not in CONFIRMATORY_CLAIM_TYPES:
+        empirical_types = {"causal"} if mode == "hybrid" else CONFIRMATORY_CLAIM_TYPES
+        if claim.get("type") not in empirical_types:
             continue
         confirmatory_count += 1
         subject = str(claim.get("claim_id") or f"claims[{index}]")
@@ -2876,6 +3355,9 @@ def gate_prereg_conformance() -> GateResult:
     status = "ok"
     if not claims and not hypothesis_ids and not failures:
         status = "no_claims" if active_lock is not None else "no_active_lock"
+    if selected == "union":
+        modeling_result = _modeling_prereg_result(claims)
+        failures.extend(modeling_result.details.get("failures", []))
     return GateResult(
         ok=not failures,
         details={
@@ -2957,6 +3439,42 @@ def gate_claim_evidence_ledger() -> GateResult:
                         field="uncertainty_artifact",
                     )
                 )
+
+        if claim_type == "counterfactual":
+            lock_b, lock_failures = _active_prereg_lock("lock_b")
+            failures.extend(lock_failures)
+            if lock_b is None:
+                failures.append(
+                    _science_failure(
+                        "counterfactual_claim_without_active_lock_b",
+                        subject=subject,
+                        field="lock_b_sha256",
+                    )
+                )
+            else:
+                active_hash = lock_b.get("body_sha256")
+                if claim.get("lock_b_sha256") != active_hash:
+                    failures.append(
+                        _science_failure(
+                            "counterfactual_claim_lock_b_hash_mismatch",
+                            subject=subject,
+                            field="lock_b_sha256",
+                            expected=active_hash,
+                            actual=claim.get("lock_b_sha256"),
+                        )
+                    )
+                registered = _parse_utc_z(claim.get("registered_at_utc"))
+                locked_at = _parse_utc_z(lock_b.get("locked_at_utc"))
+                if registered is not None and locked_at is not None and registered < locked_at:
+                    failures.append(
+                        _science_failure(
+                            "counterfactual_claim_registered_before_lock_b",
+                            subject=subject,
+                            field="registered_at_utc",
+                            expected=f">={lock_b.get('locked_at_utc')}",
+                            actual=claim.get("registered_at_utc"),
+                        )
+                    )
 
     return GateResult(
         ok=not failures,
@@ -3183,7 +3701,7 @@ def gate_citation_integrity() -> GateResult:
     )
 
 
-def gate_etl_decision_log() -> GateResult:
+def _gate_empirical_etl_decision_log() -> GateResult:
     """Bind logged ETL discretion to locked 2a clauses and catch declared zero-fill."""
     failures: list[dict[str, object]] = []
     lock_path = Path(PREREG_PHASE_FILES["2a"])
@@ -3315,6 +3833,106 @@ def gate_etl_decision_log() -> GateResult:
     )
 
 
+def _gate_modeling_etl_decision_log() -> GateResult:
+    failures: list[dict[str, object]] = []
+    manifests: list[tuple[Path, dict[str, object]]] = []
+    for path in sorted(Path("contracts/instances").glob("*.json")):
+        payload, error = _load_json_file(path)
+        if error is not None or payload is None:
+            continue
+        if payload.get("decision_log"):
+            manifests.append((path, payload))
+    if not manifests:
+        return GateResult(
+            ok=True,
+            details={
+                "status": "no_instance_decision_logs",
+                "manifest_count": 0,
+                "decision_log_count": 0,
+                "failures": [],
+            },
+        )
+
+    spec, spec_path, _lock, spec_failures = _active_experiment_spec()
+    failures.extend(spec_failures)
+    dimensions = (
+        spec.get("grid", {}).get("dimensions", {})
+        if isinstance(spec, dict) and isinstance(spec.get("grid"), dict)
+        else {}
+    )
+    clause_ids = {
+        "seeds",
+        "solver",
+        "budget",
+        "convergence_tolerance",
+        "sweep_survival_criterion",
+    }
+    if isinstance(dimensions, dict):
+        clause_ids.update(f"grid.dimensions.{name}" for name in dimensions)
+    decision_count = 0
+    for path, payload in manifests:
+        decision_log = payload.get("decision_log")
+        if not isinstance(decision_log, list):
+            failures.append(
+                _science_failure(
+                    "instance_decision_log_not_list",
+                    subject=path.as_posix(),
+                    field="decision_log",
+                )
+            )
+            continue
+        decision_count += len(decision_log)
+        for index, decision in enumerate(decision_log):
+            subject = f"{path.as_posix()}:decision_log[{index}]"
+            if not isinstance(decision, dict):
+                failures.append(_science_failure("instance_decision_not_object", subject=subject))
+                continue
+            clause_id = decision.get("clause_id")
+            if clause_id not in clause_ids:
+                failures.append(
+                    _science_failure(
+                        "unknown_locked_experiment_clause",
+                        subject=subject,
+                        field="clause_id",
+                        expected=sorted(clause_ids),
+                        actual=clause_id,
+                    )
+                )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "experiment_spec": spec_path.as_posix() if spec_path is not None else None,
+            "manifest_count": len(manifests),
+            "decision_log_count": decision_count,
+            "locked_clause_count": len(clause_ids),
+            "completeness_audited": False,
+            "failures": failures,
+        },
+    )
+
+
+def gate_etl_decision_log(*, form: str | None = None) -> GateResult:
+    """Run empirical, modeling, or union decision-log conformance."""
+    mode = _parse_project_mode(Path("contracts/project.yaml")) or "empirical"
+    selected = form or ("modeling" if mode == "modeling" else "union" if mode == "hybrid" else "empirical")
+    if selected == "empirical":
+        return _gate_empirical_etl_decision_log()
+    if selected == "modeling":
+        return _gate_modeling_etl_decision_log()
+    empirical = _gate_empirical_etl_decision_log()
+    modeling = _gate_modeling_etl_decision_log()
+    return GateResult(
+        ok=empirical.ok and modeling.ok,
+        details={
+            "status": "ok",
+            "forms": {"empirical": empirical.details, "modeling": modeling.details},
+            "failures": list(empirical.details.get("failures", []))
+            + list(modeling.details.get("failures", [])),
+        },
+    )
+
+
 def gate_rigor_sections() -> GateResult:
     """Require deterministic rigor headings on v2 analysis/writing and manuscript surfaces."""
     required_headings = (
@@ -3373,43 +3991,1220 @@ def gate_rigor_sections() -> GateResult:
     )
 
 
-def _collect_gate_results() -> dict[str, GateResult]:
-    return {
-        "framework_contract": gate_framework_contract(),
-        "repo_structure": gate_repo_structure(),
-        "project_contract": gate_project_contract(),
-        "protocol_complete": gate_protocol_complete(),
-        "workstreams_complete": gate_workstreams_complete(),
-        "task_hygiene": gate_task_hygiene(),
-        "task_dependencies": gate_task_dependencies(),
-        "integration_ready_policy": gate_integration_ready_policy(),
-        "operator_surface_ownership": gate_operator_surface_ownership(),
-        "raw_manifest_validity": gate_raw_manifest_validity(),
-        "processed_manifest_validity": gate_processed_manifest_validity(),
-        "swarm_run_manifest_validity": gate_swarm_run_manifest_validity(),
-        "judge_review_log_validity": gate_judge_review_log_validity(),
-        "review_bundle_integrity": gate_review_bundle_integrity(),
-        "processed_manifest_hashes": gate_processed_manifest_hashes(),
-        "raw_manifest_hashes": gate_raw_manifest_hashes(),
-        "validation_report_content_binding": gate_validation_report_content_binding(),
-        "projection_drift": gate_projection_drift(),
-        "historical_exemptions": gate_historical_exemptions(),
-        "network_strings": gate_network_strings(),
-        "task_lint": gate_task_lint(),
-        "prereg_conformance": gate_prereg_conformance(),
-        "claim_evidence_ledger": gate_claim_evidence_ledger(),
-        "citation_integrity": gate_citation_integrity(),
-        "etl_decision_log": gate_etl_decision_log(),
-        "rigor_sections": gate_rigor_sections(),
+def _verify_content_entry(
+    entry: object,
+    *,
+    subject: str,
+    field: str,
+    repo: Path = Path("."),
+    require_bytes: bool = False,
+    required_prefix: str | None = None,
+) -> list[dict[str, object]]:
+    if not isinstance(entry, dict):
+        return [_science_failure("invalid_content_binding", subject=subject, field=field, actual=entry)]
+    path = _safe_repo_relative_path(entry.get("path"))
+    expected_sha = entry.get("sha256")
+    if path is None:
+        return [
+            _science_failure(
+                "invalid_content_binding_path",
+                subject=subject,
+                field=f"{field}.path",
+                actual=entry.get("path"),
+            )
+        ]
+    if required_prefix is not None and not _path_matches_prefix(path.as_posix(), required_prefix):
+        return [
+            _science_failure(
+                "content_binding_path_outside_required_prefix",
+                subject=subject,
+                field=f"{field}.path",
+                expected=required_prefix,
+                actual=path.as_posix(),
+            )
+        ]
+    if not isinstance(expected_sha, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
+        return [
+            _science_failure(
+                "invalid_content_binding_sha256",
+                subject=subject,
+                field=f"{field}.sha256",
+                actual=expected_sha,
+            )
+        ]
+    expected_bytes = entry.get("bytes")
+    if require_bytes and (
+        not isinstance(expected_bytes, int) or isinstance(expected_bytes, bool) or expected_bytes < 0
+    ):
+        return [
+            _science_failure(
+                "invalid_content_binding_bytes",
+                subject=subject,
+                field=f"{field}.bytes",
+                actual=expected_bytes,
+            )
+        ]
+    disk_path = repo / path
+    if not disk_path.is_file():
+        return [
+            _science_failure(
+                "content_binding_target_missing",
+                subject=subject,
+                field=field,
+                expected=path.as_posix(),
+            )
+        ]
+    actual_sha, actual_bytes = _sha256_and_bytes(disk_path)
+    failures: list[dict[str, object]] = []
+    if actual_sha != expected_sha:
+        failures.append(
+            _science_failure(
+                "content_binding_sha256_mismatch",
+                subject=subject,
+                field=field,
+                expected=expected_sha,
+                actual=actual_sha,
+            )
+        )
+    if require_bytes and actual_bytes != expected_bytes:
+        failures.append(
+            _science_failure(
+                "content_binding_bytes_mismatch",
+                subject=subject,
+                field=field,
+                expected=expected_bytes,
+                actual=actual_bytes,
+            )
+        )
+    return failures
+
+
+def gate_instance_manifest_conformance() -> GateResult:
+    """Validate both v1 variants and recompute their complete content bindings."""
+    paths = sorted(Path("contracts/instances").glob("*.json"))
+    failures: list[dict[str, object]] = []
+    variants = {"bridge": 0, "synthetic": 0}
+    schema_path = Path("contracts/schemas/instance_manifest_v1.json")
+    for path in paths:
+        payload, error = _load_json_file(path)
+        if error is not None or payload is None:
+            failures.append(
+                _science_failure("invalid_instance_manifest_json", subject=path.as_posix(), actual=error)
+            )
+            continue
+        variant = "bridge" if "source_processed_manifests" in payload else "synthetic"
+        variants[variant] += 1
+        for issue in _schema_failures(payload, schema_path):
+            failures.append(
+                _science_failure(
+                    "instance_manifest_schema_violation",
+                    subject=path.as_posix(),
+                    field=str(issue.get("path")),
+                    actual=issue,
+                )
+            )
+        if variant == "bridge":
+            sources = payload.get("source_processed_manifests")
+            if isinstance(sources, list):
+                for index, entry in enumerate(sources):
+                    failures.extend(
+                        _verify_content_entry(
+                            entry,
+                            subject=path.as_posix(),
+                            field=f"source_processed_manifests[{index}]",
+                            required_prefix="data/processed_manifest/",
+                        )
+                    )
+        outputs = payload.get("outputs")
+        if isinstance(outputs, list):
+            for index, entry in enumerate(outputs):
+                failures.extend(
+                    _verify_content_entry(
+                        entry,
+                        subject=path.as_posix(),
+                        field=f"outputs[{index}]",
+                        require_bytes=True,
+                    )
+                )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_instance_manifests" if not paths else "ok",
+            "manifest_count": len(paths),
+            "variants": variants,
+            "failures": failures,
+        },
+    )
+
+
+def _experiment_manifests() -> tuple[list[tuple[Path, dict[str, object]]], list[dict[str, object]]]:
+    records: list[tuple[Path, dict[str, object]]] = []
+    failures: list[dict[str, object]] = []
+    schema_path = Path("contracts/schemas/experiment_manifest_v1.json")
+    for path in sorted(Path("reports/models").glob("*.json")):
+        payload, error = _load_json_file(path)
+        if error is not None or payload is None:
+            failures.append(
+                _science_failure("invalid_experiment_manifest_json", subject=path.as_posix(), actual=error)
+            )
+            continue
+        if payload.get("schema_version") != EXPERIMENT_MANIFEST_SCHEMA_VERSION:
+            continue
+        records.append((path, payload))
+        for issue in _schema_failures(payload, schema_path):
+            failures.append(
+                _science_failure(
+                    "experiment_manifest_schema_violation",
+                    subject=path.as_posix(),
+                    field=str(issue.get("path")),
+                    actual=issue,
+                )
+            )
+    return records, failures
+
+
+def gate_seed_budget_lock() -> GateResult:
+    manifests, failures = _experiment_manifests()
+    if not manifests:
+        return GateResult(
+            ok=not failures,
+            details={"status": "no_experiment_manifests", "manifest_count": 0, "failures": failures},
+        )
+    spec, spec_path, lock, spec_failures = _active_experiment_spec()
+    failures.extend(spec_failures)
+    seeds = spec.get("seeds", []) if isinstance(spec, dict) else []
+    raw_budgets = spec.get("budget", []) if isinstance(spec, dict) else []
+    budgets = raw_budgets if isinstance(raw_budgets, list) else [raw_budgets]
+    for path, manifest in manifests:
+        if manifest.get("seed") not in seeds:
+            failures.append(
+                _science_failure(
+                    "seed_outside_active_lock",
+                    subject=path.as_posix(),
+                    field="seed",
+                    expected=seeds,
+                    actual=manifest.get("seed"),
+                )
+            )
+        if manifest.get("budget") not in budgets:
+            failures.append(
+                _science_failure(
+                    "budget_outside_active_lock",
+                    subject=path.as_posix(),
+                    field="budget",
+                    expected=budgets,
+                    actual=manifest.get("budget"),
+                )
+            )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "manifest_count": len(manifests),
+            "active_lock_a_sha256": lock.get("body_sha256") if lock is not None else None,
+            "experiment_spec": spec_path.as_posix() if spec_path is not None else None,
+            "failures": failures,
+        },
+    )
+
+
+def _claim_experiment_paths(claim: dict[str, object]) -> list[Path]:
+    paths: list[Path] = []
+    direct = claim.get("experiment_manifest")
+    if isinstance(direct, str):
+        candidate = _safe_repo_relative_path(direct)
+        if candidate is not None:
+            paths.append(candidate)
+    elif isinstance(direct, dict):
+        candidate = _safe_repo_relative_path(direct.get("path"))
+        if candidate is not None:
+            paths.append(candidate)
+    artifacts = claim.get("supporting_artifacts")
+    if isinstance(artifacts, list):
+        for entry in artifacts:
+            candidate = _safe_repo_relative_path(entry.get("path")) if isinstance(entry, dict) else None
+            if candidate is not None and _path_matches_prefix(candidate.as_posix(), "reports/models/"):
+                paths.append(candidate)
+    return sorted(set(paths))
+
+
+def _dispersion_failures(path: Path, manifest: dict[str, object]) -> list[dict[str, object]]:
+    subject = path.as_posix()
+    direct = manifest.get("dispersion_artifact")
+    if direct is not None:
+        return _verify_content_entry(direct, subject=subject, field="dispersion_artifact")
+    outputs = manifest.get("outputs")
+    candidates: list[object] = []
+    if isinstance(outputs, dict):
+        for key, value in outputs.items():
+            if "dispersion" in str(key).lower():
+                candidates.append(value)
+    elif isinstance(outputs, list):
+        for value in outputs:
+            marker = ""
+            if isinstance(value, dict):
+                marker = " ".join(str(value.get(key, "")) for key in ("role", "kind", "type", "path"))
+            elif isinstance(value, str):
+                marker = value
+            if "dispersion" in marker.lower():
+                candidates.append(value)
+    if not candidates:
+        return [_science_failure("missing_per_instance_dispersion_artifact", subject=subject)]
+    failures: list[dict[str, object]] = []
+    for index, candidate in enumerate(candidates):
+        if isinstance(candidate, str):
+            candidate_path = _safe_repo_relative_path(candidate)
+            if candidate_path is None or not candidate_path.is_file():
+                failures.append(
+                    _science_failure(
+                        "missing_per_instance_dispersion_artifact",
+                        subject=subject,
+                        field=f"outputs[{index}]",
+                        actual=candidate,
+                    )
+                )
+        elif isinstance(candidate, dict):
+            failures.extend(
+                _verify_content_entry(candidate, subject=subject, field=f"outputs[{index}]")
+            )
+    return failures
+
+
+def gate_gap_convergence() -> GateResult:
+    claims, claim_failures = _load_claim_ledger()
+    failures: list[dict[str, object]] = []
+    if not claims and claim_failures:
+        failures.extend(claim_failures)
+    records, manifest_failures = _experiment_manifests()
+    failures.extend(manifest_failures)
+    by_path = {path: payload for path, payload in records}
+    relevant_claims = [
+        claim for claim in claims if claim.get("type") in {"computational", "counterfactual"}
+    ]
+    checked: set[Path] = set()
+    for index, claim in enumerate(relevant_claims):
+        subject = str(claim.get("claim_id") or f"claims[{index}]")
+        experiment_paths = _claim_experiment_paths(claim)
+        if not experiment_paths:
+            failures.append(
+                _science_failure("computational_claim_missing_experiment_manifest", subject=subject)
+            )
+        for path in experiment_paths:
+            manifest = by_path.get(path)
+            if manifest is None:
+                failures.append(
+                    _science_failure(
+                        "claim_experiment_manifest_not_registered",
+                        subject=subject,
+                        actual=path.as_posix(),
+                    )
+                )
+                continue
+            checked.add(path)
+    for path in sorted(checked):
+        manifest = by_path[path]
+        gap = manifest.get("optimality_gap")
+        if not isinstance(gap, (int, float)) or isinstance(gap, bool) or not math.isfinite(float(gap)):
+            failures.append(
+                _science_failure("missing_or_invalid_optimality_gap", subject=path.as_posix(), field="optimality_gap")
+            )
+        if not isinstance(manifest.get("converged"), bool):
+            failures.append(
+                _science_failure("missing_or_invalid_converged", subject=path.as_posix(), field="converged")
+            )
+        failures.extend(_dispersion_failures(path, manifest))
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_computational_claims" if not relevant_claims else "ok",
+            "claim_count": len(relevant_claims),
+            "manifest_count": len(checked),
+            "failures": failures,
+        },
+    )
+
+
+def gate_theoretical_falsification() -> GateResult:
+    claims, claim_failures = _load_claim_ledger()
+    failures: list[dict[str, object]] = []
+    if not claims and claim_failures:
+        failures.extend(claim_failures)
+    checked = 0
+    for index, claim in enumerate(claims):
+        if claim.get("type") != "theoretical" or "falsification_spec" not in claim:
+            continue
+        checked += 1
+        subject = str(claim.get("claim_id") or f"claims[{index}]")
+        for diagnostic in evaluate_falsification_spec(claim.get("falsification_spec")):
+            failures.append(
+                _science_failure(
+                    str(diagnostic.get("reason", "falsification_failed")),
+                    subject=subject,
+                    actual=diagnostic,
+                )
+            )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_declared_falsification_specs" if checked == 0 else "ok",
+            "claim_count": checked,
+            "failures": failures,
+        },
+    )
+
+
+def _canonical_cells(cells: object) -> list[str] | None:
+    if not isinstance(cells, list) or not all(isinstance(cell, dict) for cell in cells):
+        return None
+    return sorted(json.dumps(cell, sort_keys=True, separators=(",", ":")) for cell in cells)
+
+
+def gate_sweep_artifact() -> GateResult:
+    claims, claim_failures = _load_claim_ledger()
+    failures: list[dict[str, object]] = []
+    if not claims and claim_failures:
+        failures.extend(claim_failures)
+    headline_claims = [
+        claim
+        for claim in claims
+        if claim.get("type") in {"computational", "counterfactual"}
+        and (
+            claim.get("headline") is True
+            or claim.get("tier") == "headline"
+            or claim.get("claim_scope") == "headline"
+        )
+    ]
+    if not headline_claims:
+        return GateResult(
+            ok=not failures,
+            details={"status": "no_headline_modeling_claims", "claim_count": 0, "failures": failures},
+        )
+    spec, spec_path, lock, spec_failures = _active_experiment_spec()
+    failures.extend(spec_failures)
+    try:
+        expected_cells = enumerate_cells(spec) if spec is not None else []
+    except ValueError as exc:
+        failures.append(
+            _science_failure(
+                "locked_grid_not_enumerable",
+                subject=spec_path.as_posix() if spec_path is not None else "lock_a",
+                actual=str(exc),
+            )
+        )
+        expected_cells = []
+    expected_canonical = _canonical_cells(expected_cells)
+    criterion = spec.get("sweep_survival_criterion") if isinstance(spec, dict) else None
+    for index, claim in enumerate(headline_claims):
+        claim_id = str(claim.get("claim_id") or f"claims[{index}]")
+        path = Path("reports/models/sweeps") / f"{claim_id}.json"
+        payload, error = _load_json_file(path)
+        if error is not None or payload is None:
+            failures.append(
+                _science_failure("missing_sweep_artifact", subject=claim_id, expected=path.as_posix(), actual=error)
+            )
+            continue
+        if payload.get("schema_version") != SWEEP_ARTIFACT_SCHEMA_VERSION:
+            failures.append(
+                _science_failure(
+                    "invalid_sweep_artifact_schema",
+                    subject=claim_id,
+                    expected=SWEEP_ARTIFACT_SCHEMA_VERSION,
+                    actual=payload.get("schema_version"),
+                )
+            )
+        if payload.get("claim_id") != claim_id:
+            failures.append(
+                _science_failure("sweep_artifact_claim_mismatch", subject=claim_id, actual=payload.get("claim_id"))
+            )
+        actual_canonical = _canonical_cells(payload.get("cells"))
+        if actual_canonical != expected_canonical:
+            failures.append(
+                _science_failure(
+                    "sweep_grid_coverage_mismatch",
+                    subject=claim_id,
+                    expected=expected_cells,
+                    actual=payload.get("cells"),
+                )
+            )
+        survival = payload.get("survival_count")
+        if not isinstance(survival, int) or isinstance(survival, bool) or survival < 0 or survival > len(expected_cells):
+            failures.append(
+                _science_failure(
+                    "invalid_sweep_survival_count",
+                    subject=claim_id,
+                    expected=f"0..{len(expected_cells)}",
+                    actual=survival,
+                )
+            )
+        elif isinstance(criterion, (int, float)) and not isinstance(criterion, bool):
+            meets = (
+                survival / len(expected_cells) >= float(criterion)
+                if float(criterion) <= 1 and expected_cells
+                else survival >= float(criterion)
+            )
+            if not meets:
+                failures.append(
+                    _science_failure(
+                        "sweep_survival_criterion_not_met",
+                        subject=claim_id,
+                        expected=criterion,
+                        actual=survival,
+                    )
+                )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "claim_count": len(headline_claims),
+            "locked_cell_count": len(expected_cells),
+            "active_lock_a_sha256": lock.get("body_sha256") if lock is not None else None,
+            "failures": failures,
+        },
+    )
+
+
+def _task_declared_input_paths(frontmatter: dict[str, object]) -> list[str]:
+    paths: list[str] = []
+    raw_inputs = frontmatter.get("inputs")
+    if isinstance(raw_inputs, list):
+        for entry in raw_inputs:
+            if isinstance(entry, str):
+                paths.append(entry)
+            elif isinstance(entry, dict):
+                for key in ("path", "manifest"):
+                    value = entry.get(key)
+                    if isinstance(value, str):
+                        paths.append(value)
+                        break
+    instances = frontmatter.get("instances")
+    if isinstance(instances, list):
+        paths.extend(value for value in instances if isinstance(value, str))
+    return paths
+
+
+def check_hybrid_interface_conformance(
+    repo: Path = Path("."),
+    *,
+    task_kind: str | None = None,
+) -> GateResult:
+    """Reusable full bridge seam check for task judging and M4 release assembly."""
+    repo = repo.resolve()
+    failures: list[dict[str, object]] = []
+    manifest_paths = sorted((repo / "contracts/instances").glob("*.json"))
+    bridge_paths: list[Path] = []
+    interface_schema = repo / "contracts/hybrid_interface_v1.yaml"
+    for disk_path in manifest_paths:
+        payload, error = _load_json_file(disk_path)
+        rel = disk_path.relative_to(repo)
+        if error is not None or payload is None:
+            failures.append(
+                _science_failure("invalid_instance_manifest_json", subject=rel.as_posix(), actual=error)
+            )
+            continue
+        if "source_processed_manifests" not in payload:
+            continue
+        bridge_paths.append(rel)
+        for issue in _schema_failures(payload, interface_schema):
+            failures.append(
+                _science_failure(
+                    "hybrid_interface_schema_violation",
+                    subject=rel.as_posix(),
+                    field=str(issue.get("path")),
+                    actual=issue,
+                )
+            )
+        sources = payload.get("source_processed_manifests")
+        if isinstance(sources, list):
+            for index, entry in enumerate(sources):
+                failures.extend(
+                    _verify_content_entry(
+                        entry,
+                        subject=rel.as_posix(),
+                        field=f"source_processed_manifests[{index}]",
+                        repo=repo,
+                        required_prefix="data/processed_manifest/",
+                    )
+                )
+        validations = payload.get("pre_bridge_validation")
+        if isinstance(validations, list):
+            for index, entry in enumerate(validations):
+                failures.extend(
+                    _verify_content_entry(
+                        entry,
+                        subject=rel.as_posix(),
+                        field=f"pre_bridge_validation[{index}]",
+                        repo=repo,
+                    )
+                )
+                if isinstance(entry, dict) and entry.get("status") not in {"green", "ok", "passed"}:
+                    failures.append(
+                        _science_failure(
+                            "pre_bridge_validation_not_green",
+                            subject=rel.as_posix(),
+                            field=f"pre_bridge_validation[{index}].status",
+                            actual=entry.get("status"),
+                        )
+                    )
+        outputs = payload.get("outputs")
+        if isinstance(outputs, list):
+            for index, entry in enumerate(outputs):
+                failures.extend(
+                    _verify_content_entry(
+                        entry,
+                        subject=rel.as_posix(),
+                        field=f"outputs[{index}]",
+                        repo=repo,
+                        require_bytes=True,
+                    )
+                )
+
+    try:
+        contract = load_framework_contract(repo)
+    except ValueError as exc:
+        failures.append(_science_failure("invalid_framework_contract", subject="contracts/framework.json", actual=str(exc)))
+        contract = None
+    if contract is not None and task_kind in {None, "model", "proof"}:
+        for folder_name in contract.projection_dirs:
+            folder = repo / ".orchestrator" / folder_name
+            if not folder.is_dir():
+                continue
+            for path in sorted(folder.glob("*.md")):
+                if path.name == "README.md":
+                    continue
+                frontmatter = _parse_task_frontmatter(_read_text(path))
+                if not isinstance(frontmatter, dict) or frontmatter.get("task_kind") not in {"model", "proof"}:
+                    continue
+                for raw_input in _task_declared_input_paths(frontmatter):
+                    candidate = _safe_repo_relative_path(raw_input)
+                    if candidate is None or not _path_matches_prefix(candidate.as_posix(), "contracts/instances/"):
+                        failures.append(
+                            _science_failure(
+                                "modeling_task_input_outside_instance_contract",
+                                subject=path.relative_to(repo).as_posix(),
+                                field="inputs",
+                                expected="contracts/instances/**",
+                                actual=raw_input,
+                            )
+                        )
+
+    lock_path = repo / PREREG_PHASE_FILES["lock_b"]
+    lock_b, error = load_prereg_lock(lock_path, expected_phase="lock_b")
+    if error is not None or lock_b is None:
+        failures.append(
+            _science_failure("invalid_lock_b_lock", subject=PREREG_PHASE_FILES["lock_b"], actual=error)
+        )
+        lock_b = None
+    active_lock_b = lock_b if lock_b is not None and lock_b.get("active") is True else None
+    if lock_b is not None and lock_b.get("status") == "locked" and active_lock_b is None:
+        failures.append(
+            _science_failure(
+                "lock_b_lock_hash_mismatch",
+                subject=PREREG_PHASE_FILES["lock_b"],
+                expected=lock_b.get("body_sha256"),
+                actual=lock_b.get("locked_sha256"),
+            )
+        )
+    if active_lock_b is not None:
+        bindings, binding_failures = _verify_lock_bindings(active_lock_b, phase="lock_b", repo=repo)
+        failures.extend(binding_failures)
+        bound_instances = {
+            path for path in bindings if _path_matches_prefix(path, "contracts/instances/")
+        }
+        actual_instances = {path.as_posix() for path in manifest_paths for path in [path.relative_to(repo)]}
+        if bound_instances != actual_instances:
+            failures.append(
+                _science_failure(
+                    "lock_b_instance_set_mismatch",
+                    subject=PREREG_PHASE_FILES["lock_b"],
+                    expected=sorted(actual_instances),
+                    actual=sorted(bound_instances),
+                )
+            )
+    elif lock_b is None and not bridge_paths:
+        failures = [failure for failure in failures if failure.get("reason") != "invalid_lock_b_lock"]
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_bridge_manifests" if not bridge_paths else "ok",
+            "bridge_manifest_count": len(bridge_paths),
+            "instance_manifest_count": len(manifest_paths),
+            "active_lock_b_sha256": active_lock_b.get("body_sha256") if active_lock_b is not None else None,
+            "task_kind": task_kind,
+            "failures": failures,
+        },
+    )
+
+
+def gate_hybrid_interface_conformance(*, task_kind: str | None = None) -> GateResult:
+    mode = _parse_project_mode(Path("contracts/project.yaml"))
+    if mode != "hybrid":
+        return GateResult(
+            ok=True,
+            details={"status": "mode_not_hybrid", "skipped": True, "mode": mode, "failures": []},
+        )
+    return check_hybrid_interface_conformance(Path("."), task_kind=task_kind)
+
+
+def _yaml_scalar(raw: str) -> object:
+    value = raw.strip()
+    if not value:
+        return ""
+    if value.startswith(("[", "{")):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            pass
+    if value.startswith('"') and value.endswith('"'):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            pass
+    value = value.strip("'\"")
+    lowered = value.lower()
+    if lowered in {"true", "yes"}:
+        return True
+    if lowered in {"false", "no"}:
+        return False
+    if lowered in {"null", "~"}:
+        return None
+    if re.fullmatch(r"[-+]?\d+", value):
+        return int(value)
+    if re.fullmatch(r"[-+]?(?:\d+\.\d*|\.\d+)", value):
+        return float(value)
+    return value
+
+
+def _parse_simple_yaml(text: str) -> object:
+    lines = [
+        (len(raw) - len(raw.lstrip(" ")), raw.strip())
+        for raw in text.splitlines()
+        if raw.strip() and not raw.lstrip().startswith("#")
+    ]
+
+    def parse_block(index: int, indent: int) -> tuple[object, int]:
+        is_list = index < len(lines) and lines[index][0] == indent and lines[index][1].startswith("- ")
+        container: object = [] if is_list else {}
+        while index < len(lines):
+            current_indent, content = lines[index]
+            if current_indent < indent:
+                break
+            if current_indent > indent:
+                raise ValueError(f"unexpected_yaml_indent:{index + 1}")
+            if is_list:
+                if not content.startswith("- "):
+                    break
+                remainder = content[2:].strip()
+                if not remainder:
+                    if index + 1 >= len(lines) or lines[index + 1][0] <= indent:
+                        value: object = None
+                        index += 1
+                    else:
+                        value, index = parse_block(index + 1, lines[index + 1][0])
+                    assert isinstance(container, list)
+                    container.append(value)
+                    continue
+                if ":" in remainder:
+                    key, raw_value = remainder.split(":", 1)
+                    item: dict[str, object] = {}
+                    item[key.strip()] = _yaml_scalar(raw_value) if raw_value.strip() else None
+                    index += 1
+                    while index < len(lines) and lines[index][0] > indent:
+                        child_indent, child = lines[index]
+                        if child.startswith("- ") or ":" not in child:
+                            break
+                        child_key, child_raw = child.split(":", 1)
+                        if child_raw.strip():
+                            item[child_key.strip()] = _yaml_scalar(child_raw)
+                            index += 1
+                        elif index + 1 < len(lines) and lines[index + 1][0] > child_indent:
+                            nested, index = parse_block(index + 1, lines[index + 1][0])
+                            item[child_key.strip()] = nested
+                        else:
+                            item[child_key.strip()] = None
+                            index += 1
+                    assert isinstance(container, list)
+                    container.append(item)
+                    continue
+                assert isinstance(container, list)
+                container.append(_yaml_scalar(remainder))
+                index += 1
+                continue
+            if content.startswith("- ") or ":" not in content:
+                break
+            key, raw_value = content.split(":", 1)
+            key = key.strip()
+            assert isinstance(container, dict)
+            if raw_value.strip():
+                container[key] = _yaml_scalar(raw_value)
+                index += 1
+            elif index + 1 < len(lines) and lines[index + 1][0] > indent:
+                nested, index = parse_block(index + 1, lines[index + 1][0])
+                container[key] = nested
+            else:
+                container[key] = None
+                index += 1
+        return container, index
+
+    if not lines:
+        return {}
+    payload, final_index = parse_block(0, lines[0][0])
+    if final_index != len(lines):
+        raise ValueError(f"yaml_parse_stopped_at:{final_index + 1}")
+    return payload
+
+
+def _load_venue_contract() -> tuple[dict[str, object] | None, str | None]:
+    path = Path("contracts/venue.yaml")
+    if not path.is_file():
+        return None, None
+    text = _read_text(path)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            payload = _parse_simple_yaml(text)
+        except ValueError as exc:
+            return None, str(exc)
+    if not isinstance(payload, dict):
+        return None, "venue_top_level_not_object"
+    return payload, None
+
+
+def _venue_number(venue: dict[str, object] | None, *keys: str) -> float | None:
+    if venue is None:
+        return None
+    candidates: list[object] = [venue.get(key) for key in keys]
+    limits = venue.get("limits")
+    if isinstance(limits, dict):
+        candidates.extend(limits.get(key) for key in keys)
+    for value in candidates:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def _manuscript_words(text: str) -> list[str]:
+    body = re.sub(r"\A---\s*\n.*?\n---\s*\n", "", text, flags=re.DOTALL)
+    body = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)
+    body = re.sub(r"\{[^{}]*\}|`([^`]*)`|\[@[^\]]+\]", r" \1 ", body)
+    return re.findall(r"\b[\w'-]+\b", body)
+
+
+def gate_render_qa() -> GateResult:
+    manuscript = Path("reports/paper/index.qmd")
+    if not manuscript.is_file():
+        return GateResult(
+            ok=True,
+            details={"status": "no_manuscript", "skipped": True, "failures": []},
+        )
+    text = _read_text(manuscript)
+    failures: list[dict[str, object]] = []
+    if re.search(r"\bFigure\s+Figure\b", text, flags=re.IGNORECASE):
+        failures.append(_science_failure("duplicate_figure_prefix", subject=manuscript.as_posix()))
+    if "??" in text:
+        failures.append(_science_failure("unresolved_question_mark_reference", subject=manuscript.as_posix()))
+
+    labels = set(re.findall(r"\{#([A-Za-z0-9:_-]+)\b", text))
+    bib_keys: set[str] = set()
+    for bib_path in (manuscript.parent / "references.bib", Path("references.bib")):
+        if bib_path.is_file():
+            bib_keys.update(re.findall(r"@\w+\s*[({]\s*([^,\s]+)\s*,", _read_text(bib_path)))
+    references = {
+        reference.rstrip(".,;:")
+        for reference in re.findall(r"(?<![\w@])@([A-Za-z][A-Za-z0-9:_.-]*)", text)
     }
+    for reference in sorted(references - labels - bib_keys):
+        failures.append(
+            _science_failure("unresolved_source_reference", subject=manuscript.as_posix(), actual=reference)
+        )
+
+    include_pattern = re.compile(r"\{\{<\s*include\s+([^\s>]+)\s*>\}\}")
+    for raw_target in include_pattern.findall(text):
+        target = (manuscript.parent / raw_target.strip("'\"")).resolve()
+        if not target.is_file():
+            failures.append(
+                _science_failure("missing_include_target", subject=manuscript.as_posix(), actual=raw_target)
+            )
+
+    figure_pattern = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)(\{[^}]*\})?")
+    figures = figure_pattern.findall(text)
+    for index, (caption, raw_target, attributes) in enumerate(figures):
+        subject = f"{manuscript.as_posix()}:figure[{index}]"
+        if not caption.strip():
+            failures.append(_science_failure("figure_caption_missing", subject=subject))
+        if re.search(r"#fig-[A-Za-z0-9_-]+", attributes or "") is None:
+            failures.append(_science_failure("figure_label_missing", subject=subject))
+        target_text = raw_target.split(maxsplit=1)[0].strip("<>'\"")
+        if not (manuscript.parent / target_text).is_file():
+            failures.append(_science_failure("figure_target_missing", subject=subject, actual=target_text))
+
+    venue, venue_error = _load_venue_contract()
+    if venue_error is not None:
+        failures.append(_science_failure("invalid_venue_contract", subject="contracts/venue.yaml", actual=venue_error))
+        venue = None
+    word_count = len(_manuscript_words(text))
+    word_limit = _venue_number(venue, "word_limit", "max_words", "word_count")
+    if word_limit is not None and word_count > word_limit:
+        failures.append(
+            _science_failure("venue_word_limit_exceeded", subject=manuscript.as_posix(), expected=word_limit, actual=word_count)
+        )
+    words_per_page = _venue_number(venue, "words_per_page") or 500.0
+    page_count = math.ceil(word_count / words_per_page) if word_count else 0
+    page_limit = _venue_number(venue, "page_limit", "max_pages", "page_count")
+    if page_limit is not None and page_count > page_limit:
+        failures.append(
+            _science_failure("venue_page_limit_exceeded", subject=manuscript.as_posix(), expected=page_limit, actual=page_count)
+        )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "word_count": word_count,
+            "page_count_heuristic": page_count,
+            "figure_count": len(figures),
+            "failures": failures,
+        },
+    )
+
+
+def _overlap_paragraphs(text: str, min_words: int) -> list[str]:
+    paragraphs: list[str] = []
+    for raw in re.split(r"\n\s*\n", text):
+        if raw.lstrip().startswith(("#", "---", "```", "|")):
+            continue
+        normalized = " ".join(re.findall(r"\b[\w'-]+\b", raw.lower()))
+        if len(normalized.split()) >= min_words:
+            paragraphs.append(normalized)
+    return paragraphs
+
+
+def gate_text_overlap() -> GateResult:
+    manuscript = Path("reports/paper/index.qmd")
+    if not manuscript.is_file():
+        return GateResult(ok=True, details={"status": "no_manuscript", "skipped": True, "failures": []})
+    venue, venue_error = _load_venue_contract()
+    failures: list[dict[str, object]] = []
+    if venue_error is not None:
+        failures.append(_science_failure("invalid_venue_contract", subject="contracts/venue.yaml", actual=venue_error))
+        venue = None
+    overlap = venue.get("text_overlap") if isinstance(venue, dict) else None
+    max_ratio_value = overlap.get("max_ratio") if isinstance(overlap, dict) else None
+    min_words_value = overlap.get("min_words") if isinstance(overlap, dict) else None
+    max_ratio = float(max_ratio_value) if isinstance(max_ratio_value, (int, float)) else 0.85
+    min_words = int(min_words_value) if isinstance(min_words_value, int) and min_words_value > 0 else 30
+    paragraphs = _overlap_paragraphs(_read_text(manuscript), min_words)
+    seen: dict[str, int] = {}
+    for index, paragraph in enumerate(paragraphs):
+        if paragraph in seen:
+            failures.append(
+                _science_failure(
+                    "repeated_manuscript_paragraph",
+                    subject=manuscript.as_posix(),
+                    expected=seen[paragraph],
+                    actual=index,
+                )
+            )
+        else:
+            seen[paragraph] = index
+
+    corpus_root = Path("data/raw/literature")
+    corpus_paths = [
+        path
+        for path in sorted(corpus_root.rglob("*"))
+        if path.is_file() and path.suffix.lower() in {".txt", ".md", ".qmd", ".html"}
+    ] if corpus_root.is_dir() else []
+    max_observed = 0.0
+    for corpus_path in corpus_paths:
+        try:
+            corpus_text = _read_text(corpus_path)
+        except UnicodeDecodeError:
+            continue
+        corpus_paragraphs = _overlap_paragraphs(corpus_text, min_words)
+        for manuscript_index, paragraph in enumerate(paragraphs):
+            for corpus_index, candidate in enumerate(corpus_paragraphs):
+                ratio = difflib.SequenceMatcher(None, paragraph, candidate, autojunk=False).ratio()
+                max_observed = max(max_observed, ratio)
+                if ratio > max_ratio:
+                    failures.append(
+                        _science_failure(
+                            "literature_near_duplicate_span",
+                            subject=f"{manuscript.as_posix()}:paragraph[{manuscript_index}]",
+                            field=f"{corpus_path.as_posix()}:paragraph[{corpus_index}]",
+                            expected=f"<={max_ratio}",
+                            actual=round(ratio, 6),
+                        )
+                    )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_corpus" if not corpus_paths else "ok",
+            "corpus_file_count": len(corpus_paths),
+            "manuscript_paragraph_count": len(paragraphs),
+            "max_ratio": max_ratio,
+            "max_observed_ratio": round(max_observed, 6),
+            "failures": failures,
+        },
+    )
+
+
+def _derived_source_state(source: object) -> tuple[bool | None, str]:
+    if isinstance(source, str):
+        if source == "human_attested":
+            return None, source
+        gate_name = source.removeprefix("gate:")
+        gate_functions = {
+            "render_qa": gate_render_qa,
+            "text_overlap": gate_text_overlap,
+            "citation_integrity": gate_citation_integrity,
+            "instance_manifest_conformance": gate_instance_manifest_conformance,
+            "seed_budget_lock": gate_seed_budget_lock,
+            "gap_convergence": gate_gap_convergence,
+            "theoretical_falsification": gate_theoretical_falsification,
+            "sweep_artifact": gate_sweep_artifact,
+        }
+        if gate_name in gate_functions:
+            return gate_functions[gate_name]().ok, f"gate:{gate_name}"
+        path = _safe_repo_relative_path(source)
+        return (path.exists() if path is not None else False), source
+    if isinstance(source, dict):
+        if source.get("human_attested") is True:
+            return None, "human_attested"
+        if isinstance(source.get("gate"), str):
+            return _derived_source_state(f"gate:{source['gate']}")
+        path = _safe_repo_relative_path(source.get("path"))
+        if path is None or not path.exists():
+            return False, str(source.get("path"))
+        expected_sha = source.get("sha256")
+        if isinstance(expected_sha, str) and path.is_file():
+            actual_sha, _ = _sha256_and_bytes(path)
+            return actual_sha == expected_sha, path.as_posix()
+        return True, path.as_posix()
+    return False, repr(source)
+
+
+def gate_checklist_derivation() -> GateResult:
+    venue, error = _load_venue_contract()
+    if error is not None:
+        return GateResult(
+            ok=False,
+            details={"status": "invalid_venue", "failures": [_science_failure("invalid_venue_contract", subject="contracts/venue.yaml", actual=error)]},
+        )
+    if venue is None or "checklist" not in venue:
+        return GateResult(ok=True, details={"status": "no_checklist", "skipped": True, "failures": []})
+    checklist = venue.get("checklist")
+    failures: list[dict[str, object]] = []
+    if not isinstance(checklist, list):
+        failures.append(_science_failure("venue_checklist_not_list", subject="contracts/venue.yaml"))
+        checklist = []
+    human_attested = 0
+    for index, item in enumerate(checklist):
+        subject = f"contracts/venue.yaml:checklist[{index}]"
+        if not isinstance(item, dict):
+            failures.append(_science_failure("checklist_item_not_object", subject=subject))
+            continue
+        for field in ("question", "answer", "derived_from"):
+            if field not in item:
+                failures.append(_science_failure("checklist_field_missing", subject=subject, field=field))
+        source = item.get("derived_from")
+        sources = source if isinstance(source, list) else [source]
+        states = [_derived_source_state(entry) for entry in sources]
+        if item.get("human_attested") is True or any(state is None for state, _ in states):
+            human_attested += 1
+            continue
+        answer = item.get("answer")
+        affirmative = answer is True or (isinstance(answer, str) and answer.strip().lower() in {"yes", "true", "pass", "passed"})
+        if affirmative and (not states or not all(state is True for state, _ in states)):
+            failures.append(
+                _science_failure(
+                    "checklist_answer_not_supported",
+                    subject=subject,
+                    field="derived_from",
+                    expected="all derivation sources present/green",
+                    actual=[{"source": label, "state": state} for state, label in states],
+                )
+            )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "item_count": len(checklist),
+            "human_attested_count": human_attested,
+            "failures": failures,
+        },
+    )
+
+
+_CORE_GATE_NAMES = (
+    "framework_contract",
+    "repo_structure",
+    "project_contract",
+    "protocol_complete",
+    "workstreams_complete",
+    "task_hygiene",
+    "task_dependencies",
+    "integration_ready_policy",
+    "operator_surface_ownership",
+    "raw_manifest_validity",
+    "processed_manifest_validity",
+    "swarm_run_manifest_validity",
+    "judge_review_log_validity",
+    "review_bundle_integrity",
+    "processed_manifest_hashes",
+    "raw_manifest_hashes",
+    "validation_report_content_binding",
+    "projection_drift",
+    "historical_exemptions",
+    "network_strings",
+    "task_lint",
+)
+_MODE_INDEPENDENT_SCIENCE_GATES = (
+    "citation_integrity",
+    "rigor_sections",
+    "render_qa",
+    "text_overlap",
+    "checklist_derivation",
+)
+_EMPIRICAL_SCIENCE_GATES = (
+    "prereg_conformance",
+    "claim_evidence_ledger",
+    "etl_decision_log",
+)
+_MODELING_SCIENCE_GATES = (
+    "prereg_conformance",
+    "claim_evidence_ledger",
+    "etl_decision_log",
+    "instance_manifest_conformance",
+    "seed_budget_lock",
+    "gap_convergence",
+    "theoretical_falsification",
+    "sweep_artifact",
+)
+_ALL_GATE_NAMES = _CORE_GATE_NAMES + (
+    "prereg_conformance",
+    "claim_evidence_ledger",
+    "citation_integrity",
+    "etl_decision_log",
+    "rigor_sections",
+    "instance_manifest_conformance",
+    "seed_budget_lock",
+    "gap_convergence",
+    "theoretical_falsification",
+    "sweep_artifact",
+    "hybrid_interface_conformance",
+    "render_qa",
+    "text_overlap",
+    "checklist_derivation",
+)
+
+
+def _active_gates(mode: str, task_kind: str | None = None) -> tuple[str, ...]:
+    """Select the §5.2 gate form for a project mode and optional task kind."""
+    active = set(_CORE_GATE_NAMES) | set(_MODE_INDEPENDENT_SCIENCE_GATES)
+    if mode == "empirical":
+        active.update(_EMPIRICAL_SCIENCE_GATES)
+    elif mode == "modeling":
+        active.update(_MODELING_SCIENCE_GATES)
+    elif mode == "hybrid":
+        if task_kind in {"etl", "analysis", "validation"}:
+            active.update(_EMPIRICAL_SCIENCE_GATES)
+        elif task_kind in {"model", "proof"}:
+            active.update(_MODELING_SCIENCE_GATES)
+        elif task_kind == "bridge":
+            active.update({"etl_decision_log", "hybrid_interface_conformance"})
+        elif task_kind in {"lit_review", "ops", "integrity_audit", "repair"}:
+            pass
+        else:
+            active.update(_EMPIRICAL_SCIENCE_GATES)
+            active.update(_MODELING_SCIENCE_GATES)
+            active.add("hybrid_interface_conformance")
+    return tuple(name for name in _ALL_GATE_NAMES if name in active)
+
+
+def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResult]:
+    mode = _parse_project_mode(Path("contracts/project.yaml")) or "empirical"
+    active = set(_active_gates(mode, task_kind))
+    functions = {
+        "framework_contract": gate_framework_contract,
+        "repo_structure": gate_repo_structure,
+        "project_contract": gate_project_contract,
+        "protocol_complete": gate_protocol_complete,
+        "workstreams_complete": gate_workstreams_complete,
+        "task_hygiene": gate_task_hygiene,
+        "task_dependencies": gate_task_dependencies,
+        "integration_ready_policy": gate_integration_ready_policy,
+        "operator_surface_ownership": gate_operator_surface_ownership,
+        "raw_manifest_validity": gate_raw_manifest_validity,
+        "processed_manifest_validity": gate_processed_manifest_validity,
+        "swarm_run_manifest_validity": gate_swarm_run_manifest_validity,
+        "judge_review_log_validity": gate_judge_review_log_validity,
+        "review_bundle_integrity": gate_review_bundle_integrity,
+        "processed_manifest_hashes": gate_processed_manifest_hashes,
+        "raw_manifest_hashes": gate_raw_manifest_hashes,
+        "validation_report_content_binding": gate_validation_report_content_binding,
+        "projection_drift": gate_projection_drift,
+        "historical_exemptions": gate_historical_exemptions,
+        "network_strings": gate_network_strings,
+        "task_lint": gate_task_lint,
+        "claim_evidence_ledger": gate_claim_evidence_ledger,
+        "citation_integrity": gate_citation_integrity,
+        "rigor_sections": gate_rigor_sections,
+        "instance_manifest_conformance": gate_instance_manifest_conformance,
+        "seed_budget_lock": gate_seed_budget_lock,
+        "gap_convergence": gate_gap_convergence,
+        "theoretical_falsification": gate_theoretical_falsification,
+        "sweep_artifact": gate_sweep_artifact,
+        "render_qa": gate_render_qa,
+        "text_overlap": gate_text_overlap,
+        "checklist_derivation": gate_checklist_derivation,
+    }
+    results: dict[str, GateResult] = {}
+    for name in _ALL_GATE_NAMES:
+        if name not in active:
+            results[name] = GateResult(
+                ok=True,
+                details={
+                    "status": "inactive_for_mode",
+                    "skipped": True,
+                    "mode": mode,
+                    "task_kind": task_kind,
+                    "failures": [],
+                },
+            )
+        elif name == "prereg_conformance":
+            form = None
+            if mode == "hybrid":
+                if task_kind in {"etl", "analysis", "validation"}:
+                    form = "empirical"
+                elif task_kind in {"model", "proof"}:
+                    form = "modeling"
+            results[name] = gate_prereg_conformance(form=form)
+        elif name == "etl_decision_log":
+            form = None
+            if mode == "hybrid":
+                if task_kind in {"etl", "analysis", "validation"}:
+                    form = "empirical"
+                elif task_kind in {"model", "proof", "bridge"}:
+                    form = "modeling"
+            results[name] = gate_etl_decision_log(form=form)
+        elif name == "hybrid_interface_conformance":
+            results[name] = gate_hybrid_interface_conformance(task_kind=task_kind)
+        else:
+            results[name] = functions[name]()
+    return results
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="quality_gates.py")
     parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    parser.add_argument(
+        "--task-kind",
+        choices=["etl", "analysis", "validation", "writing", "lit_review", "model", "proof", "bridge", "ops", "integrity_audit", "repair"],
+        help="Apply hybrid composition at one task-kind boundary; omitted means writing/release union",
+    )
     args = parser.parse_args(argv)
 
-    results = _collect_gate_results()
+    results = _collect_gate_results(task_kind=args.task_kind)
     overall_ok = all(result.ok for result in results.values())
 
     if args.json:

@@ -1,0 +1,11 @@
+{
+  "schema_version": "research_swarm.experiment_manifest.v1",
+  "experiment_id": "E1",
+  "instance_id": "toy",
+  "seed": 11,
+  "budget": 100,
+  "solver": "toy",
+  "solver_version": "1",
+  "converged": true,
+  "outputs": {}
+}

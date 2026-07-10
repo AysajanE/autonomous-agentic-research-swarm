@@ -419,16 +419,10 @@ class M3aScienceGateTest(unittest.TestCase):
             root = self._root(tmp)
             with chdir(root):
                 names = list(quality_gates._collect_gate_results())
+            self.assertEqual(names, list(quality_gates._ALL_GATE_NAMES))
             self.assertEqual(
-                names[-6:],
-                [
-                    "task_lint",
-                    "prereg_conformance",
-                    "claim_evidence_ledger",
-                    "citation_integrity",
-                    "etl_decision_log",
-                    "rigor_sections",
-                ],
+                names[-3:],
+                ["render_qa", "text_overlap", "checklist_derivation"],
             )
 
 

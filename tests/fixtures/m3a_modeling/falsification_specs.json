@@ -1,0 +1,23 @@
+{
+  "true": {
+    "inequalities": ["x ** 2 >= 0", "x + y >= 0"],
+    "comparative_statics": [
+      {
+        "expression": "x ** 2 + y",
+        "parameter": "y",
+        "sign": "positive"
+      }
+    ],
+    "sample_points": [
+      {"x": -0.5, "y": 0.6},
+      {"x": 1.0, "y": 2.0}
+    ]
+  },
+  "false": {
+    "inequalities": ["x ** 2 >= 0.251"],
+    "comparative_statics": [],
+    "sample_points": [
+      {"x": -0.5}
+    ]
+  }
+}

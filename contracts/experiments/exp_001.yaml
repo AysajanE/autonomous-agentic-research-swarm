@@ -1,12 +1,16 @@
-name: exp_001_template
-description: "Template experiment spec (fill in for modeling projects)."
-seeds:
-  - 1
-  - 2
-  - 3
-parameters: {}
-solver:
-  name: "..."
-  version: "..."
-outputs:
-  results_dir: "reports/models/exp_001/"
+{
+  "schema_version": "research_swarm.experiment_spec.v1",
+  "grid": {
+    "dimensions": {
+      "parameter_placeholder": [0]
+    }
+  },
+  "seeds": [1, 2, 3],
+  "solver": {
+    "name": "declare-before-lock",
+    "version": "declare-before-lock"
+  },
+  "budget": [1],
+  "convergence_tolerance": 0.0,
+  "sweep_survival_criterion": 1.0
+}

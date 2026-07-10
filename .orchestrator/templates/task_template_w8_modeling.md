@@ -14,7 +14,7 @@ requires_tools:
   - "solver:<name>"
 requires_env: []
 instances:
-  - "contracts/instances/<instance_set>/manifest.yaml"
+  - "contracts/instances/<instance_id>.json"
 experiment_spec: "contracts/experiments/<experiment>.yaml"
 allowed_paths:
   - "src/model/"
@@ -29,7 +29,7 @@ disallowed_paths:
   - ".orchestrator/templates/"
   - ".orchestrator/workstreams.md"
 outputs:
-  - "reports/models/<experiment>/<run_id>/run_manifest.json"
+  - "reports/models/<run_id>.json"
   - "reports/models/<experiment>/<run_id>/results.json"
 gates:
   - "make gate"
@@ -56,15 +56,15 @@ Describe the modeling objective and how it maps to `contracts/model_spec.md`.
 
 ## Inputs
 
-- instance manifest(s): `contracts/instances/.../manifest.yaml`
+- instance manifest(s): `contracts/instances/<instance_id>.json`
 - experiment spec: `contracts/experiments/<experiment>.yaml`
 - solver requirement from `requires_tools`
-- empirical input manifests if the task is part of a hybrid workflow
+- hybrid model tasks still consume only instance manifests, never empirical data paths
 
 ## Outputs
 
 - run folder: `reports/models/<experiment>/<run_id>/`
-- required modeling run manifest: `reports/models/<experiment>/<run_id>/run_manifest.json`
+- required experiment manifest: `reports/models/<run_id>.json`
 - required results: `reports/models/<experiment>/<run_id>/results.json`
 
 ## Success Criteria

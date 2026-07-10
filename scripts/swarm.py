@@ -7831,7 +7831,11 @@ def build_parser() -> argparse.ArgumentParser:
         "lock-prereg",
         help="Hash and activate a phased preregistration lock (L3 human gate)",
     )
-    lock_prereg.add_argument("--phase", choices=["2a", "2b"], required=True)
+    lock_prereg.add_argument(
+        "--phase",
+        choices=["2a", "2b", "lock_a", "lock_b"],
+        required=True,
+    )
     lock_prereg.add_argument("--locked-by", required=True, help="Human lock approver")
     lock_prereg.add_argument(
         "--amend",
