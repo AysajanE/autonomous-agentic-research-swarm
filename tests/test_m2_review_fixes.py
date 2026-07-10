@@ -474,5 +474,120 @@ class VerificationPassRegressionsTest(unittest.TestCase):
         self.assertGreaterEqual(swarm._reconnaissance_line_count(substantive), 3)
 
 
+
+class Tranche4RegressionsTest(unittest.TestCase):
+    """Fixes from the SECOND verification pass (tranche 4)."""
+
+    def test_workstreams_must_preserve_existing_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)  # defines W0/W1/W8/W9
+            init_git_fixture_repo(root)
+            # dropping W0/W8/W9 (keeping only W1) is a coordination-contract
+            # clobber — rejected even though it has a valid row
+            clobber = (
+                "# Workstreams\n\n"
+                "| W | Purpose | Owns | Not |\n|---|---|---|---|\n"
+                "| W1 | ETL | src/etl/ | reports/ |\n"
+            )
+            with _fixture_root(root):
+                summary = swarm._apply_planner_proposals(
+                    mode="launch",
+                    proposals=[{"action": "update_workstreams", "content": clobber}],
+                    repo=root,
+                    args=_supervise_args(),
+                )
+            self.assertEqual(
+                summary["outcomes"][0]["reason"], "planner_workstreams_content_invalid"
+            )
+
+    def test_workstreams_with_prose_and_superset_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            init_git_fixture_repo(root)
+            valid = (
+                "# Workstreams\n\nSome prose the planner added.\n\n"
+                "| W | Purpose | Owns | Not |\n|---|---|---|---|\n"
+                "| W0 | Protocol | docs/ | src/ |\n"
+                "| W1 | ETL | src/etl/ | reports/ |\n"
+                "| W8 | Bridge | src/model/ | data/raw/ |\n"
+                "| W9 | Ops | reports/status/ | protocol |\n"
+                "| W2 | Analysis | src/analysis/ | data/raw/ |\n"
+            )
+            with _fixture_root(root):
+                summary = swarm._apply_planner_proposals(
+                    mode="launch",
+                    proposals=[{"action": "update_workstreams", "content": valid}],
+                    repo=root,
+                    args=_supervise_args(),
+                )
+            self.assertEqual(summary["outcomes"][0]["status"], "applied")
+
+    def test_recon_single_word_placeholders_do_not_count(self) -> None:
+        text = (
+            "## Reconnaissance\n"
+            "- Scope understanding: TBC\n"
+            "- Risks and unknowns: pending\n"
+            "- Decomposition pressure assessment: unknown\n"
+            "## Status\n"
+        )
+        self.assertLess(swarm._reconnaissance_line_count(text), 3)
+
+    def test_validation_independence_path_canonicalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_runtime_repo(root)
+            write_task(
+                root, "backlog", "T100", schema="v2", task_kind="etl", complexity_tier="S",
+                gates=["python scripts/noop_gate.py"], outputs=["data/processed/p.csv"],
+                inputs=[{"manifest": "data/raw_manifest/a.json", "sha256": "a" * 64}],
+            )
+            write_task(
+                root, "backlog", "T101", schema="v2", task_kind="validation", complexity_tier="S",
+                gates=["python scripts/noop_gate.py"], outputs=["reports/validation/v.json"],
+                constructed_by="T100",
+                # ./data/raw_manifest/a.json is the SAME artifact as T100's input
+                inputs=[{"manifest": "./data/raw_manifest/a.json", "sha256": "b" * 64, "comparison_basis": True}],
+            )
+            from runtime_test_utils import chdir
+            with chdir(root):
+                result = quality_gates.gate_task_lint()
+            reasons = {f["reason"] for f in result.details["failures"]}
+            self.assertIn("comparison_basis_path_not_disjoint", reasons)
+
+    def test_replan_marker_idempotency(self) -> None:
+        # unchanged marker suppressed; changed marker retriggers
+        f1 = swarm._replan_fingerprint(task_id="T1", trigger="planner_marker", evidence="0:0:[]:@planner do X")
+        f1b = swarm._replan_fingerprint(task_id="T1", trigger="planner_marker", evidence="0:0:[]:@planner do X")
+        f2 = swarm._replan_fingerprint(task_id="T1", trigger="planner_marker", evidence="0:0:[]:@planner do Y")
+        self.assertEqual(f1, f1b)
+        self.assertNotEqual(f1, f2)
+
+    def test_partial_split_failure_reserves_no_ids_and_rolls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            write_task(root, "backlog", "T200", schema="v2", task_kind="etl",
+                       complexity_tier="S", gates=["python scripts/noop_gate.py"], outputs=["README.md"])
+            init_git_fixture_repo(root)
+            # first child valid, second child reuses an existing id (T200 parent
+            # survives, whole split rolls back)
+            proposals = [{
+                "action": "split_task", "task_id": "T200",
+                "into": [
+                    {"path": ".orchestrator/backlog/T210_a.md", "content": _minimal_v2_task("T210", "a")},
+                    {"path": ".orchestrator/backlog/T210_b.md", "content": _minimal_v2_task("T210", "b")},
+                ],
+            }]
+            with _fixture_root(root):
+                summary = swarm._apply_planner_proposals(
+                    mode="replan", proposals=proposals, repo=root, args=_supervise_args()
+                )
+            self.assertEqual(summary["outcomes"][0]["status"], "refused")
+            self.assertTrue((root / ".orchestrator/backlog/T200_task.md").exists())
+            self.assertFalse((root / ".orchestrator/backlog/T210_a.md").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

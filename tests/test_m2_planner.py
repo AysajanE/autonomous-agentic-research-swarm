@@ -345,11 +345,19 @@ class M2PlannerTests(unittest.TestCase):
             root = self._root(tmp)
             first = _render_task(root, "T905")
             second = _render_task(root, "T906")
+            # a valid planner update PRESERVES the existing workstreams
+            # (W0/W1/W8/W9) and may add a new one — dropping ownership is
+            # rejected by _workstreams_update_valid
             planned_workstreams = (
                 "# Workstreams\n\n"
+                "Planner launch pass added W2.\n\n"
                 "| Workstream | Purpose | Owns paths | Does NOT own |\n"
                 "|---|---|---|---|\n"
+                "| W0 | Protocol/contracts | docs/, contracts/ | src/ |\n"
                 "| W1 | Off-chain ETL | src/etl/ | reports/paper/ |\n"
+                "| W2 | Analysis | src/analysis/ | data/raw/ |\n"
+                "| W8 | Bridge/model | src/model/ | data/raw/ |\n"
+                "| W9 | Ops/release | reports/status/ | protocol |\n"
             )
             _write_mock_planner(
                 root,

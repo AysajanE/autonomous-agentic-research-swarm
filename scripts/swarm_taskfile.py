@@ -763,6 +763,9 @@ def lint_task_files(
                 diagnostics, task, "budgets", "invalid_budgets", "mapping", frontmatter.get("budgets")
             )
         else:
+            # M3a-scheduled: per-complexity-tier NUMERIC ceilings (S|M|L caps on
+            # each budget) enforced against a framework-contract shape; today
+            # only positivity/format is checked. See the M3a milestone tracker.
             budget_validators = {
                 "max_wall_clock": parse_wall_clock_seconds,
                 "max_tokens": parse_token_count,
@@ -780,6 +783,9 @@ def lint_task_files(
                         value,
                     )
 
+        # M3a-scheduled: the canonical hypothesis-id namespace lives in the
+        # preregistration/claim-ledger artifacts; hypothesis_ids here is the
+        # interim link the planner's retirement guard resolves against.
         hypothesis_ids = frontmatter.get("hypothesis_ids")
         if hypothesis_ids is not None:
             if not isinstance(hypothesis_ids, list) or not all(

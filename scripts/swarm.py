@@ -1566,15 +1566,20 @@ def _reconnaissance_line_count(task_text: str) -> int:
         line = raw.strip()
         if not line or line in {"-", "*"} or line.startswith("<!--"):
             continue
-        # a template label with nothing (or a trivial placeholder) after the
-        # colon is not reconnaissance (C7 + verification pass)
+        # a template label with only a trivial placeholder after the colon is
+        # not reconnaissance. A substantive note is a phrase — >=2 words and
+        # >=8 non-space characters (C7, reworked after the verification pass
+        # found single-word placeholders like TBC/pending/unknown slipping
+        # through an explicit blocklist).
         matched_prefix = next(
             (prefix for prefix in _RECON_PLACEHOLDER_PREFIXES if line.startswith(prefix[:-1])),
             None,
         )
         if matched_prefix is not None:
             after = line.split(":", 1)[1].strip() if ":" in line else ""
-            if after == "" or after.lower() in {"tbd", "todo", "n/a", "na", "none", "-", "???", "xxx"}:
+            words = [w for w in re.split(r"\s+", after) if w.strip(".,;:!?-")]
+            non_space = len(after.replace(" ", ""))
+            if len(words) < 2 or non_space < 8:
                 continue
         count += 1
     return count
@@ -3430,35 +3435,43 @@ def _task_hypothesis_links(frontmatter: object) -> list[str]:
     return links
 
 
-def _workstreams_content_valid(content: str) -> bool:
-    """A proposed workstreams.md must have >=1 well-formed workstream row AND
-    contain no arbitrary prose: every non-blank line must be a heading, a
-    table header/separator, or a valid workstream row — so a single fake row
-    cannot smuggle in content that erases the coordination contract (C10 +
-    verification pass). Workstream ids must be unique."""
-    rows = 0
-    seen_ids: set[str] = set()
+def _workstream_row_ids(content: str) -> tuple[set[str], bool]:
+    """(set of well-formed workstream ids, all-rows-well-formed). A row is a
+    | W# | purpose | owns | not-owns | line with non-blank first three data
+    cells. Prose lines are ignored; a malformed W#-looking row fails."""
+    ids: set[str] = set()
+    ok = True
     for raw in content.splitlines():
         line = raw.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            continue
-        if set(line) <= set("|-: "):  # table separator row
+        if "|" not in line:
             continue
         cells = [c.strip() for c in line.strip("|").split("|")]
-        if len(cells) < 4:
-            return False
-        if cells[0] in {"Workstream", "workstream"}:  # header row
-            continue
-        if re.fullmatch(r"W\d+", cells[0]) and all(cells[1:4]):
-            if cells[0] in seen_ids:
-                return False
-            seen_ids.add(cells[0])
-            rows += 1
-            continue
+        first = cells[0] if cells else ""
+        if re.fullmatch(r"W\d+", first):
+            if len(cells) >= 4 and all(cells[1:4]):
+                if first in ids:
+                    ok = False
+                ids.add(first)
+            else:
+                ok = False
+    return ids, ok
+
+
+def _workstreams_update_valid(repo: Path, content: str) -> bool:
+    """A proposed workstreams.md is valid when it still parses to >=1
+    well-formed unique workstream row AND PRESERVES every workstream id the
+    current document defines — the planner may add ownership, never silently
+    drop it (C10, reworked after the verification pass found the line-by-line
+    check rejected legitimate prose while accepting a lone fake row)."""
+    proposed_ids, rows_ok = _workstream_row_ids(content)
+    if not proposed_ids or not rows_ok:
         return False
-    return rows >= 1
+    existing_path = repo / ".orchestrator" / "workstreams.md"
+    if existing_path.is_file():
+        existing_ids, _ = _workstream_row_ids(existing_path.read_text(encoding="utf-8"))
+        if not existing_ids <= proposed_ids:
+            return False
+    return True
 
 
 def _existing_task_ids(contract: FrameworkContract) -> set[str]:
@@ -3530,7 +3543,23 @@ def _apply_planner_proposals(
     outcomes: list[dict[str, object]] = []
     split_events: list[dict[str, object]] = []
     existing_task_ids = _existing_task_ids(contract)
-    batch_task_ids: set[str] = set()
+    # pre-scan: every task id this batch DECLARES (create paths + split
+    # children). An id declared more than once anywhere in the batch is a
+    # duplicate and is rejected wherever it appears (verification pass).
+    declared_ids: list[str] = []
+    for proposal in proposals:
+        action = str(proposal.get("action"))
+        if action == "create_task":
+            claimed = _parse_task_id_from_branch(Path(str(proposal.get("path") or "")).stem)
+            if claimed:
+                declared_ids.append(claimed)
+        elif action == "split_task":
+            for child in (proposal.get("into") or []):
+                if isinstance(child, dict):
+                    child_id = _parse_task_id_from_branch(Path(str(child.get("path") or "")).stem)
+                    if child_id:
+                        declared_ids.append(child_id)
+    batch_duplicate_ids = {tid for tid in declared_ids if declared_ids.count(tid) > 1}
 
     for index, proposal in enumerate(proposals):
         task_texts_before = dict(task_texts)
@@ -3555,27 +3584,23 @@ def _apply_planner_proposals(
                 outcome["reason"] = "planner_task_already_exists"
                 outcomes.append(outcome)
                 continue
-            # every id ever touched in this batch stays reserved — a deleted
-            # parent's id cannot be reused, and no two proposals share an id
+            # unique across existing tasks AND not a batch-duplicated id
             id_error = _proposed_task_id_error(
                 path=path,
                 content=content,
                 existing_ids=existing_task_ids,
-                batch_ids=batch_task_ids,
+                batch_ids=batch_duplicate_ids,
             )
             if id_error is not None:
                 outcome["reason"] = id_error
                 outcomes.append(outcome)
                 continue
-            declared_id = _parse_task_id_from_branch(path.stem)
-            if declared_id:
-                batch_task_ids.add(declared_id)
             task_texts[path] = content
             changed_paths.add(path)
 
         elif action == "update_workstreams":
             content = proposal.get("content")
-            if not isinstance(content, str) or not content.strip() or not _workstreams_content_valid(content):
+            if not isinstance(content, str) or not content.strip() or not _workstreams_update_valid(repo, content):
                 outcome["reason"] = "planner_workstreams_content_invalid"
                 outcomes.append(outcome)
                 continue
@@ -3650,13 +3675,13 @@ def _apply_planner_proposals(
                     child_error = "planner_task_already_exists"
                     break
                 parent_id = _parse_task_id_from_branch(parent.stem)
+                child_id = _parse_task_id_from_branch(path.stem)
                 id_error = _proposed_task_id_error(
                     path=path,
                     content=content,
                     existing_ids=existing_task_ids,
-                    batch_ids=batch_task_ids | set(child_ids),
+                    batch_ids=batch_duplicate_ids | set(child_ids),
                 )
-                child_id = _parse_task_id_from_branch(path.stem)
                 if id_error is not None or child_id == parent_id:
                     child_error = id_error or "planner_split_child_reuses_parent_id"
                     break
@@ -3671,9 +3696,6 @@ def _apply_planner_proposals(
                 outcomes.append(outcome)
                 continue
             deleted_paths.add(parent)
-            batch_task_ids.update(cid for cid in child_ids if cid)
-            if parent_id:
-                batch_task_ids.add(parent_id)
             changed_paths.update(child_paths)
             outcome["children"] = child_ids
             split_events.append(
