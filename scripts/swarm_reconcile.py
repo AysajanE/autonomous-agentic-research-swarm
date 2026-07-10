@@ -258,6 +258,8 @@ def reconcile(repo: Path) -> dict:
             "claim_ref_reconciliation",
             "run_finished_manifests",
             "merge_reverted_history",
+            "unverified_merges",
+            "active_claim_invariants",
             "spend_ledger",
         )
     }
@@ -290,6 +292,60 @@ def reconcile(repo: Path) -> dict:
             detail=f"{type(exc).__name__}:{exc}",
         )
     live_claim_ids = set(claims)
+
+    # M1 acceptance fidelity (review round): an ACTIVE task without a live
+    # claim is orphaned state the supervisor must converge — a standing
+    # violation is a finding, not a shrug.
+    for task_id, info in sorted(tasks.items()):
+        if info.get("state") != "active":
+            continue
+        checks["active_claim_invariants"]["checked"] += 1
+        if task_id not in live_claim_ids:
+            add_finding(
+                "active_claim_invariants",
+                "active_without_claim",
+                task_id=task_id,
+            )
+
+    # every merge_started without merge_verified must have left NO trace in
+    # base history — a reachable branch commit under an unverified merge is
+    # exactly the crash-window corruption the review exposed.
+    merge_intents: dict[str, dict] = {}
+    merge_verified_ids: set[str] = set()
+    for event in events:
+        event_task = _event_task_id(event)
+        if event_task is None:
+            continue
+        if event.get("event") == "merge_started":
+            merge_intents[event_task] = event
+        elif event.get("event") == "merge_verified":
+            merge_verified_ids.add(event_task)
+        elif event.get("event") in {"merge_reverted", "merge_refused_non_ff"}:
+            merge_intents.pop(event_task, None)
+    head_cp = _run_git(repo, ["rev-parse", "HEAD"])
+    head_sha = head_cp.stdout.strip() if head_cp.returncode == 0 else None
+    for task_id, intent in sorted(merge_intents.items()):
+        if task_id in merge_verified_ids:
+            continue
+        checks["unverified_merges"]["checked"] += 1
+        branch = intent.get("branch")
+        if not isinstance(branch, str) or head_sha is None:
+            continue
+        branch_cp = _run_git(repo, ["rev-parse", "--verify", "--quiet", branch])
+        if branch_cp.returncode != 0:
+            continue
+        branch_tip = branch_cp.stdout.strip()
+        reachable = (
+            _run_git(repo, ["merge-base", "--is-ancestor", branch_tip, head_sha]).returncode == 0
+        )
+        if reachable:
+            add_finding(
+                "unverified_merges",
+                "unverified_merge_in_base",
+                task_id=task_id,
+                branch=branch,
+                pre_merge_sha=intent.get("pre_merge_sha"),
+            )
 
     task_done_events = [event for event in events if event.get("event") == "task_done"]
     checks["task_done_bundle"]["checked"] = len(task_done_events)

@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from runtime_test_utils import attest_containment_fixture
 from runtime_test_utils import init_git_fixture_repo
 from runtime_test_utils import load_swarm_module
 from runtime_test_utils import scaffold_runtime_repo
@@ -399,6 +400,7 @@ class M1ExecutorCostsTests(unittest.TestCase):
                 usage={"input_tokens": 20, "output_tokens": 5},
             )
             init_git_fixture_repo(root)
+            attest_containment_fixture(root)
             args = argparse.Namespace(
                 once=True,
                 interval_seconds=5,

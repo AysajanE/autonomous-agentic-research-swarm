@@ -407,6 +407,23 @@ def _run_mock_transcript(*, repo: Path, task: Task) -> tuple[int, str, dict[str,
             action_key = action_keys[0]
             if action_key in {"write", "append"}:
                 target = _safe_mock_action_path(repo, action[action_key])
+                rel = target.relative_to(repo.resolve()).as_posix()
+                denied_prefixes = (".git", "reports/status/", ".orchestrator/mock_transcripts/")
+                if rel == ".git" or any(
+                    rel == prefix.rstrip("/") or rel.startswith(prefix)
+                    for prefix in denied_prefixes
+                ):
+                    raise ValueError(f"mock_transcript_path_denied:{rel}")
+                task_file_rel = task.path.resolve().relative_to(repo.resolve()).as_posix()
+                allowed, reason = _path_is_allowed(
+                    path=rel,
+                    allowed_paths=task.allowed_paths,
+                    disallowed_paths=task.disallowed_paths,
+                    task_file_path=task_file_rel,
+                    task_id=task.task_id,
+                )
+                if not allowed:
+                    raise ValueError(f"mock_transcript_path_denied:{rel}:{reason}")
                 content = action.get("content")
                 if not isinstance(content, str):
                     raise ValueError(f"mock_transcript_content_invalid:{index}")
@@ -1499,6 +1516,17 @@ _SENSITIVE_CREDENTIAL_PATHS = (
 )
 
 
+def _real_home() -> Path:
+    """The account's real home (test seam): env HOME is caller-controlled and
+    must not be able to hide credentials from the containment scan."""
+    try:
+        import pwd
+
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:
+        return Path(os.path.expanduser("~"))
+
+
 def _readable_credential_classes(home: Path) -> list[str]:
     found: set[str] = set()
     for rel, klass in _SENSITIVE_CREDENTIAL_PATHS:
@@ -1528,10 +1556,16 @@ def _require_containment(repo: Path) -> None:
     if not isinstance(marker, dict) or marker.get("contained") is not True:
         raise SystemExit("containment_marker_invalid:contained_not_true")
 
-    credentials = _readable_credential_classes(Path(os.path.expanduser("~")))
+    credentials = set(_readable_credential_classes(_real_home()))
+    waived = marker.get("credential_scan_waiver")
+    if isinstance(waived, list):
+        # §9.4 allows exactly one exception class: credentials the attesting
+        # human explicitly names (e.g. a scoped deploy key). The waiver lives
+        # in the ATTESTED marker, never in env — env is caller-controlled.
+        credentials -= {item for item in waived if isinstance(item, str)}
     if credentials:
         raise SystemExit(
-            "containment_credentials_readable:" + ",".join(credentials)
+            "containment_credentials_readable:" + ",".join(sorted(credentials))
         )
 
     ack_path = repo / VENDOR_ACK_RELPATH
@@ -2458,6 +2492,7 @@ def cmd_attest_containment(args: argparse.Namespace) -> int:
         "attested_by": args.attested_by,
         "attested_at_utc": _utc_now_iso(),
         "note": args.note or "",
+        "credential_scan_waiver": sorted(set(getattr(args, "waive_credential_class", []) or [])),
     }
     _write_json(marker_path, payload)
     _record_swarm_event(
@@ -4080,7 +4115,10 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
         dirty = [
             line
             for line in (status_cp.stdout or "").splitlines()
-            if line.strip() and line[3:].strip() not in event_paths
+            if line.strip()
+            and line[3:].strip() not in event_paths
+            # machine-local attestations are operator state, never merge content
+            and not line[3:].strip().startswith(".swarm/")
         ]
         if dirty:
             _record_swarm_event(
@@ -4946,6 +4984,10 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         raise SystemExit("supervise_runner_must_be_local")
     if args.unattended:
         _require_unattended_ack()
+    else:
+        # inherently unattended-class entrypoint (§9.4): containment is not
+        # optional even without the flag
+        _require_containment(_repo_root())
     _preflight_strict_sync_requirements(
         cwd=repo,
         remote=args.remote,
@@ -5038,6 +5080,10 @@ def cmd_loop(args: argparse.Namespace) -> int:
 
     if args.unattended:
         _require_unattended_ack()
+    else:
+        # inherently unattended-class entrypoint (§9.4): containment is not
+        # optional even without the flag
+        _require_containment(_repo_root())
 
     _preflight_strict_sync_requirements(
         cwd=repo,
@@ -5073,6 +5119,10 @@ def cmd_tmux_start(args: argparse.Namespace) -> int:
 
     if args.unattended:
         _require_unattended_ack()
+    else:
+        # inherently unattended-class entrypoint (§9.4): containment is not
+        # optional even without the flag
+        _require_containment(_repo_root())
 
     _preflight_strict_sync_requirements(
         cwd=repo,
@@ -6140,6 +6190,13 @@ def build_parser() -> argparse.ArgumentParser:
     attest = subparsers.add_parser("attest-containment", help="Record the machine-local containment attestation required for unattended runs")
     attest.add_argument("--attested-by", required=True)
     attest.add_argument("--note", default="")
+    attest.add_argument(
+        "--waive-credential-class",
+        action="append",
+        dest="waive_credential_class",
+        default=[],
+        help="Explicitly waive one credential class the scan may find (e.g. a scoped deploy key); recorded in the attested marker",
+    )
     attest.set_defaults(func=cmd_attest_containment)
 
     ack = subparsers.add_parser("ack-vendor-policy", help="Record the one-time vendor-policy compatibility acknowledgment for unattended use")

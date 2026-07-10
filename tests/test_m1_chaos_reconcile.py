@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 from runtime_test_utils import SWARM_PATH
+from runtime_test_utils import attest_containment_fixture
 from runtime_test_utils import init_git_fixture_repo
 from runtime_test_utils import load_swarm_module
 from runtime_test_utils import scaffold_runtime_repo
@@ -111,6 +112,7 @@ class M1ChaosReconcileTests(unittest.TestCase):
                 },
             )
         init_git_fixture_repo(root)
+        attest_containment_fixture(root)
 
     def _run_supervisor(self, root: Path, worktrees: Path) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)

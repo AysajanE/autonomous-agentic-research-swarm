@@ -667,6 +667,13 @@ def attest_containment_fixture(root: Path) -> None:
             "attested_by": "fixture",
             "attested_at_utc": "2026-07-10T00:00:00Z",
             "note": "test fixture",
+            "credential_scan_waiver": [
+                "aws_credentials",
+                "ssh_private_key",
+                "gcloud_adc",
+                "netrc",
+                "docker_auth",
+            ],
         },
     )
     write_json(

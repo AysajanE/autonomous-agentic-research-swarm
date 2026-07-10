@@ -54,7 +54,10 @@ def _run_args(task_id: str, **overrides: object) -> argparse.Namespace:
 @contextlib.contextmanager
 def _clean_home():
     with tempfile.TemporaryDirectory() as home:
-        with mock.patch.dict(os.environ, {"HOME": home}, clear=False):
+        with (
+            mock.patch.dict(os.environ, {"HOME": home}, clear=False),
+            mock.patch.object(swarm, "_real_home", return_value=Path(home)),
+        ):
             yield Path(home)
 
 
@@ -80,7 +83,17 @@ class ContainmentPreflightTest(unittest.TestCase):
     def test_readable_credentials_disprove_containment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, _clean_home() as home:
             root = self._fixture(tmp)
-            attest_containment_fixture(root)
+            # a marker WITHOUT waivers: the scan must bite
+            write_json(
+                root,
+                ".swarm/containment.json",
+                {
+                    "schema_version": "research_swarm.containment_marker.v1",
+                    "contained": True,
+                    "attested_by": "fixture",
+                    "attested_at_utc": "2026-07-10T00:00:00Z",
+                },
+            )
             aws = home / ".aws" / "credentials"
             aws.parent.mkdir(parents=True)
             aws.write_text("[default]\naws_access_key_id=AKIAFIXTURE\n", encoding="utf-8")
@@ -91,6 +104,50 @@ class ContainmentPreflightTest(unittest.TestCase):
                     SystemExit, "containment_credentials_readable:aws_credentials"
                 ):
                     swarm._require_unattended_ack(root)
+
+    def test_attested_waiver_exempts_named_class_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, _clean_home() as home:
+            root = self._fixture(tmp)
+            write_json(
+                root,
+                ".swarm/containment.json",
+                {
+                    "schema_version": "research_swarm.containment_marker.v1",
+                    "contained": True,
+                    "attested_by": "fixture",
+                    "attested_at_utc": "2026-07-10T00:00:00Z",
+                    "credential_scan_waiver": ["ssh_private_key"],
+                },
+            )
+            write_json(
+                root,
+                ".swarm/vendor_policy_ack.json",
+                {
+                    "schema_version": "research_swarm.vendor_policy_ack.v1",
+                    "vendor": "codex",
+                    "policy_note": "fixture",
+                    "acked_by": "fixture",
+                    "acked_at_utc": "2026-07-10T00:00:00Z",
+                },
+            )
+            ssh = home / ".ssh" / "id_ed25519"
+            ssh.parent.mkdir(parents=True)
+            ssh.write_text("-----BEGIN OPENSSH PRIVATE KEY----- fixture", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ, {"SWARM_UNATTENDED_I_UNDERSTAND": "1"}, clear=False
+            ):
+                swarm._require_unattended_ack(root)  # waived class passes
+
+            aws = home / ".aws" / "credentials"
+            aws.parent.mkdir(parents=True)
+            aws.write_text("[default]\naws_access_key_id=AKIAFIXTURE\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ, {"SWARM_UNATTENDED_I_UNDERSTAND": "1"}, clear=False
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit, "containment_credentials_readable:aws_credentials"
+                ):
+                    swarm._require_unattended_ack(root)  # unwaived class still bites
 
     def test_vendor_ack_required_and_recordable_via_cli(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, _clean_home():

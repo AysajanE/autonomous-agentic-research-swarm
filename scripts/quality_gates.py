@@ -1997,6 +1997,35 @@ def gate_projection_drift() -> GateResult:
         {"source": source.as_posix(), "target": target.as_posix()}
         for source, target in moves
     ]
+    # §4.1: the drift gate also covers claim-ref⇔task-file drift (offline —
+    # local refs only; liveness enforcement stays with the runtime).
+    claim_problems: list[str] = []
+    refs_cp = subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname)", "refs/swarm/claims/"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if refs_cp.returncode == 0:
+        try:
+            contract = load_framework_contract()
+            tasks, _ = _collect_tasks(contract)
+        except Exception:
+            tasks = {}
+        for line in (refs_cp.stdout or "").splitlines():
+            ref = line.strip()
+            if not ref:
+                continue
+            task_id = ref.removeprefix("refs/swarm/claims/")
+            task = tasks.get(task_id)
+            if task is None:
+                claim_problems.append(f"claim_ref_without_task:{task_id}")
+            elif task.state == "done":
+                claim_problems.append(f"claim_ref_on_done_task:{task_id}")
+            elif task.state == "backlog":
+                claim_problems.append(f"claim_ref_with_backlog_state:{task_id}")
+    problems = list(problems) + claim_problems
+
     return GateResult(
         ok=not moves and not problems,
         details={"moves": serialized_moves, "problems": problems},
