@@ -66,6 +66,10 @@ ALL_STAGE4_GATE_NAMES = (
     "swarm_run_manifest_validity",
     "judge_review_log_validity",
     "review_bundle_integrity",
+    "referee_rubrics",
+    "referee_report_validity",
+    "referee_calibration",
+    "referee_release_evidence",
 )
 REQUIRED_RELEASE_GATE_NAMES = ALL_STAGE4_GATE_NAMES
 
@@ -452,7 +456,18 @@ def assemble_release_manifest(
 
     notes = _dedupe_preserve(notes)
 
-    if (missing_required_inputs or required_gate_failures) and not allow_gate_failures:
+    referee_hard_failures = sorted(
+        set(required_gate_failures)
+        & {
+            "referee_rubrics",
+            "referee_report_validity",
+            "referee_calibration",
+            "referee_release_evidence",
+        }
+    )
+    if referee_hard_failures or (
+        (missing_required_inputs or required_gate_failures) and not allow_gate_failures
+    ):
         failure_parts: list[str] = []
         if missing_required_inputs:
             failure_parts.append(
@@ -531,6 +546,7 @@ def assemble_release_manifest(
             "all_required_ok": len(required_gate_failures) == 0,
             "results": gate_results,
         },
+        "referee_evidence": gate_results.get("referee_release_evidence", {}).get("details", {}),
         "artifacts": artifacts,
         "counts": counts,
         "notes": notes,
@@ -718,9 +734,17 @@ def validate_release_manifest(path: Path, repo_root: Path) -> list[str]:
         required_gate_names = quality_gates.get("required_gate_names")
         all_required_ok = quality_gates.get("all_required_ok")
         results = quality_gates.get("results")
+        legacy_without_referee_evidence = "referee_evidence" not in payload
+        validation_gate_names = list(REQUIRED_RELEASE_GATE_NAMES)
 
         if not isinstance(required_gate_names, list):
             failures.append(f"{relpath}:required_gate_names_not_list")
+        elif legacy_without_referee_evidence:
+            validation_gate_names = [
+                name for name in required_gate_names if isinstance(name, str)
+            ]
+            if not set(validation_gate_names).issubset(set(REQUIRED_RELEASE_GATE_NAMES)):
+                failures.append(f"{relpath}:required_gate_names_mismatch")
         elif set(required_gate_names) != set(REQUIRED_RELEASE_GATE_NAMES):
             failures.append(f"{relpath}:required_gate_names_mismatch")
 
@@ -731,7 +755,7 @@ def validate_release_manifest(path: Path, repo_root: Path) -> list[str]:
         if not isinstance(results, dict):
             failures.append(f"{relpath}:quality_gate_results_not_object")
         else:
-            for gate_name in REQUIRED_RELEASE_GATE_NAMES:
+            for gate_name in validation_gate_names:
                 gate_result = results.get(gate_name)
                 if not isinstance(gate_result, dict):
                     failures.append(f"{relpath}:missing_gate_result:{gate_name}")
@@ -744,6 +768,39 @@ def validate_release_manifest(path: Path, repo_root: Path) -> list[str]:
             if isinstance(all_required_ok, bool) and required_gate_oks:
                 if all_required_ok != all(required_gate_oks):
                     failures.append(f"{relpath}:all_required_ok_mismatch")
+
+    referee_evidence = payload.get("referee_evidence")
+    if referee_evidence is not None and not isinstance(referee_evidence, dict):
+        failures.append(f"{relpath}:referee_evidence_not_object")
+    elif isinstance(referee_evidence, dict):
+        calibration = referee_evidence.get("calibration")
+        if calibration is not None:
+            failures.extend(
+                f"{relpath}:{failure}"
+                for failure in _validate_artifact_entry(
+                    calibration,
+                    repo_root,
+                    "referee_evidence.calibration",
+                )
+            )
+        evidence_items = referee_evidence.get("evidence", [])
+        if not isinstance(evidence_items, list):
+            failures.append(f"{relpath}:referee_evidence_items_not_list")
+        else:
+            for item_index, item in enumerate(evidence_items):
+                reports = item.get("reports") if isinstance(item, dict) else None
+                if not isinstance(reports, list):
+                    failures.append(f"{relpath}:referee_evidence_reports_not_list:{item_index}")
+                    continue
+                for report_index, report in enumerate(reports):
+                    failures.extend(
+                        f"{relpath}:{failure}"
+                        for failure in _validate_artifact_entry(
+                            report,
+                            repo_root,
+                            f"referee_evidence.evidence[{item_index}].reports[{report_index}]",
+                        )
+                    )
 
     artifacts = payload.get("artifacts")
     failures.extend(

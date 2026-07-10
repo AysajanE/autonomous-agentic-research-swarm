@@ -23,6 +23,7 @@ from swarm_taskfile import parse_task_frontmatter
 
 BLOCKING_VERDICTS = {"not_supported", "cannot_verify"}
 REPORT_SCHEMA_VERSION = "research_swarm.referee_report.v1"
+PLAN_APPROVAL_PENDING_PATH = Path(".swarm/plan_approval_pending.json")
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -185,6 +186,65 @@ def _next_task_number(repo: Path, reserved: set[int]) -> int:
     raise ValueError("revision_task_id_space_exhausted")
 
 
+def _project_mode(repo: Path) -> str:
+    try:
+        text = (repo / "contracts" / "project.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return "empirical"
+    match = re.search(r"^mode:\s*['\"]?([a-z_]+)", text, flags=re.MULTILINE)
+    return match.group(1) if match is not None else "empirical"
+
+
+def _source_required_locks(repo: Path, source: Mapping[str, object]) -> list[str]:
+    explicit = source.get("required_prereg_locks")
+    if isinstance(explicit, list):
+        return sorted({str(item) for item in explicit if item in {"2a", "2b", "lock_a", "lock_b"}})
+    mode = _project_mode(repo)
+    kind = source.get("task_kind")
+    outputs = source.get("outputs") if isinstance(source.get("outputs"), list) else []
+    required: set[str] = set()
+    if mode in {"empirical", "hybrid"} and kind == "etl" and any(
+        isinstance(output, str) and output.startswith("data/processed/") for output in outputs
+    ):
+        required.add("2a")
+    if mode in {"empirical", "hybrid"} and kind == "analysis":
+        required.add("2b")
+    if mode == "modeling" and kind in {"model", "analysis"}:
+        required.add("lock_a")
+    if mode == "hybrid" and kind == "bridge":
+        required.add("lock_a")
+    if mode == "hybrid" and kind == "model":
+        required.add("lock_b")
+    return sorted(required, key=("2a", "2b", "lock_a", "lock_b").index)
+
+
+def _plan_content_digest(repo: Path) -> str:
+    parts: list[str] = []
+    backlog = repo / ".orchestrator" / "backlog"
+    for path in sorted(backlog.glob("*.md")) if backlog.is_dir() else []:
+        parts.extend((path.name, hashlib.sha256(path.read_bytes()).hexdigest()))
+    workstreams = repo / ".orchestrator" / "workstreams.md"
+    if workstreams.is_file():
+        parts.append(hashlib.sha256(workstreams.read_bytes()).hexdigest())
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _write_plan_approval_pending(repo: Path, source_task_id: str) -> Path:
+    path = repo / PLAN_APPROVAL_PENDING_PATH
+    payload = {
+        "schema_version": "research_swarm.plan_approval_pending.v1",
+        "created_at_utc": dt.datetime.now(tz=dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "planner_backend": "deterministic_referee_revision_generator",
+        "proposal_count": len(list((repo / ".orchestrator" / "backlog").glob("T*_repair_*.md"))),
+        "base_sha": None,
+        "plan_digest": _plan_content_digest(repo),
+        "source_task_id": source_task_id,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
 def _render_revision_task(
     *,
     task_id: str,
@@ -195,6 +255,7 @@ def _render_revision_task(
     finding: Mapping[str, object],
     fingerprint: str,
     artifacts: list[str],
+    required_locks: list[str],
 ) -> str:
     finding_id = _finding_identifier(finding)
     verdict = str(finding.get("verdict", "cannot_verify"))
@@ -204,6 +265,13 @@ def _render_revision_task(
         item for item in source.get("gates", []) if isinstance(item, str) and item.strip()
     ] if isinstance(source.get("gates"), list) else []
     gates = source_gates or ["python scripts/quality_gates.py"]
+    disallowed_paths = [
+        item
+        for item in source.get("disallowed_paths", [])
+        if isinstance(item, str) and item.strip()
+    ] if isinstance(source.get("disallowed_paths"), list) else []
+    if not disallowed_paths:
+        disallowed_paths = ["contracts/"]
     title = f"Repair {source_task_id} referee finding {finding_id}"
     criterion = f"Resolve {finding_id} ({verdict}) with evidence and obtain a supported referee verdict."
     lines = [
@@ -231,7 +299,7 @@ def _render_revision_task(
         "dependencies: []",
         "integration_ready_dependencies: []",
         *_emit_list("allowed_paths", artifacts),
-        "disallowed_paths: []",
+        *_emit_list("disallowed_paths", disallowed_paths),
         *_emit_list("outputs", artifacts),
         *_emit_list("gates", gates, quoted=False),
         *_emit_list(
@@ -239,6 +307,9 @@ def _render_revision_task(
             ["Block with @human if resolving the finding would change protocol or contracts."],
         ),
         f'repair_source_task: "{source_task_id}"',
+        f'repair_source_task_kind: {_quote(source.get("task_kind", ""))}',
+        f'repair_source_complexity_tier: {_quote(source.get("complexity_tier", "S"))}',
+        *_emit_list("required_prereg_locks", required_locks),
         f'repair_finding_id: {_quote(finding_id)}',
         f'repair_fingerprint: "{fingerprint}"',
         "---",
@@ -332,6 +403,8 @@ def generate_revision_tasks(
     reserved: set[int] = set()
     created: list[Path] = []
     report_sha256 = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    required_locks = _source_required_locks(repo, source)
+    wrote_new_task = False
 
     for finding in findings:
         fingerprint = _fingerprint(report_path, report, finding)
@@ -355,6 +428,7 @@ def generate_revision_tasks(
             finding=finding,
             fingerprint=fingerprint,
             artifacts=artifacts,
+            required_locks=required_locks,
         )
         all_paths = _task_paths(repo) + [path]
         diagnostics = lint_task_files(
@@ -370,8 +444,11 @@ def generate_revision_tasks(
         if not dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
+            wrote_new_task = True
         created.append(path)
         existing[fingerprint] = path
+    if wrote_new_task and not dry_run:
+        _write_plan_approval_pending(repo, source_task_id)
     return created
 
 

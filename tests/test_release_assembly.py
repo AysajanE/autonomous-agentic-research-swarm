@@ -210,29 +210,13 @@ class ReleaseAssemblyTest(unittest.TestCase):
                 "reports/status/releases/release_2026-03-31.json",
             )
 
-    def test_write_marks_paper_present_when_stage2_build_outputs_exist(self) -> None:
+    def test_materialized_paper_without_referee_panel_blocks_release(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             scaffold_release_ready_repo(root, include_paper=True)
 
-            release_assembly.write_release(root, date(2026, 3, 31))
-
-            manifest_path = root / "reports" / "status" / "releases" / "release_2026-03-31.json"
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-            self.assertEqual(payload["artifacts"]["paper"]["status"], "present")
-            self.assertEqual(payload["counts"]["paper_artifacts"], 3)
-            self.assertEqual(
-                [artifact["path"] for artifact in payload["artifacts"]["paper"]["artifacts"]],
-                [
-                    "reports/paper/build/l2_l1_rent_working_paper.html",
-                    "reports/paper/build/l2_l1_rent_working_paper.pdf",
-                    "reports/paper/build/render_manifest.json",
-                ],
-            )
-
-            catalog_text = (root / "reports" / "catalog.yaml").read_text(encoding="utf-8")
-            self.assertIn('paper_status: "present"', catalog_text)
+            with self.assertRaisesRegex(SystemExit, "referee_release_evidence"):
+                release_assembly.assemble_release_manifest(root, date(2026, 3, 31))
 
     def test_legacy_index_html_does_not_mark_paper_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

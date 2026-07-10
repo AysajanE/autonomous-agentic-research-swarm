@@ -182,7 +182,14 @@ def _default_framework_json(mode: str) -> dict[str, Any]:
             "reports/catalog.yaml",
             "reports/paper/build/",
             "reports/status/releases/",
+            "reports/status/swarm_runs/",
+            "reports/status/referee_reports/",
+            "reports/status/referee_calibration.json",
         ],
+        "referee_panel": {
+            "required_non_authoring_families": 2,
+            "owner_waiver": None,
+        },
         "release_policy": {
             "release_manifest_pattern": "reports/status/releases/release_<YYYY-MM-DD>.json",
         },
@@ -212,7 +219,9 @@ def _default_framework_json(mode: str) -> dict[str, Any]:
                     "family": "claude",
                     "command": "claude",
                     "model": "fixture-referee",
+                    "cli_version": "fixture-cli-1",
                     "profile": "read-only",
+                    "prompt_path": "docs/prompts/referee.md",
                     "tools": ["Read", "Glob", "Grep"],
                 }
             ],
@@ -351,6 +360,11 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     write_text(root, "docs/prompts/worker.md", "# worker prompt\n")
     write_text(root, "docs/prompts/judge.md", "# judge prompt\n")
     write_text(root, "docs/prompts/operator.md", "# operator prompt\n")
+    write_text(
+        root,
+        "docs/prompts/referee.md",
+        (REPO_ROOT / "docs/prompts/referee.md").read_text(encoding="utf-8"),
+    )
     write_text(
         root,
         "docs/prereg/data_construction.lock.md",

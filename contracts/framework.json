@@ -199,8 +199,15 @@
   "operator_owned_shared_surfaces": [
     "reports/catalog.yaml",
     "reports/paper/build/",
-    "reports/status/releases/"
+    "reports/status/releases/",
+    "reports/status/swarm_runs/",
+    "reports/status/referee_reports/",
+    "reports/status/referee_calibration.json"
   ],
+  "referee_panel": {
+    "required_non_authoring_families": 2,
+    "owner_waiver": null
+  },
   "release_policy": {
     "paper_substrate": "quarto_markdown",
     "paper_entrypoint": "reports/paper/index.qmd",
@@ -232,7 +239,9 @@
         "family": "claude",
         "command": "claude",
         "model": "claude-opus-4-8",
+        "cli_version": "2.1.206 (Claude Code)",
         "profile": "read-only",
+        "prompt_path": "docs/prompts/referee.md",
         "tools": ["Read", "Glob", "Grep"],
         "note": "task-level non-authoring-family referee; manuscript release additionally requires a separately configured third family"
       }

@@ -1,6 +1,11 @@
 {
   "schema_version": "research_swarm.mock_referee_gold.v1",
-  "profile": "calibrated",
+  "backend": "mock",
+  "family": "mock",
+  "model": "mock-referee-v1",
+  "cli_version": "mock-1",
+  "profile": "read-only",
+  "prompt_path": "docs/prompts/referee.md",
   "predictions": [
     {"case_id": "G001", "position_a": "not_supported", "position_b": "not_supported"},
     {"case_id": "G002", "position_a": "not_supported", "position_b": "not_supported"},
