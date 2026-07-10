@@ -15,6 +15,26 @@
     "modeling",
     "hybrid"
   ],
+  "citation_policy": {
+    "staleness_days": 90
+  },
+  "complexity_tier_ceilings": {
+    "S": {
+      "max_wall_clock_seconds": 7200,
+      "max_tokens": 250000,
+      "max_cost_usd": 25
+    },
+    "M": {
+      "max_wall_clock_seconds": 28800,
+      "max_tokens": 1000000,
+      "max_cost_usd": 100
+    },
+    "L": {
+      "max_wall_clock_seconds": 86400,
+      "max_tokens": 4000000,
+      "max_cost_usd": 400
+    }
+  },
   "roles": {
     "allowed": [
       "Planner",

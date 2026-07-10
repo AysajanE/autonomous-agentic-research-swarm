@@ -63,7 +63,7 @@ class TaskLintV2Test(unittest.TestCase):
                 "backlog",
                 "T800",
                 schema="v2",
-                budgets={"max_wall_clock": "4h", "max_tokens": "2M", "max_cost_usd": 40},
+                budgets={"max_wall_clock": "2h", "max_tokens": "250K", "max_cost_usd": 25},
             )
             write_task(
                 root,

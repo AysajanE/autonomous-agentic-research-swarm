@@ -14,8 +14,12 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import datetime as dt
+import difflib
 import hashlib
 import json
+import math
+import os
+import shlex
 from pathlib import Path
 import re
 import subprocess
@@ -28,11 +32,18 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from swarm_taskfile import NETWORK_COMMAND_TOKENS
+from swarm_taskfile import PREREG_PHASE_FILES
 from swarm_taskfile import REQUIRED_FRONTMATTER_KEYS
+from swarm_taskfile import TASK_SCHEMA_VERSION
+from swarm_taskfile import gate_command_violation
 from swarm_taskfile import lint_task_files
+from swarm_taskfile import load_prereg_lock
 from swarm_taskfile import parse_status_value as _parse_status_value
 from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 from sweep_tasks import plan_sweep as _plan_sweep
+from falsify_claims import evaluate_falsification_spec
+from sweep_harness import enumerate_cells
+from swarm_events import read_events as _read_swarm_events
 
 
 SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
@@ -42,6 +53,10 @@ JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1 = "research_swarm.judge_review_log.v1"
 PROCESSED_MANIFEST_SCHEMA_VERSION = "research_swarm.processed_manifest.v2"
 MANIFEST_REBASELINE_SCHEMA_VERSION = "research_swarm.manifest_rebaseline.v1"
 VALIDATION_REPORT_SCHEMA_VERSION = "research_swarm.validation_report.v2"
+INSTANCE_MANIFEST_SCHEMA_VERSION = "research_swarm.instance_manifest.v1"
+EXPERIMENT_SPEC_SCHEMA_VERSION = "research_swarm.experiment_spec.v1"
+EXPERIMENT_MANIFEST_SCHEMA_VERSION = "research_swarm.experiment_manifest.v1"
+SWEEP_ARTIFACT_SCHEMA_VERSION = "research_swarm.sweep_artifact.v1"
 
 DEFAULT_ALLOWED_STATES = (
     "backlog",
@@ -92,6 +107,39 @@ REQUIRED_TASK_HEADINGS = (
     "## Notes / Decisions",
 )
 VALID_TASK_PRIORITIES = {"low", "medium", "high"}
+CLAIMS_SCHEMA_VERSION = "research_swarm.claims.v1"
+CITATION_SNAPSHOT_SCHEMA_VERSION = "research_swarm.citation_snapshot.v1"
+CLAIM_TYPES = {
+    "descriptive",
+    "associational",
+    "causal",
+    "interpretation",
+    "methodological",
+    "theoretical",
+    "computational",
+    "counterfactual",
+    "literature",
+}
+CONFIRMATORY_CLAIM_TYPES = {"causal", "computational", "counterfactual"}
+UNCERTAINTY_ARTIFACT_REQUIRED_TYPES = {
+    "descriptive",
+    "associational",
+    "causal",
+    "computational",
+    "counterfactual",
+}
+UNCERTAINTY_JUSTIFICATION_TYPES = {
+    "theoretical",
+    "interpretation",
+    "methodological",
+    "literature",
+}
+TERMINAL_HYPOTHESIS_OUTCOMES = {
+    "supported",
+    "not_supported",
+    "inconclusive",
+    "abandoned",
+}
 DEFERRED_REQUIRED_PATH_PREFIXES = (
     "reports/status/",
     "reports/catalog.yaml",
@@ -699,11 +747,252 @@ def required_manifest_failures(task: Task, repo: Path = Path(".")) -> list[str]:
 def _load_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         payload = json.loads(_read_text(path))
+    except OSError as exc:
+        return None, f"read_error:{type(exc).__name__}:{exc}"
     except json.JSONDecodeError as exc:
         return None, f"invalid_json:{exc}"
     if not isinstance(payload, dict):
         return None, "top_level_not_object"
     return payload, None
+
+
+def _json_type_matches(value: object, expected: str) -> bool:
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "null":
+        return value is None
+    return False
+
+
+def _json_pointer(document: object, pointer: str) -> object:
+    if pointer in {"", "#"}:
+        return document
+    raw = pointer[1:] if pointer.startswith("#") else pointer
+    if not raw.startswith("/"):
+        raise ValueError(f"invalid_json_pointer:{pointer}")
+    current = document
+    for token in raw[1:].split("/"):
+        key = token.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or key not in current:
+            raise ValueError(f"unresolved_json_pointer:{pointer}")
+        current = current[key]
+    return current
+
+
+def _load_schema_document(path: Path) -> dict[str, Any]:
+    payload, error = _load_json_file(path)
+    if error is not None or payload is None:
+        raise ValueError(f"schema_load_error:{path.as_posix()}:{error}")
+    return payload
+
+
+def _validate_json_schema(
+    value: object,
+    schema: object,
+    *,
+    schema_path: Path,
+    document: dict[str, Any] | None = None,
+    value_path: str = "$",
+) -> list[dict[str, object]]:
+    """Validate the dependency-free JSON-Schema subset used by M3a contracts."""
+    if not isinstance(schema, dict):
+        return [{"path": value_path, "reason": "schema_not_object"}]
+    if document is None:
+        document = schema
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        file_part, separator, fragment = reference.partition("#")
+        try:
+            if file_part:
+                target_path = (schema_path.parent / file_part).resolve()
+                target_document = _load_schema_document(target_path)
+                target_schema = _json_pointer(target_document, f"#{fragment}" if separator else "#")
+                return _validate_json_schema(
+                    value,
+                    target_schema,
+                    schema_path=target_path,
+                    document=target_document,
+                    value_path=value_path,
+                )
+            target_schema = _json_pointer(document, f"#{fragment}" if separator else reference)
+            return _validate_json_schema(
+                value,
+                target_schema,
+                schema_path=schema_path,
+                document=document,
+                value_path=value_path,
+            )
+        except ValueError as exc:
+            return [{"path": value_path, "reason": str(exc)}]
+
+    failures: list[dict[str, object]] = []
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for child in all_of:
+            failures.extend(
+                _validate_json_schema(
+                    value,
+                    child,
+                    schema_path=schema_path,
+                    document=document,
+                    value_path=value_path,
+                )
+            )
+    for keyword in ("oneOf", "anyOf"):
+        variants = schema.get(keyword)
+        if not isinstance(variants, list):
+            continue
+        variant_failures = [
+            _validate_json_schema(
+                value,
+                child,
+                schema_path=schema_path,
+                document=document,
+                value_path=value_path,
+            )
+            for child in variants
+        ]
+        passing = sum(not item for item in variant_failures)
+        valid = passing == 1 if keyword == "oneOf" else passing >= 1
+        if not valid:
+            best = min(variant_failures, key=len, default=[])
+            failures.append(
+                {
+                    "path": value_path,
+                    "reason": f"{keyword}_mismatch",
+                    "passing_variants": passing,
+                    "best_variant_failures": best,
+                }
+            )
+        return failures
+
+    expected_type = schema.get("type")
+    if isinstance(expected_type, str):
+        types = [expected_type]
+    elif isinstance(expected_type, list):
+        types = [item for item in expected_type if isinstance(item, str)]
+    else:
+        types = []
+    if types and not any(_json_type_matches(value, item) for item in types):
+        failures.append(
+            {"path": value_path, "reason": "type", "expected": types, "actual": type(value).__name__}
+        )
+        return failures
+    if "const" in schema and value != schema["const"]:
+        failures.append(
+            {"path": value_path, "reason": "const", "expected": schema["const"], "actual": value}
+        )
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        failures.append({"path": value_path, "reason": "enum", "expected": enum, "actual": value})
+
+    if isinstance(value, dict):
+        required = schema.get("required")
+        if isinstance(required, list):
+            for key in required:
+                if isinstance(key, str) and key not in value:
+                    failures.append({"path": f"{value_path}.{key}", "reason": "required"})
+        min_properties = schema.get("minProperties")
+        if isinstance(min_properties, int) and len(value) < min_properties:
+            failures.append(
+                {"path": value_path, "reason": "minProperties", "expected": min_properties, "actual": len(value)}
+            )
+        properties = schema.get("properties")
+        properties = properties if isinstance(properties, dict) else {}
+        additional = schema.get("additionalProperties", True)
+        for key, child_value in value.items():
+            child_schema = properties.get(key)
+            if child_schema is None:
+                if additional is False:
+                    failures.append({"path": f"{value_path}.{key}", "reason": "additionalProperty"})
+                    continue
+                if isinstance(additional, dict):
+                    child_schema = additional
+            if isinstance(child_schema, dict):
+                failures.extend(
+                    _validate_json_schema(
+                        child_value,
+                        child_schema,
+                        schema_path=schema_path,
+                        document=document,
+                        value_path=f"{value_path}.{key}",
+                    )
+                )
+
+    if isinstance(value, list):
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            failures.append(
+                {"path": value_path, "reason": "minItems", "expected": min_items, "actual": len(value)}
+            )
+        if schema.get("uniqueItems") is True:
+            rendered = [json.dumps(item, sort_keys=True, separators=(",", ":")) for item in value]
+            if len(rendered) != len(set(rendered)):
+                failures.append({"path": value_path, "reason": "uniqueItems"})
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for index, child_value in enumerate(value):
+                failures.extend(
+                    _validate_json_schema(
+                        child_value,
+                        items,
+                        schema_path=schema_path,
+                        document=document,
+                        value_path=f"{value_path}[{index}]",
+                    )
+                )
+
+    if isinstance(value, str):
+        min_length = schema.get("minLength")
+        if isinstance(min_length, int) and len(value) < min_length:
+            failures.append({"path": value_path, "reason": "minLength", "expected": min_length})
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            failures.append({"path": value_path, "reason": "pattern", "expected": pattern, "actual": value})
+        if schema.get("format") == "date-time" and _parse_utc_z(value) is None:
+            failures.append({"path": value_path, "reason": "format", "expected": "UTC date-time", "actual": value})
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        if isinstance(minimum, (int, float)) and value < minimum:
+            failures.append({"path": value_path, "reason": "minimum", "expected": minimum, "actual": value})
+        exclusive_minimum = schema.get("exclusiveMinimum")
+        if isinstance(exclusive_minimum, (int, float)) and value <= exclusive_minimum:
+            failures.append(
+                {"path": value_path, "reason": "exclusiveMinimum", "expected": exclusive_minimum, "actual": value}
+            )
+        maximum = schema.get("maximum")
+        if isinstance(maximum, (int, float)) and value > maximum:
+            failures.append({"path": value_path, "reason": "maximum", "expected": maximum, "actual": value})
+    return failures
+
+
+def _schema_failures(payload: object, schema_path: Path) -> list[dict[str, object]]:
+    try:
+        schema = _load_schema_document(schema_path)
+    except ValueError as exc:
+        return [{"path": "$", "reason": str(exc)}]
+    return _validate_json_schema(payload, schema, schema_path=schema_path)
+
+
+def _safe_repo_relative_path(raw_path: object) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    normalized = _normalize_repo_relative_path(raw_path)
+    parts = normalized.split("/")
+    if Path(normalized).is_absolute() or normalized.startswith("~") or ".." in parts:
+        return None
+    return Path(normalized)
 
 
 def _validate_required_keys(data: object, required_keys: set[str], prefix: str) -> list[str]:
@@ -809,9 +1098,24 @@ def _verify_hash_claim(
             )
         ]
 
-    disk_path = Path(rel_path)
+    safe_path = _safe_repo_relative_path(rel_path)
+    repo = Path.cwd().resolve()
+    if safe_path is None:
+        return [
+            _hash_claim_failure(
+                manifest=manifest,
+                path=rel_path,
+                reason="content_binding_path_outside_repo",
+                expected="safe repo-relative tracked regular file",
+                actual=rel_path,
+            )
+        ]
+    disk_path = repo / safe_path
     expected = {"sha256": expected_sha, "bytes": expected_bytes}
-    if not disk_path.is_file():
+    try:
+        resolved = disk_path.resolve(strict=True)
+        resolved.relative_to(repo)
+    except (FileNotFoundError, OSError, ValueError):
         return [
             _hash_claim_failure(
                 manifest=manifest,
@@ -821,8 +1125,28 @@ def _verify_hash_claim(
                 actual=None,
             )
         ]
+    if disk_path.is_symlink() or not resolved.is_file():
+        return [
+            _hash_claim_failure(
+                manifest=manifest,
+                path=rel_path,
+                reason="content_binding_target_not_regular_file",
+                expected="non-symlink regular file",
+                actual=rel_path,
+            )
+        ]
+    if not _git_path_is_tracked(safe_path.as_posix(), repo):
+        return [
+            _hash_claim_failure(
+                manifest=manifest,
+                path=rel_path,
+                reason="content_binding_target_not_git_tracked",
+                expected="git-tracked regular file",
+                actual=rel_path,
+            )
+        ]
 
-    actual_sha, actual_bytes = _sha256_and_bytes(disk_path)
+    actual_sha, actual_bytes = _sha256_and_bytes(resolved)
     actual = {"sha256": actual_sha, "bytes": actual_bytes}
     if mismatch_reason is not None:
         if actual != expected:
@@ -1440,6 +1764,35 @@ def gate_framework_contract() -> GateResult:
     if contract.release_manifest_pattern != "reports/status/releases/release_<YYYY-MM-DD>.json":
         failures.append(f"invalid_release_manifest_pattern:{contract.release_manifest_pattern}")
 
+    try:
+        raw_framework = json.loads(Path("contracts/framework.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        failures.append(f"framework_contract_unreadable:{exc}")
+        raw_framework = {}
+    ceilings = raw_framework.get("complexity_tier_ceilings") if isinstance(raw_framework, dict) else None
+    for tier in ("S", "M", "L"):
+        tier_values = ceilings.get(tier) if isinstance(ceilings, dict) else None
+        if not isinstance(tier_values, dict):
+            failures.append(f"missing_complexity_tier_ceiling:{tier}")
+            continue
+        for field in ("max_wall_clock_seconds", "max_tokens", "max_cost_usd"):
+            value = tier_values.get(field)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or value <= 0
+            ):
+                failures.append(f"invalid_complexity_tier_ceiling:{tier}:{field}:{value}")
+    citation_policy = raw_framework.get("citation_policy") if isinstance(raw_framework, dict) else None
+    if citation_policy is not None:
+        staleness_days = citation_policy.get("staleness_days") if isinstance(citation_policy, dict) else None
+        if (
+            not isinstance(staleness_days, int)
+            or isinstance(staleness_days, bool)
+            or staleness_days <= 0
+        ):
+            failures.append(f"invalid_citation_staleness_days:{staleness_days}")
+
     return GateResult(
         ok=len(failures) == 0,
         details={
@@ -1464,23 +1817,36 @@ def gate_repo_structure() -> GateResult:
         ".orchestrator/workstreams.md",
         "contracts/project.yaml",
         "contracts/framework.json",
+        "contracts/claims.yaml",
         "contracts/README.md",
         "contracts/data_dictionary.md",
         "contracts/decisions.md",
         "contracts/model_spec.md",
         "contracts/hybrid_interface_v1.yaml",
+        "contracts/instances/README.md",
+        "contracts/experiments/README.md",
         "contracts/schemas/README.md",
+        "contracts/schemas/instance_manifest_v1.json",
+        "contracts/schemas/experiment_spec_v1.json",
+        "contracts/schemas/experiment_manifest_v1.json",
         "contracts/schemas/panel_schema.yaml",
         "contracts/schemas/panel_schema_str_v1.yaml",
         "contracts/schemas/panel_schema_decomp_v1.yaml",
         "contracts/schemas/swarm_run_manifest_v1.yaml",
         "contracts/schemas/judge_review_log_v1.yaml",
+        "contracts/schemas/claims_v1.yaml",
         "docs/protocol.md",
+        "docs/prereg/data_construction.lock.md",
+        "docs/prereg/analysis_plan.lock.md",
+        "docs/prereg/lock_a.md",
+        "docs/prereg/lock_b.md",
+        "docs/prereg/outcomes.yaml",
         "docs/runbook_swarm.md",
         "docs/runbook_swarm_automation.md",
         "data/raw_manifest/README.md",
         "data/processed_manifest/README.md",
         "data/samples/README.md",
+        "data/citations/README.md",
         "reports/validation/README.md",
         "reports/validation/manifests/README.md",
         "reports/figures/README.md",
@@ -1488,6 +1854,9 @@ def gate_repo_structure() -> GateResult:
         "scripts/swarm.py",
         "scripts/sweep_tasks.py",
         "scripts/quality_gates.py",
+        "scripts/refresh_citations.py",
+        "scripts/falsify_claims.py",
+        "scripts/sweep_harness.py",
         "tests/README.md",
     ]
 
@@ -2415,38 +2784,3748 @@ def gate_task_lint() -> GateResult:
     )
 
 
-def _collect_gate_results() -> dict[str, GateResult]:
-    return {
-        "framework_contract": gate_framework_contract(),
-        "repo_structure": gate_repo_structure(),
-        "project_contract": gate_project_contract(),
-        "protocol_complete": gate_protocol_complete(),
-        "workstreams_complete": gate_workstreams_complete(),
-        "task_hygiene": gate_task_hygiene(),
-        "task_dependencies": gate_task_dependencies(),
-        "integration_ready_policy": gate_integration_ready_policy(),
-        "operator_surface_ownership": gate_operator_surface_ownership(),
-        "raw_manifest_validity": gate_raw_manifest_validity(),
-        "processed_manifest_validity": gate_processed_manifest_validity(),
-        "swarm_run_manifest_validity": gate_swarm_run_manifest_validity(),
-        "judge_review_log_validity": gate_judge_review_log_validity(),
-        "review_bundle_integrity": gate_review_bundle_integrity(),
-        "processed_manifest_hashes": gate_processed_manifest_hashes(),
-        "raw_manifest_hashes": gate_raw_manifest_hashes(),
-        "validation_report_content_binding": gate_validation_report_content_binding(),
-        "projection_drift": gate_projection_drift(),
-        "historical_exemptions": gate_historical_exemptions(),
-        "network_strings": gate_network_strings(),
-        "task_lint": gate_task_lint(),
+def _science_failure(
+    reason: str,
+    *,
+    subject: str,
+    field: str | None = None,
+    expected: object = None,
+    actual: object = None,
+) -> dict[str, object]:
+    failure: dict[str, object] = {"reason": reason, "subject": subject}
+    if field is not None:
+        failure["field"] = field
+    if expected is not None:
+        failure["expected"] = expected
+    if actual is not None:
+        failure["actual"] = actual
+    return failure
+
+
+def _load_claim_ledger() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    path = Path("contracts/claims.yaml")
+    payload, error = _load_json_file(path)
+    if error is not None or payload is None:
+        return [], [
+            _science_failure(
+                "invalid_claims_contract",
+                subject=path.as_posix(),
+                expected="JSON-compatible YAML object",
+                actual=error,
+            )
+        ]
+
+    failures: list[dict[str, object]] = []
+    if payload.get("schema_version") != CLAIMS_SCHEMA_VERSION:
+        failures.append(
+            _science_failure(
+                "invalid_claims_schema",
+                subject=path.as_posix(),
+                field="schema_version",
+                expected=CLAIMS_SCHEMA_VERSION,
+                actual=payload.get("schema_version"),
+            )
+        )
+    raw_claims = payload.get("claims")
+    if not isinstance(raw_claims, list):
+        failures.append(
+            _science_failure(
+                "claims_not_list",
+                subject=path.as_posix(),
+                field="claims",
+                expected="list",
+                actual=raw_claims,
+            )
+        )
+        return [], failures
+
+    claims: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    for index, raw_claim in enumerate(raw_claims):
+        subject = f"claims[{index}]"
+        if not isinstance(raw_claim, dict):
+            failures.append(
+                _science_failure(
+                    "claim_not_object", subject=subject, expected="object", actual=raw_claim
+                )
+            )
+            continue
+        claim = dict(raw_claim)
+        claim_id = claim.get("claim_id")
+        if not isinstance(claim_id, str) or not claim_id.strip():
+            failures.append(
+                _science_failure(
+                    "invalid_claim_id", subject=subject, field="claim_id", actual=claim_id
+                )
+            )
+        elif claim_id in seen_ids:
+            failures.append(
+                _science_failure("duplicate_claim_id", subject=claim_id, field="claim_id")
+            )
+        else:
+            seen_ids.add(claim_id)
+            subject = claim_id
+
+        for field in ("statement", "verification_command"):
+            value = claim.get(field)
+            if not isinstance(value, str) or not value.strip():
+                failures.append(
+                    _science_failure(
+                        f"invalid_{field}", subject=subject, field=field, actual=value
+                    )
+                )
+        claim_type = claim.get("type")
+        if claim_type not in CLAIM_TYPES:
+            failures.append(
+                _science_failure(
+                    "invalid_claim_type",
+                    subject=subject,
+                    field="type",
+                    expected=sorted(CLAIM_TYPES),
+                    actual=claim_type,
+                )
+            )
+        artifacts = claim.get("supporting_artifacts")
+        if not isinstance(artifacts, list) or not artifacts:
+            failures.append(
+                _science_failure(
+                    "invalid_supporting_artifacts",
+                    subject=subject,
+                    field="supporting_artifacts",
+                    expected="non-empty list",
+                    actual=artifacts,
+                )
+            )
+        if "uncertainty_artifact" not in claim:
+            failures.append(
+                _science_failure(
+                    "missing_uncertainty_artifact_field",
+                    subject=subject,
+                    field="uncertainty_artifact",
+                )
+            )
+        hypothesis_id = claim.get("hypothesis_id")
+        if hypothesis_id is not None and (
+            not isinstance(hypothesis_id, str) or not hypothesis_id.strip()
+        ):
+            failures.append(
+                _science_failure(
+                    "invalid_hypothesis_id",
+                    subject=subject,
+                    field="hypothesis_id",
+                    actual=hypothesis_id,
+                )
+            )
+        claims.append(claim)
+    return claims, failures
+
+
+def _verify_claim_artifact(
+    entry: object,
+    *,
+    subject: str,
+    field: str,
+) -> list[dict[str, object]]:
+    if not isinstance(entry, dict):
+        return [
+            _science_failure(
+                "invalid_hashed_artifact",
+                subject=subject,
+                field=field,
+                expected="{path, sha256}",
+                actual=entry,
+            )
+        ]
+    raw_path = entry.get("path")
+    expected_sha = entry.get("sha256")
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path.strip()
+        or Path(raw_path).is_absolute()
+        or raw_path.startswith("~")
+        or ".." in raw_path.replace("\\", "/").split("/")
+    ):
+        return [
+            _science_failure(
+                "invalid_artifact_path",
+                subject=subject,
+                field=f"{field}.path",
+                expected="safe repo-relative path",
+                actual=raw_path,
+            )
+        ]
+    if not isinstance(expected_sha, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
+        return [
+            _science_failure(
+                "invalid_artifact_sha256",
+                subject=subject,
+                field=f"{field}.sha256",
+                expected="64 lowercase hex characters",
+                actual=expected_sha,
+            )
+        ]
+
+    path = Path(_normalize_repo_relative_path(raw_path))
+    if not path.is_file():
+        return [
+            _science_failure(
+                "missing_artifact",
+                subject=subject,
+                field=field,
+                expected=path.as_posix(),
+                actual=None,
+            )
+        ]
+    # §6.5 purity: claim evidence must be a non-symlink, in-repo, git-tracked
+    # regular file — otherwise the verdict depends on non-committed state (a
+    # symlink to an environment file recomputes differently per machine).
+    repo = Path.cwd().resolve()
+    resolved = path.resolve()
+    if (
+        path.is_symlink()
+        or repo not in resolved.parents
+        or not _git_path_is_tracked(path.as_posix(), repo)
+    ):
+        return [
+            _science_failure(
+                "artifact_not_tracked_regular_file",
+                subject=subject,
+                field=field,
+                expected="non-symlink, in-repo, git-tracked regular file",
+                actual=raw_path,
+            )
+        ]
+    actual_sha, _ = _sha256_and_bytes(path)
+    if actual_sha != expected_sha:
+        return [
+            _science_failure(
+                "artifact_sha256_mismatch",
+                subject=subject,
+                field=field,
+                expected=expected_sha,
+                actual=actual_sha,
+            )
+        ]
+    return []
+
+
+_LOCK_BINDING_RE = re.compile(
+    r"^\s*-\s+path:\s*(?P<path>\S+)\s*$\n"
+    r"^\s+sha256:\s*(?P<sha256>[0-9a-f]{64}|pending)\s*$",
+    flags=re.MULTILINE,
+)
+
+
+def _lock_bindings(lock: dict[str, object] | None) -> list[dict[str, str]]:
+    if lock is None:
+        return []
+    body = lock.get("body")
+    if not isinstance(body, str):
+        return []
+    return [match.groupdict() for match in _LOCK_BINDING_RE.finditer(body)]
+
+
+def _active_prereg_lock(phase: str) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+    path = Path(PREREG_PHASE_FILES[phase])
+    lock, error = load_prereg_lock(path, expected_phase=phase)
+    failures: list[dict[str, object]] = []
+    if error is not None or lock is None:
+        failures.append(
+            _science_failure(
+                f"invalid_{phase}_lock",
+                subject=path.as_posix(),
+                actual=error,
+            )
+        )
+        return None, failures
+    if lock.get("status") == "locked" and lock.get("active") is not True:
+        failures.append(
+            _science_failure(
+                f"{phase}_lock_hash_mismatch",
+                subject=path.as_posix(),
+                field="locked_sha256",
+                expected=lock.get("body_sha256"),
+                actual=lock.get("locked_sha256"),
+            )
+        )
+    return (lock if lock.get("active") is True else None), failures
+
+
+def _verify_lock_bindings(
+    lock: dict[str, object],
+    *,
+    phase: str,
+    repo: Path = Path("."),
+) -> tuple[dict[str, str], list[dict[str, object]]]:
+    failures: list[dict[str, object]] = []
+    by_path: dict[str, str] = {}
+    for binding in _lock_bindings(lock):
+        raw_path = binding["path"]
+        expected_sha = binding["sha256"]
+        subject = f"{PREREG_PHASE_FILES[phase]}:{raw_path}"
+        path = _safe_repo_relative_path(raw_path)
+        if path is None:
+            failures.append(_science_failure("invalid_lock_binding_path", subject=subject))
+            continue
+        normalized = path.as_posix()
+        if normalized in by_path:
+            failures.append(_science_failure("duplicate_lock_binding", subject=subject))
+            continue
+        by_path[normalized] = expected_sha
+        if expected_sha == "pending":
+            failures.append(_science_failure("pending_lock_binding", subject=subject))
+            continue
+        disk_path = repo / path
+        if not disk_path.is_file():
+            failures.append(_science_failure("missing_lock_binding_target", subject=subject))
+            continue
+        actual_sha, _ = _sha256_and_bytes(disk_path)
+        if actual_sha != expected_sha:
+            failures.append(
+                _science_failure(
+                    "lock_binding_sha256_mismatch",
+                    subject=subject,
+                    expected=expected_sha,
+                    actual=actual_sha,
+                )
+            )
+    return by_path, failures
+
+
+def _active_experiment_spec() -> tuple[
+    dict[str, object] | None,
+    Path | None,
+    dict[str, object] | None,
+    list[dict[str, object]],
+]:
+    lock, failures = _active_prereg_lock("lock_a")
+    if lock is None:
+        return None, None, None, failures
+    bindings, binding_failures = _verify_lock_bindings(lock, phase="lock_a")
+    failures.extend(binding_failures)
+    model_paths = [path for path in bindings if path == "contracts/model_spec.md"]
+    experiment_paths = [
+        path
+        for path in bindings
+        if path.startswith("contracts/experiments/") and Path(path).suffix in {".json", ".yaml"}
+    ]
+    if len(model_paths) != 1:
+        failures.append(
+            _science_failure(
+                "lock_a_model_spec_binding_required",
+                subject=PREREG_PHASE_FILES["lock_a"],
+                expected="exactly contracts/model_spec.md",
+                actual=model_paths,
+            )
+        )
+    if len(experiment_paths) != 1:
+        failures.append(
+            _science_failure(
+                "lock_a_experiment_spec_binding_required",
+                subject=PREREG_PHASE_FILES["lock_a"],
+                expected="exactly one contracts/experiments/*.json|yaml",
+                actual=experiment_paths,
+            )
+        )
+        return None, None, lock, failures
+    spec_path = Path(experiment_paths[0])
+    payload, error = _load_json_file(spec_path)
+    if error is not None or payload is None:
+        failures.append(
+            _science_failure(
+                "invalid_experiment_spec_json",
+                subject=spec_path.as_posix(),
+                actual=error,
+            )
+        )
+        return None, spec_path, lock, failures
+    for issue in _schema_failures(payload, Path("contracts/schemas/experiment_spec_v1.json")):
+        failures.append(
+            _science_failure(
+                "experiment_spec_schema_violation",
+                subject=spec_path.as_posix(),
+                field=str(issue.get("path")),
+                actual=issue,
+            )
+        )
+    return payload, spec_path, lock, failures
+
+
+def _model_spec_is_ambiguous(path: Path = Path("contracts/model_spec.md")) -> bool:
+    if not path.is_file():
+        return True
+    text = _read_text(path)
+    lowered = text.lower()
+    if any(token in lowered for token in ("tbd", "todo", "fill it", "declare-before-lock")):
+        return True
+    headings = (
+        "## Objective / question",
+        "## Decision variables",
+        "## Constraints",
+        "## Objective function",
+        "## Assumptions (explicit)",
+        "## Solver / method",
+    )
+    return any(not _section_has_content(text, heading) for heading in headings)
+
+
+def _modeling_prereg_result(claims: list[dict[str, object]]) -> GateResult:
+    spec, spec_path, lock, failures = _active_experiment_spec()
+    active_hash = lock.get("body_sha256") if lock is not None else None
+    applicable = [
+        claim for claim in claims if claim.get("type") in {"computational", "counterfactual"}
+    ]
+    if lock is not None and _model_spec_is_ambiguous():
+        failures.append(
+            _science_failure(
+                "ambiguous_locked_model_spec",
+                subject="contracts/model_spec.md",
+            )
+        )
+    for index, claim in enumerate(applicable):
+        subject = str(claim.get("claim_id") or f"claims[{index}]")
+        if active_hash is None:
+            failures.append(
+                _science_failure(
+                    "modeling_claim_without_active_lock_a",
+                    subject=subject,
+                    field="lock_a_sha256",
+                )
+            )
+            continue
+        recorded_hash = claim.get("lock_a_sha256", claim.get("prereg_lock_sha256"))
+        if recorded_hash != active_hash:
+            failures.append(
+                _science_failure(
+                    "modeling_claim_lock_a_hash_mismatch",
+                    subject=subject,
+                    field="lock_a_sha256",
+                    expected=active_hash,
+                    actual=recorded_hash,
+                )
+            )
+    # §6.1 modeling: every locked proposition/conjecture must reach a terminal
+    # REPORTED outcome — a failed or negative conjecture cannot be silently
+    # dropped any more than an empirical hypothesis can.
+    proposition_ids = [
+        h["hypothesis_id"]
+        for h in (lock.get("hypotheses", []) if lock is not None else [])
+        if isinstance(h, dict) and isinstance(h.get("hypothesis_id"), str)
+    ]
+    if proposition_ids and lock is not None and lock.get("active") is True:
+        outcomes_by_id, outcome_failures = _load_prereg_outcomes()
+        failures.extend(outcome_failures)
+        for pid in sorted(set(proposition_ids)):
+            outcome = outcomes_by_id.get(pid)
+            if outcome is None:
+                failures.append(_science_failure("missing_proposition_outcome", subject=pid))
+                continue
+            if outcome.get("outcome") not in TERMINAL_HYPOTHESIS_OUTCOMES:
+                failures.append(
+                    _science_failure(
+                        "invalid_terminal_outcome",
+                        subject=pid,
+                        field="outcome",
+                        expected=sorted(TERMINAL_HYPOTHESIS_OUTCOMES),
+                        actual=outcome.get("outcome"),
+                    )
+                )
+            anchor_failure = _outcome_reported_anchor_failure(outcome, pid, pid)
+            if anchor_failure is not None:
+                failures.append(anchor_failure)
+
+    if not applicable and lock is None:
+        failures = [
+            failure
+            for failure in failures
+            if failure.get("reason") not in {"invalid_lock_a_lock", "lock_a_lock_hash_mismatch"}
+        ]
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_modeling_claims_or_lock" if not applicable and lock is None else "ok",
+            "active_lock_a_sha256": active_hash,
+            "experiment_spec": spec_path.as_posix() if spec_path is not None else None,
+            "experiment_spec_valid": spec is not None,
+            "modeling_claim_count": len(applicable),
+            "failures": failures,
+        },
+    )
+
+
+def _outcome_reported_anchor_failure(
+    outcome: dict[str, object], identifier: str, subject: str
+) -> dict[str, object] | None:
+    """§6.1/§6.5: a terminal outcome is not 'reported' until it is content-bound
+    to committed manuscript or deviations-appendix text. `reported_in` must
+    resolve to a tracked in-repo file whose text contains the hypothesis/
+    proposition id (or the explicit #anchor). Prevents a negative or missing
+    result being silently dropped while `outcomes.yaml` self-asserts it."""
+    reported = outcome.get("reported_in")
+    if not isinstance(reported, str) or not reported.strip():
+        return _science_failure(
+            "outcome_missing_reported_in",
+            subject=subject,
+            field="reported_in",
+            expected="manuscript/deviations path that reports this outcome",
+        )
+    base, _, fragment = reported.partition("#")
+    base = base.strip()
+    safe = _safe_repo_relative_path(base)
+    # The anchor must be a non-symlink git-tracked file on the MANUSCRIPT surface
+    # (reports/paper/ — the paper and its deviations appendix). Pointing at the
+    # outcomes registry itself (docs/prereg/outcomes.yaml), a lock, a log, or a
+    # status artifact is not "reporting" — those necessarily contain the id and
+    # would make the check self-satisfying.
+    on_manuscript_surface = base.startswith("reports/paper/")
+    if (
+        safe is None
+        or not safe.is_file()
+        or safe.is_symlink()
+        or not on_manuscript_surface
+        or not _git_path_is_tracked(safe.as_posix(), Path.cwd().resolve())
+    ):
+        return _science_failure(
+            "outcome_reported_in_unresolvable",
+            subject=subject,
+            field="reported_in",
+            expected="tracked reports/ or docs/prereg/ file",
+            actual=reported,
+        )
+    text = _read_text(safe)
+    anchor = fragment.strip() or identifier
+    if anchor not in text and identifier not in text:
+        return _science_failure(
+            "outcome_reported_in_missing_anchor",
+            subject=subject,
+            field="reported_in",
+            expected=f"'{anchor}' present in {safe.as_posix()}",
+        )
+    return None
+
+
+def _load_prereg_outcomes() -> tuple[dict[str, dict[str, object]], list[dict[str, object]]]:
+    """id -> outcome map from docs/prereg/outcomes.yaml (light loader for the
+    modeling proposition coverage check; the empirical path validates inline)."""
+    path = Path("docs/prereg/outcomes.yaml")
+    payload, error = _load_json_file(path)
+    if error is not None or payload is None:
+        return {}, [_science_failure("invalid_prereg_outcomes", subject=path.as_posix(), actual=error)]
+    raw = payload.get("outcomes")
+    if not isinstance(raw, list):
+        return {}, [_science_failure("outcomes_not_list", subject=path.as_posix(), field="outcomes", actual=raw)]
+    out: dict[str, dict[str, object]] = {}
+    for outcome in raw:
+        if isinstance(outcome, dict) and isinstance(outcome.get("hypothesis_id"), str):
+            out[outcome["hypothesis_id"]] = outcome
+    return out, []
+
+
+def gate_prereg_conformance(*, form: str | None = None) -> GateResult:
+    """Confirmatory claims bind to phase 2b and every locked hypothesis terminates."""
+    claims, failures = _load_claim_ledger()
+    mode = _parse_project_mode(Path("contracts/project.yaml")) or "empirical"
+    selected = form or ("modeling" if mode == "modeling" else "union" if mode == "hybrid" else "empirical")
+    if selected == "modeling":
+        result = _modeling_prereg_result(claims)
+        combined = failures + list(result.details.get("failures", []))
+        return GateResult(ok=not combined, details={**result.details, "failures": combined})
+    lock_path = Path(PREREG_PHASE_FILES["2b"])
+    lock, lock_error = load_prereg_lock(lock_path, expected_phase="2b")
+    if lock_error is not None or lock is None:
+        failures.append(
+            _science_failure(
+                "invalid_analysis_prereg_lock",
+                subject=lock_path.as_posix(),
+                actual=lock_error,
+            )
+        )
+        lock = None
+    elif lock.get("status") == "locked" and lock.get("active") is not True:
+        failures.append(
+            _science_failure(
+                "prereg_lock_hash_mismatch",
+                subject=lock_path.as_posix(),
+                field="locked_sha256",
+                expected=lock.get("body_sha256"),
+                actual=lock.get("locked_sha256"),
+            )
+        )
+
+    active_lock = lock if lock is not None and lock.get("active") is True else None
+    active_hash = active_lock.get("body_sha256") if active_lock is not None else None
+    confirmatory_count = 0
+    for index, claim in enumerate(claims):
+        empirical_types = {"causal"} if mode == "hybrid" else CONFIRMATORY_CLAIM_TYPES
+        if claim.get("type") not in empirical_types:
+            continue
+        confirmatory_count += 1
+        subject = str(claim.get("claim_id") or f"claims[{index}]")
+        if active_hash is None:
+            failures.append(
+                _science_failure(
+                    "confirmatory_claim_without_active_lock",
+                    subject=subject,
+                    field="prereg_lock_sha256",
+                )
+            )
+        elif claim.get("prereg_lock_sha256") != active_hash:
+            failures.append(
+                _science_failure(
+                    "confirmatory_claim_prereg_hash_mismatch",
+                    subject=subject,
+                    field="prereg_lock_sha256",
+                    expected=active_hash,
+                    actual=claim.get("prereg_lock_sha256"),
+                )
+            )
+        command = claim.get("verification_command")
+        if not isinstance(command, str) or not command.strip():
+            failures.append(
+                _science_failure(
+                    "confirmatory_claim_missing_verification_command",
+                    subject=subject,
+                    field="verification_command",
+                )
+            )
+        artifacts = claim.get("supporting_artifacts")
+        if not isinstance(artifacts, list) or not artifacts:
+            failures.append(
+                _science_failure(
+                    "confirmatory_claim_missing_supporting_artifacts",
+                    subject=subject,
+                    field="supporting_artifacts",
+                )
+            )
+        else:
+            for artifact_index, artifact in enumerate(artifacts):
+                raw_path = artifact.get("path") if isinstance(artifact, dict) else None
+                unsafe_path = (
+                    not isinstance(raw_path, str)
+                    or not raw_path.strip()
+                    or Path(raw_path).is_absolute()
+                    or raw_path.startswith("~")
+                    or ".." in raw_path.replace("\\", "/").split("/")
+                )
+                if unsafe_path or not Path(_normalize_repo_relative_path(raw_path)).is_file():
+                    failures.append(
+                        _science_failure(
+                            "confirmatory_supporting_artifact_missing",
+                            subject=subject,
+                            field=f"supporting_artifacts[{artifact_index}]",
+                            actual=raw_path,
+                        )
+                    )
+
+    hypotheses = active_lock.get("hypotheses", []) if active_lock is not None else []
+    hypothesis_ids: list[str] = []
+    for hypothesis in hypotheses:
+        if isinstance(hypothesis, dict) and isinstance(hypothesis.get("hypothesis_id"), str):
+            hypothesis_ids.append(hypothesis["hypothesis_id"])
+    duplicate_hypotheses = sorted(
+        hypothesis_id for hypothesis_id in set(hypothesis_ids) if hypothesis_ids.count(hypothesis_id) > 1
+    )
+    for hypothesis_id in duplicate_hypotheses:
+        failures.append(_science_failure("duplicate_prereg_hypothesis", subject=hypothesis_id))
+
+    outcomes_by_id: dict[str, dict[str, object]] = {}
+    if hypothesis_ids:
+        outcomes_path = Path("docs/prereg/outcomes.yaml")
+        outcomes_payload, outcomes_error = _load_json_file(outcomes_path)
+        if outcomes_error is not None or outcomes_payload is None:
+            failures.append(
+                _science_failure(
+                    "invalid_prereg_outcomes",
+                    subject=outcomes_path.as_posix(),
+                    actual=outcomes_error,
+                )
+            )
+        else:
+            raw_outcomes = outcomes_payload.get("outcomes")
+            if not isinstance(raw_outcomes, list):
+                failures.append(
+                    _science_failure(
+                        "outcomes_not_list",
+                        subject=outcomes_path.as_posix(),
+                        field="outcomes",
+                        actual=raw_outcomes,
+                    )
+                )
+            else:
+                for index, outcome in enumerate(raw_outcomes):
+                    if not isinstance(outcome, dict):
+                        failures.append(
+                            _science_failure(
+                                "outcome_not_object", subject=f"outcomes[{index}]", actual=outcome
+                            )
+                        )
+                        continue
+                    hypothesis_id = outcome.get("hypothesis_id")
+                    if not isinstance(hypothesis_id, str) or not hypothesis_id.strip():
+                        failures.append(
+                            _science_failure(
+                                "invalid_outcome_hypothesis_id",
+                                subject=f"outcomes[{index}]",
+                                actual=hypothesis_id,
+                            )
+                        )
+                        continue
+                    if hypothesis_id in outcomes_by_id:
+                        failures.append(
+                            _science_failure("duplicate_hypothesis_outcome", subject=hypothesis_id)
+                        )
+                    outcomes_by_id[hypothesis_id] = outcome
+                    if hypothesis_id not in set(hypothesis_ids):
+                        failures.append(
+                            _science_failure("outcome_not_in_prereg", subject=hypothesis_id)
+                        )
+                    terminal = outcome.get("outcome")
+                    if terminal not in TERMINAL_HYPOTHESIS_OUTCOMES:
+                        failures.append(
+                            _science_failure(
+                                "invalid_terminal_outcome",
+                                subject=hypothesis_id,
+                                field="outcome",
+                                expected=sorted(TERMINAL_HYPOTHESIS_OUTCOMES),
+                                actual=terminal,
+                            )
+                        )
+                    if terminal == "abandoned" and (
+                        not isinstance(outcome.get("reason"), str)
+                        or not outcome.get("reason", "").strip()
+                    ):
+                        failures.append(
+                            _science_failure(
+                                "abandoned_outcome_missing_reason",
+                                subject=hypothesis_id,
+                                field="reason",
+                            )
+                        )
+                    anchor_failure = _outcome_reported_anchor_failure(
+                        outcome, hypothesis_id, hypothesis_id
+                    )
+                    if anchor_failure is not None:
+                        failures.append(anchor_failure)
+        for hypothesis_id in sorted(set(hypothesis_ids)):
+            if hypothesis_id not in outcomes_by_id:
+                failures.append(
+                    _science_failure("missing_hypothesis_outcome", subject=hypothesis_id)
+                )
+
+    status = "ok"
+    if not claims and not hypothesis_ids and not failures:
+        status = "no_claims" if active_lock is not None else "no_active_lock"
+    if selected == "union":
+        modeling_result = _modeling_prereg_result(claims)
+        failures.extend(modeling_result.details.get("failures", []))
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": status,
+            "active_lock_sha256": active_hash,
+            "confirmatory_claim_count": confirmatory_count,
+            "hypothesis_count": len(set(hypothesis_ids)),
+            "failures": failures,
+        },
+    )
+
+
+def _coverage_required_phase(task: Task, mode: str) -> str | None:
+    writes_processed = any(
+        _path_matches_prefix(output, "data/processed/") for output in task.outputs
+    )
+    if mode in {"empirical", "hybrid"}:
+        if task.task_kind == "etl" and writes_processed:
+            return "2a"
+        if task.task_kind == "analysis":
+            return "2b"
+    if mode == "modeling" and task.task_kind in {"model", "analysis"}:
+        return "lock_a"
+    if mode == "hybrid":
+        if task.task_kind == "bridge":
+            return "lock_a"
+        if task.task_kind == "model":
+            return "lock_b"
+    return None
+
+
+def _claim_task_id(claim: dict[str, object]) -> str | None:
+    for key in ("task_id", "registered_by_task", "source_task_id"):
+        value = claim.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def gate_prereg_lock_coverage() -> GateResult:
+    """Audit lock headers against the journal and reject post-hoc task completion."""
+    failures: list[dict[str, object]] = []
+    events, malformed = _read_swarm_events(Path.cwd())
+    latest_lock_events: dict[str, dict[str, object]] = {}
+    for event in events:
+        if event.get("event") in {"prereg_locked", "prereg_amendment"} and event.get(
+            "phase"
+        ) in PREREG_PHASE_FILES:
+            latest_lock_events[str(event["phase"])] = event
+
+    active_phases: set[str] = set()
+    for phase, rel_path in PREREG_PHASE_FILES.items():
+        lock, error = load_prereg_lock(Path(rel_path), expected_phase=phase)
+        if error is not None or lock is None or lock.get("active") is not True:
+            continue
+        active_phases.add(phase)
+        event = latest_lock_events.get(phase)
+        subject = rel_path
+        if event is None:
+            failures.append(
+                _science_failure("active_prereg_lock_missing_journal_event", subject=subject)
+            )
+            continue
+        expected_fields = {
+            "phase": lock.get("phase"),
+            "status": lock.get("status"),
+            "locked_at_utc": lock.get("locked_at_utc"),
+            "locked_sha256": lock.get("locked_sha256"),
+            "lock_version": lock.get("lock_version"),
+        }
+        for field, expected in expected_fields.items():
+            if event.get(field) != expected:
+                failures.append(
+                    _science_failure(
+                        "prereg_lock_header_journal_mismatch",
+                        subject=subject,
+                        field=field,
+                        expected=expected,
+                        actual=event.get(field),
+                    )
+                )
+
+    # §6.1 amendment discipline (deterministic backstop to the CLI guard): the
+    # cap is two amendments PER PROGRAM, and per-phase amendment versions are
+    # strictly increasing in journal order — a rolled-back header + re-amend is
+    # caught here even if the CLI guard was bypassed or the journal hand-edited.
+    # A corrupted (malformed) append-only journal is not auditable — silently
+    # skipping a malformed amendment line would lower the program count and let
+    # a third amendment through. Fail closed on any malformed event so the
+    # amendment cap can't be laundered by hand-corrupting an earlier line.
+    if malformed:
+        failures.append(
+            _science_failure(
+                "prereg_journal_malformed",
+                subject="reports/status/events",
+                expected="0 malformed journal events (append-only integrity)",
+                actual=malformed,
+            )
+        )
+    program_amendment_count = 0
+    amendment_versions_by_phase: dict[str, list[int]] = {}
+    for event in events:
+        if event.get("event") != "prereg_amendment":
+            continue
+        phase = event.get("phase")
+        if phase not in PREREG_PHASE_FILES:
+            continue
+        program_amendment_count += 1
+        version = event.get("lock_version")
+        if isinstance(version, int) and not isinstance(version, bool):
+            amendment_versions_by_phase.setdefault(str(phase), []).append(version)
+    if program_amendment_count > 2:
+        failures.append(
+            _science_failure(
+                "amendment_cap_exceeded_program",
+                subject="docs/prereg",
+                expected="<=2 amendments per program (§6.1)",
+                actual=program_amendment_count,
+            )
+        )
+    for phase, versions in amendment_versions_by_phase.items():
+        for earlier, later in zip(versions, versions[1:]):
+            if later <= earlier:
+                failures.append(
+                    _science_failure(
+                        "amendment_version_non_monotonic",
+                        subject=PREREG_PHASE_FILES[phase],
+                        expected=f">{earlier}",
+                        actual=later,
+                    )
+                )
+                break
+
+    try:
+        contract = load_framework_contract()
+        tasks, _ = _collect_tasks(contract)
+        mode = contract.project_mode or "empirical"
+    except ValueError as exc:
+        failures.append(
+            _science_failure("invalid_framework_contract", subject="contracts/framework.json", actual=str(exc))
+        )
+        tasks = {}
+        mode = "empirical"
+    claims, _ = _load_claim_ledger()
+    claim_types_by_task: dict[str, set[str]] = {}
+    has_counterfactual_claim = False
+    for claim in claims:
+        task_id = _claim_task_id(claim)
+        claim_type = claim.get("type")
+        if task_id is not None and isinstance(claim_type, str):
+            claim_types_by_task.setdefault(task_id, set()).add(claim_type)
+        if claim_type == "counterfactual":
+            has_counterfactual_claim = True
+
+    seen_locks: set[str] = set()
+    audited_done = 0
+    for event in events:
+        if event.get("event") in {"prereg_locked", "prereg_amendment"}:
+            phase = event.get("phase")
+            if phase in PREREG_PHASE_FILES and event.get("status", "locked") == "locked":
+                seen_locks.add(str(phase))
+            continue
+        if event.get("event") != "task_done":
+            continue
+        task_id = event.get("task_id")
+        task = tasks.get(task_id) if isinstance(task_id, str) else None
+        if task is None or task.state != "done":
+            continue
+        required = _coverage_required_phase(task, mode)
+        frontmatter = _parse_task_frontmatter(_read_text(task.path))
+        declared_claim_types = (
+            {
+                value
+                for value in frontmatter.get("claim_types", [])
+                if isinstance(value, str)
+            }
+            if isinstance(frontmatter, dict)
+            and isinstance(frontmatter.get("claim_types"), list)
+            else set()
+        )
+        if "counterfactual" in (
+            claim_types_by_task.get(task.task_id, set()) | declared_claim_types
+        ) or (
+            has_counterfactual_claim
+            and any(
+                _normalize_repo_relative_path(output) == "contracts/claims.yaml"
+                for output in task.outputs
+            )
+        ):
+            required = "lock_b"
+        if required is None:
+            continue
+        audited_done += 1
+        if required not in seen_locks:
+            failures.append(
+                _science_failure(
+                    "task_completed_before_required_prereg_lock",
+                    subject=task.task_id,
+                    field="required_phase",
+                    expected=required,
+                )
+            )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_auditable_lock_requiring_completions" if audited_done == 0 else "ok",
+            "active_phases": sorted(active_phases),
+            "audited_done_count": audited_done,
+            "malformed_event_count": malformed,
+            "failures": failures,
+        },
+    )
+
+
+def _claim_amended_lock(claim: dict[str, object]) -> tuple[str, dict[str, object]] | None:
+    binding_fields = {
+        "2b": "prereg_lock_sha256",
+        "lock_a": "lock_a_sha256",
+        "lock_b": "lock_b_sha256",
     }
+    for phase, field in binding_fields.items():
+        recorded = claim.get(field)
+        if not isinstance(recorded, str):
+            continue
+        lock, error = load_prereg_lock(Path(PREREG_PHASE_FILES[phase]), expected_phase=phase)
+        if error is None and lock is not None and lock.get("active") is True:
+            version = lock.get("lock_version")
+            if recorded == lock.get("body_sha256") and isinstance(version, int) and version > 1:
+                return phase, lock
+    return None
+
+
+def _claim_reconfirmation_failures(
+    claim: dict[str, object], *, subject: str
+) -> tuple[bool, list[dict[str, object]]]:
+    artifact = claim.get("reconfirmation_artifact")
+    if artifact is None:
+        return False, []
+    failures = _verify_claim_artifact(
+        artifact,
+        subject=subject,
+        field="reconfirmation_artifact",
+    )
+    return not failures, failures
+
+
+def gate_amendment_exploratory_tagging() -> GateResult:
+    claims, failures = _load_claim_ledger()
+    amended_claims = 0
+    for index, claim in enumerate(claims):
+        if claim.get("type") not in CONFIRMATORY_CLAIM_TYPES:
+            continue
+        amended = _claim_amended_lock(claim)
+        if amended is None:
+            continue
+        amended_claims += 1
+        subject = str(claim.get("claim_id") or f"claims[{index}]")
+        reconfirmed, reconfirmation_failures = _claim_reconfirmation_failures(
+            claim, subject=subject
+        )
+        failures.extend(reconfirmation_failures)
+        if claim.get("confirmatory") is True and not reconfirmed:
+            failures.append(
+                _science_failure(
+                    "amended_lock_claim_must_be_exploratory",
+                    subject=subject,
+                    field="confirmatory",
+                    expected=False,
+                    actual=True,
+                )
+            )
+    return GateResult(
+        ok=not failures,
+        details={"status": "ok", "amended_claim_count": amended_claims, "failures": failures},
+    )
+
+
+def gate_headline_confirmatory() -> GateResult:
+    claims, failures = _load_claim_ledger()
+    exploratory_headlines: list[str] = []
+    for index, claim in enumerate(claims):
+        if claim.get("headline") is not True or _claim_amended_lock(claim) is None:
+            continue
+        subject = str(claim.get("claim_id") or f"claims[{index}]")
+        reconfirmed, reconfirmation_failures = _claim_reconfirmation_failures(
+            claim, subject=subject
+        )
+        failures.extend(reconfirmation_failures)
+        if not reconfirmed:
+            exploratory_headlines.append(subject)
+    if exploratory_headlines:
+        venue, error = _load_venue_contract()
+        release_type = venue.get("release_type") if isinstance(venue, dict) else None
+        if error is not None or release_type != "exploratory_report":
+            failures.append(
+                _science_failure(
+                    "exploratory_headline_requires_exploratory_release",
+                    subject="contracts/venue.yaml",
+                    field="release_type",
+                    expected="exploratory_report",
+                    actual=release_type if error is None else error,
+                )
+            )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "exploratory_headline_claims": exploratory_headlines,
+            "failures": failures,
+        },
+    )
+
+
+def gate_claim_evidence_ledger() -> GateResult:
+    """Validate registered-to-evidenced claim mappings and uncertainty policy."""
+    claims, failures = _load_claim_ledger()
+    claim_ids = {
+        claim_id
+        for claim in claims
+        if isinstance((claim_id := claim.get("claim_id")), str) and claim_id.strip()
+    }
+    for index, claim in enumerate(claims):
+        subject = str(claim.get("claim_id") or f"claims[{index}]")
+        artifacts = claim.get("supporting_artifacts")
+        if isinstance(artifacts, list):
+            for artifact_index, artifact in enumerate(artifacts):
+                failures.extend(
+                    _verify_claim_artifact(
+                        artifact,
+                        subject=subject,
+                        field=f"supporting_artifacts[{artifact_index}]",
+                    )
+                )
+
+        command = claim.get("verification_command")
+        if isinstance(command, str) and command.strip():
+            violation = gate_command_violation(command)
+            if violation is not None:
+                failures.append(
+                    _science_failure(
+                        "verification_command_policy_violation",
+                        subject=subject,
+                        field="verification_command",
+                        expected="make <target> or python[3] <repo .py>",
+                        actual=violation,
+                    )
+                )
+            normalized_command = " ".join(command.strip().split())
+            # shlex so a quoted path (python "scripts/quality_gates.py") is
+            # canonicalized like an unquoted one — quotes must not evade the
+            # self-reference check.
+            try:
+                command_tokens = shlex.split(command)
+            except ValueError:
+                command_tokens = normalized_command.split()
+            # Self-referential by parsed semantics, not three literal strings:
+            # any `make gate` target or any invocation of the gate runner itself
+            # cannot be a claim's independent verification — regardless of flags
+            # (--json), path spelling (./ or quoted), OR interpreter options
+            # before the script (python -B/-u/-- scripts/quality_gates.py). The
+            # script operand is the first non-option token, matching
+            # gate_command_violation's own operand rule.
+            script_operand: str | None = None
+            if command_tokens and command_tokens[0] in {"python", "python3"}:
+                for token in command_tokens[1:]:
+                    if token.startswith("-"):
+                        continue
+                    script_operand = os.path.normpath(token)
+                    break
+            is_self_referential = (
+                command_tokens[:2] == ["make", "gate"]
+                or script_operand == "scripts/quality_gates.py"
+            )
+            if is_self_referential:
+                failures.append(
+                    _science_failure(
+                        "verification_command_self_referential",
+                        subject=subject,
+                        field="verification_command",
+                        actual=normalized_command,
+                    )
+                )
+            if re.search(r"\b(?:todo|tbd|not[_ -]?run|manual(?:ly)?)\b", command, re.IGNORECASE):
+                failures.append(
+                    _science_failure(
+                        "verification_command_unexecuted_shaped",
+                        subject=subject,
+                        field="verification_command",
+                        actual=command,
+                    )
+                )
+
+        claim_type = claim.get("type")
+        uncertainty = claim.get("uncertainty_artifact")
+        if claim_type in UNCERTAINTY_ARTIFACT_REQUIRED_TYPES:
+            if uncertainty is None:
+                failures.append(
+                    _science_failure(
+                        "uncertainty_artifact_required",
+                        subject=subject,
+                        field="uncertainty_artifact",
+                        expected=f"hashed artifact for {claim_type}",
+                    )
+                )
+            else:
+                failures.extend(
+                    _verify_claim_artifact(
+                        uncertainty,
+                        subject=subject,
+                        field="uncertainty_artifact",
+                    )
+                )
+        elif uncertainty is not None:
+            failures.extend(
+                _verify_claim_artifact(
+                    uncertainty,
+                    subject=subject,
+                    field="uncertainty_artifact",
+                )
+            )
+
+        if claim_type == "causal":
+            sensitivity = claim.get("sensitivity_artifact")
+            if sensitivity is None:
+                failures.append(
+                    _science_failure(
+                        "causal_sensitivity_artifact_required",
+                        subject=subject,
+                        field="sensitivity_artifact",
+                    )
+                )
+            else:
+                failures.extend(
+                    _verify_claim_artifact(
+                        sensitivity,
+                        subject=subject,
+                        field="sensitivity_artifact",
+                    )
+                )
+            identification = claim.get("identification_strategy")
+            if isinstance(identification, dict):
+                failures.extend(
+                    _verify_claim_artifact(
+                        identification,
+                        subject=subject,
+                        field="identification_strategy",
+                    )
+                )
+            elif isinstance(identification, str) and identification.strip():
+                base_path = identification.split("#", 1)[0]
+                safe_path = _safe_repo_relative_path(base_path)
+                if safe_path is None or not safe_path.is_file():
+                    failures.append(
+                        _science_failure(
+                            "causal_identification_strategy_pointer_invalid",
+                            subject=subject,
+                            field="identification_strategy",
+                            actual=identification,
+                        )
+                    )
+            else:
+                failures.append(
+                    _science_failure(
+                        "causal_identification_strategy_required",
+                        subject=subject,
+                        field="identification_strategy",
+                    )
+                )
+        elif claim_type == "interpretation" and uncertainty is None:
+            evidence_scope = claim.get("evidence_scope")
+            if not isinstance(evidence_scope, list) or not evidence_scope or any(
+                not isinstance(claim_id, str) or claim_id not in claim_ids
+                for claim_id in evidence_scope
+            ):
+                failures.append(
+                    _science_failure(
+                        "interpretation_evidence_scope_required",
+                        subject=subject,
+                        field="evidence_scope",
+                        expected="non-empty list of registered claim ids",
+                        actual=evidence_scope,
+                    )
+                )
+            elif claim.get("claim_id") in evidence_scope:
+                # An interpretation cannot rest on itself — a circular scope is
+                # semantically empty (§6.2 evidence-scope must list OTHER claims).
+                failures.append(
+                    _science_failure(
+                        "interpretation_evidence_scope_self_referential",
+                        subject=subject,
+                        field="evidence_scope",
+                        actual=claim.get("claim_id"),
+                    )
+                )
+        elif claim_type == "theoretical":
+            assumption_scope = claim.get("assumption_scope")
+            if not isinstance(assumption_scope, str) or not assumption_scope.strip():
+                failures.append(
+                    _science_failure(
+                        "theoretical_assumption_scope_required",
+                        subject=subject,
+                        field="assumption_scope",
+                    )
+                )
+        elif claim_type in {"methodological", "literature"}:
+            justification = claim.get("uncertainty_justification")
+            if uncertainty is not None or not isinstance(justification, str) or not justification.strip():
+                failures.append(
+                    _science_failure(
+                        "uncertainty_na_justification_required",
+                        subject=subject,
+                        field="uncertainty_justification",
+                        expected="uncertainty_artifact null with non-empty justification",
+                    )
+                )
+
+        if claim_type == "counterfactual":
+            for field in (
+                "empirical_artifact",
+                "model_artifact",
+                "cross_bridge_uncertainty_artifact",
+            ):
+                artifact = claim.get(field)
+                if artifact is None:
+                    failures.append(
+                        _science_failure(
+                            "counterfactual_union_artifact_required",
+                            subject=subject,
+                            field=field,
+                        )
+                    )
+                else:
+                    failures.extend(
+                        _verify_claim_artifact(artifact, subject=subject, field=field)
+                    )
+
+        if claim_type == "counterfactual":
+            lock_b, lock_failures = _active_prereg_lock("lock_b")
+            failures.extend(lock_failures)
+            if lock_b is None:
+                failures.append(
+                    _science_failure(
+                        "counterfactual_claim_without_active_lock_b",
+                        subject=subject,
+                        field="lock_b_sha256",
+                    )
+                )
+            else:
+                active_hash = lock_b.get("body_sha256")
+                if claim.get("lock_b_sha256") != active_hash:
+                    failures.append(
+                        _science_failure(
+                            "counterfactual_claim_lock_b_hash_mismatch",
+                            subject=subject,
+                            field="lock_b_sha256",
+                            expected=active_hash,
+                            actual=claim.get("lock_b_sha256"),
+                        )
+                    )
+                registered = _parse_utc_z(claim.get("registered_at_utc"))
+                locked_at = _parse_utc_z(lock_b.get("locked_at_utc"))
+                if registered is not None and locked_at is not None and registered < locked_at:
+                    failures.append(
+                        _science_failure(
+                            "counterfactual_claim_registered_before_lock_b",
+                            subject=subject,
+                            field="registered_at_utc",
+                            expected=f">={lock_b.get('locked_at_utc')}",
+                            actual=claim.get("registered_at_utc"),
+                        )
+                    )
+
+    manuscript = Path("reports/paper/index.qmd")
+    unregistered_numerics: list[dict[str, object]] = []
+    if manuscript.is_file():
+        manuscript_text = _read_text(manuscript)
+        # Occurrence-scoped registration (§6.2 registered->evidenced floor). A
+        # reportable manuscript numeric is registered iff its line cites a
+        # [@key] whose claim OWNS that literal (in its statement or
+        # manuscript_numeric_literals). Literals are scoped PER citation key —
+        # a claim cannot whitelist a number on a line that does not cite it, so
+        # one benign claim can no longer launder unrelated headline numbers
+        # (the global value-equality hole). The full semantic asserted->
+        # registered sweep (paraphrase, claim typing) is the §5.3 M3b referee;
+        # numeric recompute-against-artifact is the M4 computed-value-key layer.
+        line_citations = _manuscript_line_citation_keys(manuscript_text)
+        literals_by_key: dict[str, set[str]] = {}
+        for claim in claims:
+            declared = _claim_declared_literals(claim)
+            for key in _claim_citation_keys(claim):
+                literals_by_key.setdefault(key, set()).update(declared)
+        for item in _reportable_numeric_literals(manuscript_text):
+            cited_keys = line_citations.get(item["line"], set())
+            bound = any(
+                item["normalized"] in literals_by_key.get(key, set())
+                for key in cited_keys
+            )
+            if not bound:
+                unregistered_numerics.append(item)
+                failures.append(
+                    _science_failure(
+                        "unregistered_manuscript_numeric",
+                        subject=f"{manuscript.as_posix()}:{item['line']}",
+                        field="numeric_literal",
+                        actual=item["literal"],
+                    )
+                )
+        if not claims and len(_manuscript_words(manuscript_text)) >= 50:
+            failures.append(
+                _science_failure(
+                    "substantive_manuscript_without_registered_claims",
+                    subject=manuscript.as_posix(),
+                )
+            )
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_claims" if not claims and not failures else "ok",
+            "claim_count": len(claims),
+            "unregistered_manuscript_numeric_count": len(unregistered_numerics),
+            "failures": failures,
+        },
+    )
+
+
+_REPORTABLE_UNIT_RE = re.compile(
+    r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+    r"(?:"
+    r"\s*%(?!\w)"
+    r"|\s*-?\s*(?:ETH|USD|EUR|GBP|bps?|basis\s+points?|x)\b"
+    # count/time nouns tolerate ONE optional descriptor word ("12,563
+    # rent-component rows", "7 consecutive days") and a hyphen boundary
+    # ("14-day") so a reported quantity can't dodge the ledger by inserting an
+    # adjective or a hyphen between the number and the noun.
+    r"|[\s-]+(?:[A-Za-z][\w-]*[\s-]+)?(?:rollup-days?|rollups?|observations?|rows?|dates?|"
+    r"days?|weeks?|months?|years?|instances?|seeds?|runs?)\b"
+    r")",
+    flags=re.IGNORECASE,
+)
+_REPORTABLE_DECIMAL_RE = re.compile(r"(?<![\w.])[-+]?\d+\.\d+(?![\w.])")
+
+
+def _normalize_reportable_numeric(value: object) -> str:
+    """Normalize a reportable literal to `<value>|<unit-class>` so binding is
+    both descriptor-independent AND unit-strict: `1,559 daily observations` and
+    `1,559 dates` differ (different head noun), while `14 ETH` can NEVER bind to
+    a registered `14 rollups` (different unit) — the numeric-core-only laundering
+    hole. The unit class is `%`, a currency, `x`, or the trailing head noun
+    (last alphabetic token, so an intervening descriptor is ignored); a bare
+    number has an empty class."""
+    text = str(value)
+    match = re.match(r"\s*([-+]?\d[\d,]*(?:\.\d+)?)\s*(%?)", text)
+    if match is None:
+        return re.sub(r"\s+", "", text).replace(",", "").casefold()
+    number = match.group(1).replace(",", "")
+    if match.group(2) == "%":
+        return f"{number}|%"
+    tail_words = re.findall(r"[A-Za-z]+", text[match.end():])
+    unit = tail_words[-1].casefold() if tail_words else ""
+    return f"{number}|{unit}"
+
+
+_CITATION_KEY_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9_:.\-]*)")
+
+
+def _manuscript_line_citation_keys(text: str) -> dict[int, set[str]]:
+    """Map 1-based line number -> citation keys cited on that line
+    (`[@key]`, `[@k1; @k2]`), skipping frontmatter and fenced code."""
+    out: dict[int, set[str]] = {}
+    in_fence = False
+    in_frontmatter = text.startswith("---\n")
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if line_number == 1 and in_frontmatter:
+            continue
+        if in_frontmatter:
+            if stripped == "---":
+                in_frontmatter = False
+            continue
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        keys: set[str] = set()
+        for bracket in re.findall(r"\[@[^\]]+\]", raw_line):
+            keys.update(_CITATION_KEY_RE.findall(bracket))
+        if keys:
+            out[line_number] = keys
+    return out
+
+
+def _claim_citation_keys(claim: dict[str, object]) -> set[str]:
+    keys: set[str] = set()
+    single = claim.get("citation_key")
+    if isinstance(single, str) and single.strip():
+        keys.add(single.strip())
+    multiple = claim.get("citation_keys")
+    if isinstance(multiple, list):
+        keys.update(k.strip() for k in multiple if isinstance(k, str) and k.strip())
+    return keys
+
+
+def _claim_declared_literals(claim: dict[str, object]) -> set[str]:
+    """Normalized reportable numerics a claim owns — from its statement and its
+    explicit `manuscript_numeric_literals`. These bind ONLY on manuscript lines
+    that cite one of the claim's citation keys (occurrence scoping)."""
+    literals: set[str] = set()
+    statement = claim.get("statement")
+    if isinstance(statement, str):
+        literals.update(item["normalized"] for item in _reportable_numeric_literals(statement))
+    explicit = claim.get("manuscript_numeric_literals")
+    if isinstance(explicit, list):
+        literals.update(
+            _normalize_reportable_numeric(value)
+            for value in explicit
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool)
+        )
+    return literals
+
+
+def _reportable_numeric_literals(text: str) -> list[dict[str, object]]:
+    results: list[dict[str, object]] = []
+    in_fence = False
+    in_frontmatter = text.startswith("---\n")
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if line_number == 1 and in_frontmatter:
+            continue
+        if in_frontmatter:
+            if stripped == "---":
+                in_frontmatter = False
+            continue
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or re.search(r"\{\{<\s*include\b", raw_line):
+            continue
+        line = re.sub(r"\{\{.*?\}\}", " ", raw_line)
+        line = re.sub(r"\[@[^\]]+\]", " ", line)
+        # fig-alt / alt accessibility text describes an image; it is not a
+        # reported-statistic channel, so its numerics are not manuscript claims.
+        line = re.sub(r"""\b(?:fig-)?alt\s*=\s*(?:"[^"]*"|'[^']*')""", " ", line)
+        line = re.sub(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b", " ", line)
+        line = line.replace("`", "")
+        matches = list(_REPORTABLE_UNIT_RE.finditer(line))
+        occupied = [(match.start(), match.end()) for match in matches]
+        matches.extend(
+            match
+            for match in _REPORTABLE_DECIMAL_RE.finditer(line)
+            if not any(start <= match.start() and match.end() <= end for start, end in occupied)
+        )
+        for match in sorted(matches, key=lambda item: item.start()):
+            literal = match.group(0).strip().strip("`")
+            results.append(
+                {
+                    "literal": literal,
+                    "normalized": _normalize_reportable_numeric(literal),
+                    "line": line_number,
+                    "column": match.start() + 1,
+                }
+            )
+    return results
+
+
+def _parse_utc_z(value: object) -> dt.datetime | None:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != dt.timedelta(0):
+        return None
+    return parsed
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _bib_entries(text: str) -> dict[str, dict[str, str]]:
+    entries: dict[str, dict[str, str]] = {}
+    start_pattern = re.compile(r"@\w+\s*([({])\s*", flags=re.IGNORECASE)
+    cursor = 0
+    while (match := start_pattern.search(text, cursor)) is not None:
+        opener = match.group(1)
+        closer = ")" if opener == "(" else "}"
+        depth = 1
+        index = match.end()
+        while index < len(text) and depth:
+            if text[index] == opener:
+                depth += 1
+            elif text[index] == closer:
+                depth -= 1
+            index += 1
+        block = text[match.end() : index - 1 if depth == 0 else len(text)]
+        cursor = max(index, match.end())
+        if "," not in block:
+            continue
+        citekey, fields_text = block.split(",", 1)
+        citekey = citekey.strip()
+        if not citekey:
+            continue
+        fields: dict[str, str] = {}
+        for field in ("title", "doi", "note"):
+            field_match = re.search(
+                rf"(?ims)^\s*{field}\s*=\s*(\{{(?:[^{{}}]|\{{[^{{}}]*\}})*\}}|\"[^\"]*\"|[^,\n]+)",
+                fields_text,
+            )
+            if field_match is None:
+                continue
+            value = field_match.group(1).strip().strip(',').strip()
+            while len(value) >= 2 and (
+                (value[0] == "{" and value[-1] == "}")
+                or (value[0] == '"' and value[-1] == '"')
+            ):
+                value = value[1:-1].strip()
+            fields[field] = value
+        entries[citekey] = fields
+    return entries
+
+
+def _normalized_bib_identity(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _normalized_doi(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip().casefold()
+    normalized = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", normalized)
+    return normalized
+
+
+def _bib_local_path(citekey: str, fields: dict[str, str]) -> str | None:
+    if citekey.startswith("local:"):
+        return citekey.removeprefix("local:")
+    note = fields.get("note")
+    if not isinstance(note, str):
+        return None
+    match = re.search(r"(?:^|\s)Path:\s*([^\s]+)", note)
+    return match.group(1).rstrip(".,;)") if match is not None else None
+
+
+def gate_citation_integrity() -> GateResult:
+    """Check bibliography keys against committed, fresh, clean offline snapshots."""
+    manuscript = Path("reports/paper/index.qmd")
+    manuscript_bibliography = manuscript.parent / "references.bib"
+    bibliography = (
+        manuscript_bibliography
+        if manuscript.is_file() and manuscript_bibliography.is_file()
+        else Path("references.bib")
+    )
+    if not bibliography.is_file():
+        return GateResult(
+            ok=True,
+            details={"status": "no_bibliography", "skipped": True, "failures": []},
+        )
+
+    text = _read_text(bibliography)
+    entries = _bib_entries(text)
+    citekeys = re.findall(r"@\w+\s*[({]\s*([^,\s]+)\s*,", text, flags=re.IGNORECASE)
+    failures: list[dict[str, object]] = []
+    duplicates = sorted(key for key in set(citekeys) if citekeys.count(key) > 1)
+    for citekey in duplicates:
+        failures.append(_science_failure("duplicate_bibliography_key", subject=citekey))
+
+    local_paths = {
+        key: path
+        for key in citekeys
+        if (path := _bib_local_path(key, entries.get(key, {}))) is not None
+    }
+    local_keys = set(local_paths)
+    remote_keys = set(citekeys) - local_keys
+    for citekey in sorted(local_keys):
+        raw_path = local_paths[citekey]
+        path = _safe_repo_relative_path(raw_path)
+        if path is None or path.is_symlink() or not path.is_file() or not _git_path_is_tracked(
+            path.as_posix(), Path.cwd()
+        ):
+            failures.append(
+                _science_failure(
+                    "local_citation_missing",
+                    subject=citekey,
+                    expected="existing tracked repo-relative regular artifact",
+                    actual=raw_path,
+                )
+            )
+
+    citation_root = Path("data/citations")
+    dated_dirs: list[Path] = []
+    for path in citation_root.glob("????-??-??"):
+        if not path.is_dir():
+            continue
+        try:
+            dt.date.fromisoformat(path.name)
+        except ValueError:
+            failures.append(
+                _science_failure("invalid_citation_snapshot_date_dir", subject=path.as_posix())
+            )
+            continue
+        dated_dirs.append(path)
+    dated_dirs.sort()
+    latest_dir = dated_dirs[-1] if dated_dirs else None
+    snapshot_paths = sorted(latest_dir.glob("*.json")) if latest_dir is not None else []
+    snapshot_keys = {path.stem for path in snapshot_paths}
+    for missing in sorted(remote_keys - snapshot_keys):
+        failures.append(_science_failure("missing_citation_snapshot", subject=missing))
+    for extra in sorted(snapshot_keys - remote_keys):
+        failures.append(_science_failure("extra_citation_snapshot", subject=extra))
+
+    as_of: dt.date | None = None
+    if remote_keys:
+        as_of_path = citation_root / "AS_OF"
+        try:
+            as_of = dt.date.fromisoformat(_read_text(as_of_path).strip())
+        except (OSError, ValueError):
+            failures.append(
+                _science_failure(
+                    "invalid_citation_as_of",
+                    subject=as_of_path.as_posix(),
+                    expected="YYYY-MM-DD",
+                )
+            )
+        if latest_dir is None:
+            failures.append(
+                _science_failure("missing_citation_snapshot_directory", subject=citation_root.as_posix())
+            )
+        elif as_of is not None and dt.date.fromisoformat(latest_dir.name) > as_of:
+            failures.append(
+                _science_failure(
+                    "citation_snapshot_directory_after_as_of",
+                    subject=latest_dir.as_posix(),
+                    expected=f"on or before {as_of.isoformat()}",
+                )
+            )
+
+    staleness_days = 90
+    try:
+        framework = json.loads(Path("contracts/framework.json").read_text(encoding="utf-8"))
+        configured = framework.get("citation_policy", {}).get("staleness_days")
+        if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
+            staleness_days = configured
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    for snapshot_path in snapshot_paths:
+        snapshot, error = _load_json_file(snapshot_path)
+        subject = snapshot_path.stem
+        if error is not None or snapshot is None:
+            failures.append(
+                _science_failure(
+                    "invalid_citation_snapshot", subject=subject, actual=error
+                )
+            )
+            continue
+        required = {
+            "schema_version",
+            "citekey",
+            "title",
+            "source",
+            "retrieved_at_utc",
+            "retrieval_sha256",
+            "retrieval_payload",
+            "resolved",
+            "retraction_status",
+            "url_resolves",
+        }
+        for field in sorted(required - set(snapshot)):
+            failures.append(
+                _science_failure("citation_snapshot_missing_field", subject=subject, field=field)
+            )
+        if snapshot.get("schema_version") != CITATION_SNAPSHOT_SCHEMA_VERSION:
+            failures.append(
+                _science_failure(
+                    "invalid_citation_snapshot_schema",
+                    subject=subject,
+                    field="schema_version",
+                    expected=CITATION_SNAPSHOT_SCHEMA_VERSION,
+                    actual=snapshot.get("schema_version"),
+                )
+            )
+        if snapshot.get("citekey") != subject:
+            failures.append(
+                _science_failure(
+                    "citation_snapshot_key_mismatch",
+                    subject=subject,
+                    field="citekey",
+                    expected=subject,
+                    actual=snapshot.get("citekey"),
+                )
+            )
+        if snapshot.get("source") not in {"crossref", "openalex", "s2"}:
+            failures.append(
+                _science_failure("invalid_citation_source", subject=subject, field="source")
+            )
+        if not isinstance(snapshot.get("title"), str) or not snapshot.get("title", "").strip():
+            failures.append(
+                _science_failure("invalid_citation_title", subject=subject, field="title")
+            )
+        if not isinstance(snapshot.get("retrieval_sha256"), str) or re.fullmatch(
+            r"[0-9a-f]{64}", snapshot.get("retrieval_sha256", "")
+        ) is None:
+            failures.append(
+                _science_failure(
+                    "invalid_retrieval_sha256", subject=subject, field="retrieval_sha256"
+                )
+            )
+        elif "retrieval_payload" in snapshot:
+            actual_retrieval_sha = hashlib.sha256(
+                _canonical_json_bytes(snapshot.get("retrieval_payload"))
+            ).hexdigest()
+            if snapshot.get("retrieval_sha256") != actual_retrieval_sha:
+                failures.append(
+                    _science_failure(
+                        "retrieval_sha256_mismatch",
+                        subject=subject,
+                        field="retrieval_sha256",
+                        expected=actual_retrieval_sha,
+                        actual=snapshot.get("retrieval_sha256"),
+                    )
+                )
+        bib_entry = entries.get(subject, {})
+        bib_doi = _normalized_doi(bib_entry.get("doi"))
+        snapshot_doi = _normalized_doi(snapshot.get("doi"))
+        if bib_doi is not None or snapshot_doi is not None:
+            if bib_doi != snapshot_doi:
+                failures.append(
+                    _science_failure(
+                        "citation_snapshot_bib_identity_mismatch",
+                        subject=subject,
+                        field="doi",
+                        expected=bib_doi,
+                        actual=snapshot_doi,
+                    )
+                )
+        elif _normalized_bib_identity(bib_entry.get("title")) != _normalized_bib_identity(
+            snapshot.get("title")
+        ):
+            failures.append(
+                _science_failure(
+                    "citation_snapshot_bib_identity_mismatch",
+                    subject=subject,
+                    field="title",
+                    expected=bib_entry.get("title"),
+                    actual=snapshot.get("title"),
+                )
+            )
+        retrieved_at = _parse_utc_z(snapshot.get("retrieved_at_utc"))
+        if retrieved_at is None:
+            failures.append(
+                _science_failure(
+                    "invalid_citation_retrieved_at", subject=subject, field="retrieved_at_utc"
+                )
+            )
+        elif as_of is not None:
+            age = (as_of - retrieved_at.date()).days
+            if age < 0 or age > staleness_days:
+                failures.append(
+                    _science_failure(
+                        "citation_snapshot_stale",
+                        subject=subject,
+                        field="retrieved_at_utc",
+                        expected=f"0..{staleness_days} days before AS_OF {as_of.isoformat()}",
+                        actual=age,
+                    )
+                )
+        if snapshot.get("resolved") is not True:
+            failures.append(_science_failure("citation_unresolved", subject=subject, field="resolved"))
+        if snapshot.get("retraction_status") != "none":
+            failures.append(
+                _science_failure(
+                    "citation_retraction_status_not_clean",
+                    subject=subject,
+                    field="retraction_status",
+                    expected="none",
+                    actual=snapshot.get("retraction_status"),
+                )
+            )
+        if snapshot.get("url_resolves") is not True:
+            failures.append(
+                _science_failure("citation_url_unresolved", subject=subject, field="url_resolves")
+            )
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "bibliography_count": len(citekeys),
+            "snapshot_count": len(snapshot_paths),
+            "snapshot_directory": latest_dir.as_posix() if latest_dir is not None else None,
+            "as_of": as_of.isoformat() if as_of is not None else None,
+            "staleness_days": staleness_days,
+            "failures": failures,
+        },
+    )
+
+
+def _gate_empirical_etl_decision_log() -> GateResult:
+    """Bind logged ETL discretion to locked 2a clauses and catch declared zero-fill."""
+    failures: list[dict[str, object]] = []
+    lock_path = Path(PREREG_PHASE_FILES["2a"])
+    lock, lock_error = load_prereg_lock(lock_path, expected_phase="2a")
+    if lock_error is not None or lock is None:
+        failures.append(
+            _science_failure(
+                "invalid_data_construction_lock",
+                subject=lock_path.as_posix(),
+                actual=lock_error,
+            )
+        )
+        lock = None
+    elif lock.get("status") == "locked" and lock.get("active") is not True:
+        failures.append(
+            _science_failure(
+                "data_construction_lock_hash_mismatch",
+                subject=lock_path.as_posix(),
+                expected=lock.get("body_sha256"),
+                actual=lock.get("locked_sha256"),
+            )
+        )
+    active_lock = lock if lock is not None and lock.get("active") is True else None
+    body = str(active_lock.get("body", "")) if active_lock is not None else ""
+    clause_ids = set(
+        re.findall(r"^###\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*$", body, flags=re.MULTILINE)
+    )
+
+    manifest_paths = sorted(Path("data/processed_manifest").glob("*.json"))
+    decision_log_count = 0
+    for manifest_path in manifest_paths:
+        payload, error = _load_json_file(manifest_path)
+        if error is not None or payload is None:
+            failures.append(
+                _science_failure(
+                    "invalid_processed_manifest_for_decision_log",
+                    subject=manifest_path.as_posix(),
+                    actual=error,
+                )
+            )
+            continue
+        decision_log = payload.get("decision_log")
+        if decision_log is not None:
+            if not isinstance(decision_log, list):
+                failures.append(
+                    _science_failure(
+                        "decision_log_not_list",
+                        subject=manifest_path.as_posix(),
+                        field="decision_log",
+                        actual=decision_log,
+                    )
+                )
+            else:
+                decision_log_count += len(decision_log)
+                for index, decision in enumerate(decision_log):
+                    subject = f"{manifest_path.as_posix()}:decision_log[{index}]"
+                    if not isinstance(decision, dict):
+                        failures.append(
+                            _science_failure("decision_log_entry_not_object", subject=subject)
+                        )
+                        continue
+                    for field in ("clause_id", "choice", "rationale"):
+                        value = decision.get(field)
+                        if not isinstance(value, str) or not value.strip():
+                            failures.append(
+                                _science_failure(
+                                    "invalid_decision_log_field",
+                                    subject=subject,
+                                    field=field,
+                                    actual=value,
+                                )
+                            )
+                    clause_id = decision.get("clause_id")
+                    if isinstance(clause_id, str) and clause_id.strip() not in clause_ids:
+                        failures.append(
+                            _science_failure(
+                                "unknown_locked_protocol_clause",
+                                subject=subject,
+                                field="clause_id",
+                                expected=sorted(clause_ids),
+                                actual=clause_id,
+                            )
+                        )
+
+        transform = payload.get("transform")
+        transform = transform if isinstance(transform, dict) else {}
+        zero_fill = payload.get("zero_fill_columns", transform.get("zero_fill_columns"))
+        coverage = payload.get("coverage_flag_columns", transform.get("coverage_flag_columns"))
+        if zero_fill is not None:
+            if not isinstance(zero_fill, list) or not all(
+                isinstance(item, str) and item.strip() for item in zero_fill
+            ):
+                failures.append(
+                    _science_failure(
+                        "invalid_zero_fill_columns",
+                        subject=manifest_path.as_posix(),
+                        field="zero_fill_columns",
+                        actual=zero_fill,
+                    )
+                )
+            else:
+                coverage_set = (
+                    {item.strip() for item in coverage if isinstance(item, str) and item.strip()}
+                    if isinstance(coverage, list)
+                    else set()
+                )
+                for column in zero_fill:
+                    if column.strip() not in coverage_set:
+                        failures.append(
+                            _science_failure(
+                                "zero_fill_without_coverage_flag",
+                                subject=manifest_path.as_posix(),
+                                field="zero_fill_columns",
+                                expected=f"matching coverage_flag_columns entry for {column.strip()}",
+                                actual=sorted(coverage_set),
+                            )
+                        )
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_decision_logs" if decision_log_count == 0 and not failures else "ok",
+            "manifest_count": len(manifest_paths),
+            "decision_log_count": decision_log_count,
+            "locked_clause_count": len(clause_ids),
+            "completeness_audited": False,
+            "failures": failures,
+        },
+    )
+
+
+def _gate_modeling_etl_decision_log() -> GateResult:
+    failures: list[dict[str, object]] = []
+    manifests: list[tuple[Path, dict[str, object]]] = []
+    for path in sorted(Path("contracts/instances").glob("*.json")):
+        payload, error = _load_json_file(path)
+        if error is not None or payload is None:
+            continue
+        if payload.get("decision_log"):
+            manifests.append((path, payload))
+    if not manifests:
+        return GateResult(
+            ok=True,
+            details={
+                "status": "no_instance_decision_logs",
+                "manifest_count": 0,
+                "decision_log_count": 0,
+                "failures": [],
+            },
+        )
+
+    spec, spec_path, _lock, spec_failures = _active_experiment_spec()
+    failures.extend(spec_failures)
+    dimensions = (
+        spec.get("grid", {}).get("dimensions", {})
+        if isinstance(spec, dict) and isinstance(spec.get("grid"), dict)
+        else {}
+    )
+    clause_ids = {
+        "seeds",
+        "solver",
+        "budget",
+        "convergence_tolerance",
+        "sweep_survival_criterion",
+    }
+    if isinstance(dimensions, dict):
+        clause_ids.update(f"grid.dimensions.{name}" for name in dimensions)
+    decision_count = 0
+    for path, payload in manifests:
+        decision_log = payload.get("decision_log")
+        if not isinstance(decision_log, list):
+            failures.append(
+                _science_failure(
+                    "instance_decision_log_not_list",
+                    subject=path.as_posix(),
+                    field="decision_log",
+                )
+            )
+            continue
+        decision_count += len(decision_log)
+        for index, decision in enumerate(decision_log):
+            subject = f"{path.as_posix()}:decision_log[{index}]"
+            if not isinstance(decision, dict):
+                failures.append(_science_failure("instance_decision_not_object", subject=subject))
+                continue
+            clause_id = decision.get("clause_id")
+            if clause_id not in clause_ids:
+                failures.append(
+                    _science_failure(
+                        "unknown_locked_experiment_clause",
+                        subject=subject,
+                        field="clause_id",
+                        expected=sorted(clause_ids),
+                        actual=clause_id,
+                    )
+                )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "experiment_spec": spec_path.as_posix() if spec_path is not None else None,
+            "manifest_count": len(manifests),
+            "decision_log_count": decision_count,
+            "locked_clause_count": len(clause_ids),
+            "completeness_audited": False,
+            "failures": failures,
+        },
+    )
+
+
+def gate_etl_decision_log(*, form: str | None = None) -> GateResult:
+    """Run empirical, modeling, or union decision-log conformance."""
+    mode = _parse_project_mode(Path("contracts/project.yaml")) or "empirical"
+    selected = form or ("modeling" if mode == "modeling" else "union" if mode == "hybrid" else "empirical")
+    if selected == "empirical":
+        return _gate_empirical_etl_decision_log()
+    if selected == "modeling":
+        return _gate_modeling_etl_decision_log()
+    empirical = _gate_empirical_etl_decision_log()
+    modeling = _gate_modeling_etl_decision_log()
+    return GateResult(
+        ok=empirical.ok and modeling.ok,
+        details={
+            "status": "ok",
+            "forms": {"empirical": empirical.details, "modeling": modeling.details},
+            "failures": list(empirical.details.get("failures", []))
+            + list(modeling.details.get("failures", [])),
+        },
+    )
+
+
+def gate_rigor_sections() -> GateResult:
+    """Require deterministic rigor headings on v2 analysis/writing and manuscript surfaces."""
+    required_headings = (
+        "## Evidence table",
+        "## Alternative explanations considered",
+        "## Uncertainty statement",
+    )
+    failures: list[dict[str, object]] = []
+    checked: list[str] = []
+    try:
+        contract = load_framework_contract()
+    except ValueError as exc:
+        return GateResult(ok=False, details={"failures": [str(exc)]})
+
+    for path in _iter_task_files(contract):
+        text = _read_text(path)
+        frontmatter = _parse_task_frontmatter(text)
+        if (
+            frontmatter is None
+            or frontmatter.get("task_schema") != TASK_SCHEMA_VERSION
+            or frontmatter.get("task_kind") not in {"analysis", "writing"}
+        ):
+            continue
+        checked.append(path.as_posix())
+        for heading in required_headings:
+            if not _section_has_content(text, heading):
+                failures.append(
+                    _science_failure(
+                        "missing_or_empty_rigor_section",
+                        subject=path.as_posix(),
+                        field=heading.removeprefix("## "),
+                    )
+                )
+
+    manuscript = Path("reports/paper/index.qmd")
+    if manuscript.is_file():
+        checked.append(manuscript.as_posix())
+        text = _read_text(manuscript)
+        for heading in required_headings:
+            if not _section_has_content(text, heading):
+                failures.append(
+                    _science_failure(
+                        "missing_or_empty_rigor_section",
+                        subject=manuscript.as_posix(),
+                        field=heading.removeprefix("## "),
+                    )
+                )
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_applicable_surfaces" if not checked else "ok",
+            "checked": checked,
+            "failures": failures,
+        },
+    )
+
+
+def _verify_content_entry(
+    entry: object,
+    *,
+    subject: str,
+    field: str,
+    repo: Path = Path("."),
+    require_bytes: bool = False,
+    required_prefix: str | None = None,
+) -> list[dict[str, object]]:
+    if not isinstance(entry, dict):
+        return [_science_failure("invalid_content_binding", subject=subject, field=field, actual=entry)]
+    path = _safe_repo_relative_path(entry.get("path"))
+    expected_sha = entry.get("sha256")
+    if path is None:
+        return [
+            _science_failure(
+                "invalid_content_binding_path",
+                subject=subject,
+                field=f"{field}.path",
+                actual=entry.get("path"),
+            )
+        ]
+    if required_prefix is not None and not _path_matches_prefix(path.as_posix(), required_prefix):
+        return [
+            _science_failure(
+                "content_binding_path_outside_required_prefix",
+                subject=subject,
+                field=f"{field}.path",
+                expected=required_prefix,
+                actual=path.as_posix(),
+            )
+        ]
+    if not isinstance(expected_sha, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
+        return [
+            _science_failure(
+                "invalid_content_binding_sha256",
+                subject=subject,
+                field=f"{field}.sha256",
+                actual=expected_sha,
+            )
+        ]
+    expected_bytes = entry.get("bytes")
+    if require_bytes and (
+        not isinstance(expected_bytes, int) or isinstance(expected_bytes, bool) or expected_bytes < 0
+    ):
+        return [
+            _science_failure(
+                "invalid_content_binding_bytes",
+                subject=subject,
+                field=f"{field}.bytes",
+                actual=expected_bytes,
+            )
+        ]
+    repo = repo.resolve()
+    disk_path = repo / path
+    try:
+        resolved = disk_path.resolve(strict=True)
+        resolved.relative_to(repo)
+    except (FileNotFoundError, OSError, ValueError):
+        return [
+            _science_failure(
+                "content_binding_target_missing",
+                subject=subject,
+                field=field,
+                expected=path.as_posix(),
+            )
+        ]
+    if disk_path.is_symlink() or not resolved.is_file():
+        return [
+            _science_failure(
+                "content_binding_target_not_regular_file",
+                subject=subject,
+                field=field,
+                actual=path.as_posix(),
+            )
+        ]
+    if not _git_path_is_tracked(path.as_posix(), repo):
+        return [
+            _science_failure(
+                "content_binding_target_not_git_tracked",
+                subject=subject,
+                field=field,
+                actual=path.as_posix(),
+            )
+        ]
+    actual_sha, actual_bytes = _sha256_and_bytes(resolved)
+    failures: list[dict[str, object]] = []
+    if actual_sha != expected_sha:
+        failures.append(
+            _science_failure(
+                "content_binding_sha256_mismatch",
+                subject=subject,
+                field=field,
+                expected=expected_sha,
+                actual=actual_sha,
+            )
+        )
+    if require_bytes and actual_bytes != expected_bytes:
+        failures.append(
+            _science_failure(
+                "content_binding_bytes_mismatch",
+                subject=subject,
+                field=field,
+                expected=expected_bytes,
+                actual=actual_bytes,
+            )
+        )
+    return failures
+
+
+def _validation_artifact_status(path: Path) -> str | None:
+    try:
+        text = _read_text(path)
+    except (OSError, UnicodeDecodeError):
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        for key in ("status", "overall_status", "result"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+            if isinstance(value, dict):
+                nested = value.get("status")
+                if isinstance(nested, str) and nested.strip():
+                    return nested.strip().lower()
+    match = re.search(
+        r"^(?:[-*]\s*)?(?:status|overall_status)\s*:\s*['\"]?([^'\"\s]+)",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    return match.group(1).strip().lower() if match is not None else None
+
+
+def gate_instance_manifest_conformance() -> GateResult:
+    """Validate both v1 variants and recompute their complete content bindings."""
+    paths = sorted(Path("contracts/instances").glob("*.json"))
+    failures: list[dict[str, object]] = []
+    variants = {"bridge": 0, "synthetic": 0}
+    schema_path = Path("contracts/schemas/instance_manifest_v1.json")
+    for path in paths:
+        payload, error = _load_json_file(path)
+        if error is not None or payload is None:
+            failures.append(
+                _science_failure("invalid_instance_manifest_json", subject=path.as_posix(), actual=error)
+            )
+            continue
+        variant = "bridge" if "source_processed_manifests" in payload else "synthetic"
+        variants[variant] += 1
+        for issue in _schema_failures(payload, schema_path):
+            failures.append(
+                _science_failure(
+                    "instance_manifest_schema_violation",
+                    subject=path.as_posix(),
+                    field=str(issue.get("path")),
+                    actual=issue,
+                )
+            )
+        if variant == "bridge":
+            sources = payload.get("source_processed_manifests")
+            if isinstance(sources, list):
+                for index, entry in enumerate(sources):
+                    failures.extend(
+                        _verify_content_entry(
+                            entry,
+                            subject=path.as_posix(),
+                            field=f"source_processed_manifests[{index}]",
+                            required_prefix="data/processed_manifest/",
+                        )
+                    )
+        outputs = payload.get("outputs")
+        if isinstance(outputs, list):
+            for index, entry in enumerate(outputs):
+                failures.extend(
+                    _verify_content_entry(
+                        entry,
+                        subject=path.as_posix(),
+                        field=f"outputs[{index}]",
+                        require_bytes=True,
+                    )
+                )
+    require_instance, _, requirement_subjects = _modeling_manifest_requirements()
+    if require_instance and not paths:
+        failures.append(
+            _science_failure(
+                "required_instance_manifest_missing",
+                subject=",".join(requirement_subjects) or "modeling_claims",
+            )
+        )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_instance_manifests" if not paths else "ok",
+            "manifest_count": len(paths),
+            "variants": variants,
+            "failures": failures,
+        },
+    )
+
+
+def _experiment_manifests() -> tuple[list[tuple[Path, dict[str, object]]], list[dict[str, object]]]:
+    records: list[tuple[Path, dict[str, object]]] = []
+    failures: list[dict[str, object]] = []
+    schema_path = Path("contracts/schemas/experiment_manifest_v1.json")
+    for path in sorted(Path("reports/models").glob("*.json")):
+        payload, error = _load_json_file(path)
+        if error is not None or payload is None:
+            failures.append(
+                _science_failure("invalid_experiment_manifest_json", subject=path.as_posix(), actual=error)
+            )
+            continue
+        if payload.get("schema_version") != EXPERIMENT_MANIFEST_SCHEMA_VERSION:
+            continue
+        records.append((path, payload))
+        for issue in _schema_failures(payload, schema_path):
+            failures.append(
+                _science_failure(
+                    "experiment_manifest_schema_violation",
+                    subject=path.as_posix(),
+                    field=str(issue.get("path")),
+                    actual=issue,
+                )
+            )
+    return records, failures
+
+
+def _modeling_manifest_requirements() -> tuple[bool, bool, list[str]]:
+    require_instance = False
+    require_experiment = False
+    subjects: list[str] = []
+    try:
+        contract = load_framework_contract()
+        tasks, _ = _collect_tasks(contract)
+    except ValueError:
+        tasks = {}
+    claims, _ = _load_claim_ledger()
+    claims_by_task: dict[str, set[str]] = {}
+    unbound_modeling_claim_types: set[str] = set()
+    for claim in claims:
+        claim_type = claim.get("type")
+        if claim_type not in {"computational", "counterfactual"}:
+            continue
+        task_id = _claim_task_id(claim)
+        if task_id is None:
+            unbound_modeling_claim_types.add(str(claim_type))
+        else:
+            claims_by_task.setdefault(task_id, set()).add(str(claim_type))
+    if unbound_modeling_claim_types:
+        require_experiment = True
+    if "counterfactual" in unbound_modeling_claim_types:
+        require_instance = True
+    for task in tasks.values():
+        if task.state not in {"ready_for_review", "done"} or task.task_kind not in {
+            "model",
+            "bridge",
+        }:
+            continue
+        claim_types = claims_by_task.get(task.task_id, set())
+        instance_output = any(
+            _path_matches_prefix(output, "contracts/instances/") for output in task.outputs
+        )
+        experiment_output = any(
+            _path_matches_prefix(output, "reports/models/") for output in task.outputs
+        )
+        if instance_output or "counterfactual" in claim_types:
+            require_instance = True
+            subjects.append(task.task_id)
+        if experiment_output or claim_types & {"computational", "counterfactual"}:
+            require_experiment = True
+            subjects.append(task.task_id)
+    return require_instance, require_experiment, sorted(set(subjects))
+
+
+def gate_seed_budget_lock() -> GateResult:
+    manifests, failures = _experiment_manifests()
+    if not manifests:
+        return GateResult(
+            ok=not failures,
+            details={"status": "no_experiment_manifests", "manifest_count": 0, "failures": failures},
+        )
+    spec, spec_path, lock, spec_failures = _active_experiment_spec()
+    failures.extend(spec_failures)
+    seeds = spec.get("seeds", []) if isinstance(spec, dict) else []
+    raw_budgets = spec.get("budget", []) if isinstance(spec, dict) else []
+    budgets = raw_budgets if isinstance(raw_budgets, list) else [raw_budgets]
+    for path, manifest in manifests:
+        if manifest.get("seed") not in seeds:
+            failures.append(
+                _science_failure(
+                    "seed_outside_active_lock",
+                    subject=path.as_posix(),
+                    field="seed",
+                    expected=seeds,
+                    actual=manifest.get("seed"),
+                )
+            )
+        if manifest.get("budget") not in budgets:
+            failures.append(
+                _science_failure(
+                    "budget_outside_active_lock",
+                    subject=path.as_posix(),
+                    field="budget",
+                    expected=budgets,
+                    actual=manifest.get("budget"),
+                )
+            )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "manifest_count": len(manifests),
+            "active_lock_a_sha256": lock.get("body_sha256") if lock is not None else None,
+            "experiment_spec": spec_path.as_posix() if spec_path is not None else None,
+            "failures": failures,
+        },
+    )
+
+
+def _claim_experiment_paths(claim: dict[str, object]) -> list[Path]:
+    paths: list[Path] = []
+    direct = claim.get("experiment_manifest")
+    if isinstance(direct, str):
+        candidate = _safe_repo_relative_path(direct)
+        if candidate is not None:
+            paths.append(candidate)
+    elif isinstance(direct, dict):
+        candidate = _safe_repo_relative_path(direct.get("path"))
+        if candidate is not None:
+            paths.append(candidate)
+    model_artifact = claim.get("model_artifact")
+    if isinstance(model_artifact, dict):
+        candidate = _safe_repo_relative_path(model_artifact.get("path"))
+        if candidate is not None and _path_matches_prefix(
+            candidate.as_posix(), "reports/models/"
+        ):
+            paths.append(candidate)
+    artifacts = claim.get("supporting_artifacts")
+    if isinstance(artifacts, list):
+        for entry in artifacts:
+            candidate = _safe_repo_relative_path(entry.get("path")) if isinstance(entry, dict) else None
+            if candidate is not None and _path_matches_prefix(candidate.as_posix(), "reports/models/"):
+                paths.append(candidate)
+    return sorted(set(paths))
+
+
+def _dispersion_failures(path: Path, manifest: dict[str, object]) -> list[dict[str, object]]:
+    subject = path.as_posix()
+    direct = manifest.get("dispersion_artifact")
+    if direct is not None:
+        return _verify_content_entry(direct, subject=subject, field="dispersion_artifact")
+    outputs = manifest.get("outputs")
+    candidates: list[object] = []
+    if isinstance(outputs, dict):
+        for key, value in outputs.items():
+            if "dispersion" in str(key).lower():
+                candidates.append(value)
+    elif isinstance(outputs, list):
+        for value in outputs:
+            marker = ""
+            if isinstance(value, dict):
+                marker = " ".join(str(value.get(key, "")) for key in ("role", "kind", "type", "path"))
+            elif isinstance(value, str):
+                marker = value
+            if "dispersion" in marker.lower():
+                candidates.append(value)
+    if not candidates:
+        return [_science_failure("missing_per_instance_dispersion_artifact", subject=subject)]
+    failures: list[dict[str, object]] = []
+    for index, candidate in enumerate(candidates):
+        if isinstance(candidate, str):
+            candidate_path = _safe_repo_relative_path(candidate)
+            if candidate_path is None or not candidate_path.is_file():
+                failures.append(
+                    _science_failure(
+                        "missing_per_instance_dispersion_artifact",
+                        subject=subject,
+                        field=f"outputs[{index}]",
+                        actual=candidate,
+                    )
+                )
+        elif isinstance(candidate, dict):
+            failures.extend(
+                _verify_content_entry(candidate, subject=subject, field=f"outputs[{index}]")
+            )
+    return failures
+
+
+def gate_gap_convergence() -> GateResult:
+    claims, claim_failures = _load_claim_ledger()
+    failures: list[dict[str, object]] = []
+    if not claims and claim_failures:
+        failures.extend(claim_failures)
+    records, manifest_failures = _experiment_manifests()
+    failures.extend(manifest_failures)
+    _, require_experiment, requirement_subjects = _modeling_manifest_requirements()
+    if require_experiment and not records:
+        failures.append(
+            _science_failure(
+                "required_experiment_manifest_missing",
+                subject=",".join(requirement_subjects) or "modeling_claims",
+            )
+        )
+    by_path = {path: payload for path, payload in records}
+    relevant_claims = [
+        claim for claim in claims if claim.get("type") in {"computational", "counterfactual"}
+    ]
+    checked: set[Path] = set()
+    for index, claim in enumerate(relevant_claims):
+        subject = str(claim.get("claim_id") or f"claims[{index}]")
+        experiment_paths = _claim_experiment_paths(claim)
+        if not experiment_paths:
+            failures.append(
+                _science_failure("computational_claim_missing_experiment_manifest", subject=subject)
+            )
+        for path in experiment_paths:
+            manifest = by_path.get(path)
+            if manifest is None:
+                failures.append(
+                    _science_failure(
+                        "claim_experiment_manifest_not_registered",
+                        subject=subject,
+                        actual=path.as_posix(),
+                    )
+                )
+                continue
+            checked.add(path)
+    spec: dict[str, object] | None = None
+    spec_path: Path | None = None
+    if relevant_claims:
+        spec, spec_path, _, spec_failures = _active_experiment_spec()
+        failures.extend(spec_failures)
+    expected_solver = spec.get("solver") if isinstance(spec, dict) else None
+    expected_solver_name = (
+        expected_solver.get("name")
+        if isinstance(expected_solver, dict)
+        else expected_solver
+    )
+    expected_solver_version = (
+        expected_solver.get("version") if isinstance(expected_solver, dict) else None
+    )
+    convergence_tolerance = (
+        float(spec["convergence_tolerance"])
+        if isinstance(spec, dict)
+        and isinstance(spec.get("convergence_tolerance"), (int, float))
+        and not isinstance(spec.get("convergence_tolerance"), bool)
+        and math.isfinite(spec["convergence_tolerance"])
+        else None
+    )
+    for path in sorted(checked):
+        manifest = by_path[path]
+        gap = manifest.get("optimality_gap")
+        if not isinstance(gap, (int, float)) or isinstance(gap, bool) or not math.isfinite(float(gap)):
+            failures.append(
+                _science_failure("missing_or_invalid_optimality_gap", subject=path.as_posix(), field="optimality_gap")
+            )
+        if not isinstance(manifest.get("converged"), bool):
+            failures.append(
+                _science_failure("missing_or_invalid_converged", subject=path.as_posix(), field="converged")
+            )
+        elif manifest.get("converged") is not True:
+            failures.append(
+                _science_failure(
+                    "computational_claim_experiment_not_converged",
+                    subject=path.as_posix(),
+                    field="converged",
+                    expected=True,
+                    actual=manifest.get("converged"),
+                )
+            )
+        if expected_solver_name is not None and manifest.get("solver") != expected_solver_name:
+            failures.append(
+                _science_failure(
+                    "solver_outside_active_lock",
+                    subject=path.as_posix(),
+                    field="solver",
+                    expected=expected_solver_name,
+                    actual=manifest.get("solver"),
+                )
+            )
+        if (
+            expected_solver_version is not None
+            and manifest.get("solver_version") != expected_solver_version
+        ):
+            failures.append(
+                _science_failure(
+                    "solver_version_outside_active_lock",
+                    subject=path.as_posix(),
+                    field="solver_version",
+                    expected=expected_solver_version,
+                    actual=manifest.get("solver_version"),
+                )
+            )
+        if (
+            isinstance(gap, (int, float))
+            and not isinstance(gap, bool)
+            and math.isfinite(float(gap))
+            and convergence_tolerance is not None
+            and float(gap) > convergence_tolerance
+        ):
+            failures.append(
+                _science_failure(
+                    "optimality_gap_exceeds_active_lock",
+                    subject=path.as_posix(),
+                    field="optimality_gap",
+                    expected=f"<={convergence_tolerance}",
+                    actual=gap,
+                )
+            )
+        failures.extend(_dispersion_failures(path, manifest))
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_computational_claims" if not relevant_claims else "ok",
+            "claim_count": len(relevant_claims),
+            "manifest_count": len(checked),
+            "experiment_spec": spec_path.as_posix() if spec_path is not None else None,
+            "failures": failures,
+        },
+    )
+
+
+def gate_theoretical_falsification() -> GateResult:
+    claims, claim_failures = _load_claim_ledger()
+    failures: list[dict[str, object]] = []
+    if not claims and claim_failures:
+        failures.extend(claim_failures)
+    checked = 0
+    for index, claim in enumerate(claims):
+        if claim.get("type") != "theoretical" or "falsification_spec" not in claim:
+            continue
+        checked += 1
+        subject = str(claim.get("claim_id") or f"claims[{index}]")
+        for diagnostic in evaluate_falsification_spec(claim.get("falsification_spec")):
+            failures.append(
+                _science_failure(
+                    str(diagnostic.get("reason", "falsification_failed")),
+                    subject=subject,
+                    actual=diagnostic,
+                )
+            )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_declared_falsification_specs" if checked == 0 else "ok",
+            "claim_count": checked,
+            "failures": failures,
+        },
+    )
+
+
+def _canonical_cells(cells: object) -> list[str] | None:
+    if not isinstance(cells, list) or not all(isinstance(cell, dict) for cell in cells):
+        return None
+    return sorted(json.dumps(cell, sort_keys=True, separators=(",", ":")) for cell in cells)
+
+
+def _sweep_cell_record(
+    entry: object,
+    *,
+    subject: str,
+    index: int,
+    spec: dict[str, object] | None,
+) -> tuple[dict[str, object] | None, bool, list[dict[str, object]]]:
+    failures: list[dict[str, object]] = []
+    if not isinstance(entry, dict) or not isinstance(entry.get("cell"), dict):
+        return None, False, [
+            _science_failure(
+                "sweep_cell_not_content_bound",
+                subject=subject,
+                field=f"cells[{index}]",
+                expected="{cell, experiment_manifest}",
+                actual=entry,
+            )
+        ]
+    cell = dict(entry["cell"])
+    binding = entry.get("experiment_manifest")
+    failures.extend(
+        _verify_content_entry(
+            binding,
+            subject=subject,
+            field=f"cells[{index}].experiment_manifest",
+            required_prefix="reports/models/",
+        )
+    )
+    manifest_path = (
+        _safe_repo_relative_path(binding.get("path")) if isinstance(binding, dict) else None
+    )
+    manifest: dict[str, object] | None = None
+    if manifest_path is not None and manifest_path.is_file():
+        manifest, error = _load_json_file(manifest_path)
+        if error is not None or manifest is None:
+            failures.append(
+                _science_failure(
+                    "invalid_sweep_experiment_manifest",
+                    subject=subject,
+                    field=f"cells[{index}].experiment_manifest",
+                    actual=error,
+                )
+            )
+    if manifest is None:
+        return cell, False, failures
+    if manifest.get("schema_version") != EXPERIMENT_MANIFEST_SCHEMA_VERSION:
+        failures.append(
+            _science_failure(
+                "invalid_sweep_experiment_manifest_schema",
+                subject=subject,
+                field=f"cells[{index}].experiment_manifest",
+                actual=manifest.get("schema_version"),
+            )
+        )
+    for issue in _schema_failures(manifest, Path("contracts/schemas/experiment_manifest_v1.json")):
+        failures.append(
+            _science_failure(
+                "sweep_experiment_manifest_schema_violation",
+                subject=subject,
+                field=f"cells[{index}].experiment_manifest",
+                actual=issue,
+            )
+        )
+    for field in ("seed", "budget"):
+        if manifest.get(field) != cell.get(field):
+            failures.append(
+                _science_failure(
+                    "sweep_cell_manifest_mismatch",
+                    subject=subject,
+                    field=f"cells[{index}].{field}",
+                    expected=cell.get(field),
+                    actual=manifest.get(field),
+                )
+            )
+    dimensions = (
+        spec.get("grid", {}).get("dimensions", {})
+        if isinstance(spec, dict) and isinstance(spec.get("grid"), dict)
+        else {}
+    )
+    parameters = manifest.get("parameters")
+    for name in (dimensions if isinstance(dimensions, dict) else {}):
+        actual = parameters.get(name) if isinstance(parameters, dict) else None
+        if actual != cell.get(name):
+            failures.append(
+                _science_failure(
+                    "sweep_cell_manifest_mismatch",
+                    subject=subject,
+                    field=f"cells[{index}].{name}",
+                    expected=cell.get(name),
+                    actual=actual,
+                )
+            )
+    locked_solver = spec.get("solver") if isinstance(spec, dict) else None
+    solver_name = locked_solver.get("name") if isinstance(locked_solver, dict) else locked_solver
+    solver_version = locked_solver.get("version") if isinstance(locked_solver, dict) else None
+    if solver_name is not None and manifest.get("solver") != solver_name:
+        failures.append(
+            _science_failure(
+                "solver_outside_active_lock",
+                subject=subject,
+                field=f"cells[{index}].solver",
+                expected=solver_name,
+                actual=manifest.get("solver"),
+            )
+        )
+    if solver_version is not None and manifest.get("solver_version") != solver_version:
+        failures.append(
+            _science_failure(
+                "solver_version_outside_active_lock",
+                subject=subject,
+                field=f"cells[{index}].solver_version",
+                expected=solver_version,
+                actual=manifest.get("solver_version"),
+            )
+        )
+    tolerance = spec.get("convergence_tolerance") if isinstance(spec, dict) else None
+    gap = manifest.get("optimality_gap")
+    gap_is_acceptable = (
+        isinstance(gap, (int, float))
+        and not isinstance(gap, bool)
+        and math.isfinite(float(gap))
+        and isinstance(tolerance, (int, float))
+        and not isinstance(tolerance, bool)
+        and float(gap) <= float(tolerance)
+    )
+    if not gap_is_acceptable:
+        failures.append(
+            _science_failure(
+                "sweep_cell_optimality_gap_outside_active_lock",
+                subject=subject,
+                field=f"cells[{index}].optimality_gap",
+                expected=f"finite and <= {tolerance}",
+                actual=gap,
+            )
+        )
+    survived = (
+        manifest.get("converged") is True
+        and gap_is_acceptable
+    )
+    if manifest.get("converged") is not True:
+        failures.append(
+            _science_failure(
+                "sweep_cell_not_converged",
+                subject=subject,
+                field=f"cells[{index}].experiment_manifest",
+                actual=manifest.get("converged"),
+            )
+        )
+    return cell, survived, failures
+
+
+def gate_sweep_artifact() -> GateResult:
+    claims, claim_failures = _load_claim_ledger()
+    failures: list[dict[str, object]] = []
+    if not claims and claim_failures:
+        failures.extend(claim_failures)
+    headline_claims = [
+        claim
+        for claim in claims
+        if claim.get("type") in {"computational", "counterfactual"}
+        and claim.get("headline") is True
+    ]
+    if not headline_claims:
+        return GateResult(
+            ok=not failures,
+            details={"status": "no_headline_modeling_claims", "claim_count": 0, "failures": failures},
+        )
+    spec, spec_path, lock, spec_failures = _active_experiment_spec()
+    failures.extend(spec_failures)
+    try:
+        expected_cells = enumerate_cells(spec) if spec is not None else []
+    except ValueError as exc:
+        failures.append(
+            _science_failure(
+                "locked_grid_not_enumerable",
+                subject=spec_path.as_posix() if spec_path is not None else "lock_a",
+                actual=str(exc),
+            )
+        )
+        expected_cells = []
+    expected_canonical = _canonical_cells(expected_cells)
+    criterion = spec.get("sweep_survival_criterion") if isinstance(spec, dict) else None
+    for index, claim in enumerate(headline_claims):
+        claim_id = str(claim.get("claim_id") or f"claims[{index}]")
+        path = Path("reports/models/sweeps") / f"{claim_id}.json"
+        payload, error = _load_json_file(path)
+        if error is not None or payload is None:
+            failures.append(
+                _science_failure("missing_sweep_artifact", subject=claim_id, expected=path.as_posix(), actual=error)
+            )
+            continue
+        if payload.get("schema_version") != SWEEP_ARTIFACT_SCHEMA_VERSION:
+            failures.append(
+                _science_failure(
+                    "invalid_sweep_artifact_schema",
+                    subject=claim_id,
+                    expected=SWEEP_ARTIFACT_SCHEMA_VERSION,
+                    actual=payload.get("schema_version"),
+                )
+            )
+        if payload.get("claim_id") != claim_id:
+            failures.append(
+                _science_failure("sweep_artifact_claim_mismatch", subject=claim_id, actual=payload.get("claim_id"))
+            )
+        bound_cells = payload.get("cells")
+        actual_cells: list[dict[str, object]] = []
+        computed_survival = 0
+        if isinstance(bound_cells, list):
+            for cell_index, entry in enumerate(bound_cells):
+                cell, survived, cell_failures = _sweep_cell_record(
+                    entry,
+                    subject=claim_id,
+                    index=cell_index,
+                    spec=spec,
+                )
+                failures.extend(cell_failures)
+                if cell is not None:
+                    actual_cells.append(cell)
+                if survived:
+                    computed_survival += 1
+        else:
+            failures.append(
+                _science_failure(
+                    "sweep_cells_not_list",
+                    subject=claim_id,
+                    actual=bound_cells,
+                )
+            )
+        actual_canonical = _canonical_cells(actual_cells)
+        if actual_canonical != expected_canonical:
+            failures.append(
+                _science_failure(
+                    "sweep_grid_coverage_mismatch",
+                    subject=claim_id,
+                    expected=expected_cells,
+                    actual=actual_cells,
+                )
+            )
+        asserted_survival = payload.get("survival_count")
+        if asserted_survival != computed_survival:
+            failures.append(
+                _science_failure(
+                    "sweep_survival_count_mismatch",
+                    subject=claim_id,
+                    expected=computed_survival,
+                    actual=asserted_survival,
+                )
+            )
+        if isinstance(criterion, (int, float)) and not isinstance(criterion, bool):
+            meets = (
+                computed_survival / len(expected_cells) >= float(criterion)
+                if float(criterion) <= 1 and expected_cells
+                else computed_survival >= float(criterion)
+            )
+            if not meets:
+                failures.append(
+                    _science_failure(
+                        "sweep_survival_criterion_not_met",
+                        subject=claim_id,
+                        expected=criterion,
+                        actual=computed_survival,
+                    )
+                )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "claim_count": len(headline_claims),
+            "locked_cell_count": len(expected_cells),
+            "active_lock_a_sha256": lock.get("body_sha256") if lock is not None else None,
+            "failures": failures,
+        },
+    )
+
+
+def _task_declared_input_paths(frontmatter: dict[str, object]) -> list[str]:
+    paths: list[str] = []
+    raw_inputs = frontmatter.get("inputs")
+    if isinstance(raw_inputs, list):
+        for entry in raw_inputs:
+            if isinstance(entry, str):
+                paths.append(entry)
+            elif isinstance(entry, dict):
+                for key in ("path", "manifest"):
+                    value = entry.get(key)
+                    if isinstance(value, str):
+                        paths.append(value)
+                        break
+    instances = frontmatter.get("instances")
+    if isinstance(instances, list):
+        paths.extend(value for value in instances if isinstance(value, str))
+    return paths
+
+
+def check_hybrid_interface_conformance(
+    repo: Path = Path("."),
+    *,
+    task_kind: str | None = None,
+) -> GateResult:
+    """Reusable full bridge seam check for task judging and M4 release assembly."""
+    repo = repo.resolve()
+    failures: list[dict[str, object]] = []
+    manifest_paths = sorted((repo / "contracts/instances").glob("*.json"))
+    bridge_paths: list[Path] = []
+    interface_schema = repo / "contracts/hybrid_interface_v1.yaml"
+    for disk_path in manifest_paths:
+        payload, error = _load_json_file(disk_path)
+        rel = disk_path.relative_to(repo)
+        if error is not None or payload is None:
+            failures.append(
+                _science_failure("invalid_instance_manifest_json", subject=rel.as_posix(), actual=error)
+            )
+            continue
+        if "source_processed_manifests" not in payload:
+            continue
+        bridge_paths.append(rel)
+        for issue in _schema_failures(payload, interface_schema):
+            failures.append(
+                _science_failure(
+                    "hybrid_interface_schema_violation",
+                    subject=rel.as_posix(),
+                    field=str(issue.get("path")),
+                    actual=issue,
+                )
+            )
+        sources = payload.get("source_processed_manifests")
+        if isinstance(sources, list):
+            for index, entry in enumerate(sources):
+                failures.extend(
+                    _verify_content_entry(
+                        entry,
+                        subject=rel.as_posix(),
+                        field=f"source_processed_manifests[{index}]",
+                        repo=repo,
+                        required_prefix="data/processed_manifest/",
+                    )
+                )
+        validations = payload.get("pre_bridge_validation")
+        if isinstance(validations, list):
+            for index, entry in enumerate(validations):
+                failures.extend(
+                    _verify_content_entry(
+                        entry,
+                        subject=rel.as_posix(),
+                        field=f"pre_bridge_validation[{index}]",
+                        repo=repo,
+                    )
+                )
+                validation_path = (
+                    _safe_repo_relative_path(entry.get("path"))
+                    if isinstance(entry, dict)
+                    else None
+                )
+                artifact_status = (
+                    _validation_artifact_status(repo / validation_path)
+                    if validation_path is not None and (repo / validation_path).is_file()
+                    else None
+                )
+                if artifact_status not in {"green", "ok", "passed"}:
+                    failures.append(
+                        _science_failure(
+                            "pre_bridge_validation_not_green",
+                            subject=rel.as_posix(),
+                            field=f"pre_bridge_validation[{index}]",
+                            expected="artifact content status green|ok|passed",
+                            actual=artifact_status,
+                        )
+                    )
+        outputs = payload.get("outputs")
+        if isinstance(outputs, list):
+            for index, entry in enumerate(outputs):
+                failures.extend(
+                    _verify_content_entry(
+                        entry,
+                        subject=rel.as_posix(),
+                        field=f"outputs[{index}]",
+                        repo=repo,
+                        require_bytes=True,
+                    )
+                )
+
+    try:
+        contract = load_framework_contract(repo)
+    except ValueError as exc:
+        failures.append(_science_failure("invalid_framework_contract", subject="contracts/framework.json", actual=str(exc)))
+        contract = None
+    if contract is not None and task_kind in {None, "model", "proof"}:
+        for folder_name in contract.projection_dirs:
+            folder = repo / ".orchestrator" / folder_name
+            if not folder.is_dir():
+                continue
+            for path in sorted(folder.glob("*.md")):
+                if path.name == "README.md":
+                    continue
+                frontmatter = _parse_task_frontmatter(_read_text(path))
+                if not isinstance(frontmatter, dict) or frontmatter.get("task_kind") not in {"model", "proof"}:
+                    continue
+                for raw_input in _task_declared_input_paths(frontmatter):
+                    candidate = _safe_repo_relative_path(raw_input)
+                    if candidate is None or not _path_matches_prefix(candidate.as_posix(), "contracts/instances/"):
+                        failures.append(
+                            _science_failure(
+                                "modeling_task_input_outside_instance_contract",
+                                subject=path.relative_to(repo).as_posix(),
+                                field="inputs",
+                                expected="contracts/instances/**",
+                                actual=raw_input,
+                            )
+                        )
+
+    lock_path = repo / PREREG_PHASE_FILES["lock_b"]
+    lock_b, error = load_prereg_lock(lock_path, expected_phase="lock_b")
+    if error is not None or lock_b is None:
+        failures.append(
+            _science_failure("invalid_lock_b_lock", subject=PREREG_PHASE_FILES["lock_b"], actual=error)
+        )
+        lock_b = None
+    active_lock_b = lock_b if lock_b is not None and lock_b.get("active") is True else None
+    if lock_b is not None and lock_b.get("status") == "locked" and active_lock_b is None:
+        failures.append(
+            _science_failure(
+                "lock_b_lock_hash_mismatch",
+                subject=PREREG_PHASE_FILES["lock_b"],
+                expected=lock_b.get("body_sha256"),
+                actual=lock_b.get("locked_sha256"),
+            )
+        )
+    if active_lock_b is not None:
+        bindings, binding_failures = _verify_lock_bindings(active_lock_b, phase="lock_b", repo=repo)
+        failures.extend(binding_failures)
+        bound_instances = {
+            path for path in bindings if _path_matches_prefix(path, "contracts/instances/")
+        }
+        actual_instances = {path.as_posix() for path in manifest_paths for path in [path.relative_to(repo)]}
+        if bound_instances != actual_instances:
+            failures.append(
+                _science_failure(
+                    "lock_b_instance_set_mismatch",
+                    subject=PREREG_PHASE_FILES["lock_b"],
+                    expected=sorted(actual_instances),
+                    actual=sorted(bound_instances),
+                )
+            )
+    elif lock_b is None and not bridge_paths:
+        failures = [failure for failure in failures if failure.get("reason") != "invalid_lock_b_lock"]
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_bridge_manifests" if not bridge_paths else "ok",
+            "bridge_manifest_count": len(bridge_paths),
+            "instance_manifest_count": len(manifest_paths),
+            "active_lock_b_sha256": active_lock_b.get("body_sha256") if active_lock_b is not None else None,
+            "task_kind": task_kind,
+            "failures": failures,
+        },
+    )
+
+
+def gate_hybrid_interface_conformance(*, task_kind: str | None = None) -> GateResult:
+    mode = _parse_project_mode(Path("contracts/project.yaml"))
+    if mode != "hybrid":
+        return GateResult(
+            ok=True,
+            details={"status": "mode_not_hybrid", "skipped": True, "mode": mode, "failures": []},
+        )
+    return check_hybrid_interface_conformance(Path("."), task_kind=task_kind)
+
+
+def _yaml_scalar(raw: str) -> object:
+    value = raw.strip()
+    if not value:
+        return ""
+    if value.startswith(("[", "{")):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            pass
+    if value.startswith('"') and value.endswith('"'):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            pass
+    value = value.strip("'\"")
+    lowered = value.lower()
+    if lowered in {"true", "yes"}:
+        return True
+    if lowered in {"false", "no"}:
+        return False
+    if lowered in {"null", "~"}:
+        return None
+    if re.fullmatch(r"[-+]?\d+", value):
+        return int(value)
+    if re.fullmatch(r"[-+]?(?:\d+\.\d*|\.\d+)", value):
+        return float(value)
+    return value
+
+
+def _parse_simple_yaml(text: str) -> object:
+    lines = [
+        (len(raw) - len(raw.lstrip(" ")), raw.strip())
+        for raw in text.splitlines()
+        if raw.strip() and not raw.lstrip().startswith("#")
+    ]
+
+    def parse_block(index: int, indent: int) -> tuple[object, int]:
+        is_list = index < len(lines) and lines[index][0] == indent and lines[index][1].startswith("- ")
+        container: object = [] if is_list else {}
+        while index < len(lines):
+            current_indent, content = lines[index]
+            if current_indent < indent:
+                break
+            if current_indent > indent:
+                raise ValueError(f"unexpected_yaml_indent:{index + 1}")
+            if is_list:
+                if not content.startswith("- "):
+                    break
+                remainder = content[2:].strip()
+                if not remainder:
+                    if index + 1 >= len(lines) or lines[index + 1][0] <= indent:
+                        value: object = None
+                        index += 1
+                    else:
+                        value, index = parse_block(index + 1, lines[index + 1][0])
+                    assert isinstance(container, list)
+                    container.append(value)
+                    continue
+                if ":" in remainder:
+                    key, raw_value = remainder.split(":", 1)
+                    item: dict[str, object] = {}
+                    item[key.strip()] = _yaml_scalar(raw_value) if raw_value.strip() else None
+                    index += 1
+                    while index < len(lines) and lines[index][0] > indent:
+                        child_indent, child = lines[index]
+                        if child.startswith("- ") or ":" not in child:
+                            break
+                        child_key, child_raw = child.split(":", 1)
+                        if child_raw.strip():
+                            item[child_key.strip()] = _yaml_scalar(child_raw)
+                            index += 1
+                        elif index + 1 < len(lines) and lines[index + 1][0] > child_indent:
+                            nested, index = parse_block(index + 1, lines[index + 1][0])
+                            item[child_key.strip()] = nested
+                        else:
+                            item[child_key.strip()] = None
+                            index += 1
+                    assert isinstance(container, list)
+                    container.append(item)
+                    continue
+                assert isinstance(container, list)
+                container.append(_yaml_scalar(remainder))
+                index += 1
+                continue
+            if content.startswith("- ") or ":" not in content:
+                break
+            key, raw_value = content.split(":", 1)
+            key = key.strip()
+            assert isinstance(container, dict)
+            if raw_value.strip():
+                container[key] = _yaml_scalar(raw_value)
+                index += 1
+            elif index + 1 < len(lines) and lines[index + 1][0] > indent:
+                nested, index = parse_block(index + 1, lines[index + 1][0])
+                container[key] = nested
+            else:
+                container[key] = None
+                index += 1
+        return container, index
+
+    if not lines:
+        return {}
+    payload, final_index = parse_block(0, lines[0][0])
+    if final_index != len(lines):
+        raise ValueError(f"yaml_parse_stopped_at:{final_index + 1}")
+    return payload
+
+
+def _load_venue_contract() -> tuple[dict[str, object] | None, str | None]:
+    path = Path("contracts/venue.yaml")
+    if not path.is_file():
+        return None, None
+    text = _read_text(path)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            payload = _parse_simple_yaml(text)
+        except ValueError as exc:
+            return None, str(exc)
+    if not isinstance(payload, dict):
+        return None, "venue_top_level_not_object"
+    return payload, None
+
+
+def _venue_number(venue: dict[str, object] | None, *keys: str) -> float | None:
+    if venue is None:
+        return None
+    candidates: list[object] = [venue.get(key) for key in keys]
+    limits = venue.get("limits")
+    if isinstance(limits, dict):
+        candidates.extend(limits.get(key) for key in keys)
+    for value in candidates:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def _manuscript_words(text: str) -> list[str]:
+    body = re.sub(r"\A---\s*\n.*?\n---\s*\n", "", text, flags=re.DOTALL)
+    body = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)
+    body = re.sub(r"\{[^{}]*\}|`([^`]*)`|\[@[^\]]+\]", r" \1 ", body)
+    return re.findall(r"\b[\w'-]+\b", body)
+
+
+def gate_render_qa() -> GateResult:
+    manuscript = Path("reports/paper/index.qmd")
+    if not manuscript.is_file():
+        return GateResult(
+            ok=True,
+            details={"status": "no_manuscript", "skipped": True, "failures": []},
+        )
+    text = _read_text(manuscript)
+    failures: list[dict[str, object]] = []
+    if re.search(r"\bFigure\s+Figure\b", text, flags=re.IGNORECASE):
+        failures.append(_science_failure("duplicate_figure_prefix", subject=manuscript.as_posix()))
+    if "??" in text:
+        failures.append(_science_failure("unresolved_question_mark_reference", subject=manuscript.as_posix()))
+
+    labels = set(re.findall(r"\{#([A-Za-z0-9:_-]+)\b", text))
+    bib_keys: set[str] = set()
+    for bib_path in (manuscript.parent / "references.bib", Path("references.bib")):
+        if bib_path.is_file():
+            bib_keys.update(re.findall(r"@\w+\s*[({]\s*([^,\s]+)\s*,", _read_text(bib_path)))
+    references = {
+        reference.rstrip(".,;:")
+        for reference in re.findall(r"(?<![\w@])@([A-Za-z][A-Za-z0-9:_.-]*)", text)
+    }
+    for reference in sorted(references - labels - bib_keys):
+        failures.append(
+            _science_failure("unresolved_source_reference", subject=manuscript.as_posix(), actual=reference)
+        )
+
+    include_pattern = re.compile(r"\{\{<\s*include\s+([^\s>]+)\s*>\}\}")
+    for raw_target in include_pattern.findall(text):
+        target = (manuscript.parent / raw_target.strip("'\"")).resolve()
+        if not target.is_file():
+            failures.append(
+                _science_failure("missing_include_target", subject=manuscript.as_posix(), actual=raw_target)
+            )
+
+    figure_pattern = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)(\{[^}]*\})?")
+    figures = figure_pattern.findall(text)
+    for index, (caption, raw_target, attributes) in enumerate(figures):
+        subject = f"{manuscript.as_posix()}:figure[{index}]"
+        if not caption.strip():
+            failures.append(_science_failure("figure_caption_missing", subject=subject))
+        if re.search(r"#fig-[A-Za-z0-9_-]+", attributes or "") is None:
+            failures.append(_science_failure("figure_label_missing", subject=subject))
+        target_text = raw_target.split(maxsplit=1)[0].strip("<>'\"")
+        if not (manuscript.parent / target_text).is_file():
+            failures.append(_science_failure("figure_target_missing", subject=subject, actual=target_text))
+
+    venue, venue_error = _load_venue_contract()
+    if venue_error is not None:
+        failures.append(_science_failure("invalid_venue_contract", subject="contracts/venue.yaml", actual=venue_error))
+        venue = None
+    word_count = len(_manuscript_words(text))
+    word_limit = _venue_number(venue, "word_limit", "max_words", "word_count")
+    if word_limit is not None and word_count > word_limit:
+        failures.append(
+            _science_failure("venue_word_limit_exceeded", subject=manuscript.as_posix(), expected=word_limit, actual=word_count)
+        )
+    words_per_page = _venue_number(venue, "words_per_page") or 500.0
+    page_count = math.ceil(word_count / words_per_page) if word_count else 0
+    page_limit = _venue_number(venue, "page_limit", "max_pages", "page_count")
+    if page_limit is not None and page_count > page_limit:
+        failures.append(
+            _science_failure("venue_page_limit_exceeded", subject=manuscript.as_posix(), expected=page_limit, actual=page_count)
+        )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "word_count": word_count,
+            "page_count_heuristic": page_count,
+            "figure_count": len(figures),
+            "failures": failures,
+        },
+    )
+
+
+def _overlap_paragraphs(text: str, min_words: int) -> list[str]:
+    paragraphs: list[str] = []
+    for raw in re.split(r"\n\s*\n", text):
+        if raw.lstrip().startswith(("#", "---", "```", "|")):
+            continue
+        normalized = " ".join(re.findall(r"\b[\w'-]+\b", raw.lower()))
+        if len(normalized.split()) >= min_words:
+            paragraphs.append(normalized)
+    return paragraphs
+
+
+def gate_text_overlap() -> GateResult:
+    manuscript = Path("reports/paper/index.qmd")
+    if not manuscript.is_file():
+        return GateResult(ok=True, details={"status": "no_manuscript", "skipped": True, "failures": []})
+    venue, venue_error = _load_venue_contract()
+    failures: list[dict[str, object]] = []
+    if venue_error is not None:
+        failures.append(_science_failure("invalid_venue_contract", subject="contracts/venue.yaml", actual=venue_error))
+        venue = None
+    overlap = venue.get("text_overlap") if isinstance(venue, dict) else None
+    max_ratio_value = overlap.get("max_ratio") if isinstance(overlap, dict) else None
+    min_words_value = overlap.get("min_words") if isinstance(overlap, dict) else None
+    max_ratio = float(max_ratio_value) if isinstance(max_ratio_value, (int, float)) else 0.85
+    min_words = int(min_words_value) if isinstance(min_words_value, int) and min_words_value > 0 else 30
+    paragraphs = _overlap_paragraphs(_read_text(manuscript), min_words)
+    seen: dict[str, int] = {}
+    for index, paragraph in enumerate(paragraphs):
+        if paragraph in seen:
+            failures.append(
+                _science_failure(
+                    "repeated_manuscript_paragraph",
+                    subject=manuscript.as_posix(),
+                    expected=seen[paragraph],
+                    actual=index,
+                )
+            )
+        else:
+            seen[paragraph] = index
+
+    corpus_root = Path("data/raw/literature")
+    corpus_paths = [
+        path
+        for path in sorted(corpus_root.rglob("*"))
+        if path.is_file() and path.suffix.lower() in {".txt", ".md", ".qmd", ".html"}
+    ] if corpus_root.is_dir() else []
+    max_observed = 0.0
+    for corpus_path in corpus_paths:
+        try:
+            corpus_text = _read_text(corpus_path)
+        except UnicodeDecodeError:
+            continue
+        corpus_paragraphs = _overlap_paragraphs(corpus_text, min_words)
+        for manuscript_index, paragraph in enumerate(paragraphs):
+            for corpus_index, candidate in enumerate(corpus_paragraphs):
+                ratio = difflib.SequenceMatcher(None, paragraph, candidate, autojunk=False).ratio()
+                max_observed = max(max_observed, ratio)
+                if ratio > max_ratio:
+                    failures.append(
+                        _science_failure(
+                            "literature_near_duplicate_span",
+                            subject=f"{manuscript.as_posix()}:paragraph[{manuscript_index}]",
+                            field=f"{corpus_path.as_posix()}:paragraph[{corpus_index}]",
+                            expected=f"<={max_ratio}",
+                            actual=round(ratio, 6),
+                        )
+                    )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "no_corpus" if not corpus_paths else "ok",
+            "corpus_file_count": len(corpus_paths),
+            "manuscript_paragraph_count": len(paragraphs),
+            "max_ratio": max_ratio,
+            "max_observed_ratio": round(max_observed, 6),
+            "failures": failures,
+        },
+    )
+
+
+def _derived_source_state(source: object) -> tuple[bool | None, str]:
+    if isinstance(source, str):
+        if source == "human_attested":
+            return None, source
+        gate_name = source.removeprefix("gate:")
+        gate_functions = {
+            "render_qa": gate_render_qa,
+            "text_overlap": gate_text_overlap,
+            "citation_integrity": gate_citation_integrity,
+            "instance_manifest_conformance": gate_instance_manifest_conformance,
+            "seed_budget_lock": gate_seed_budget_lock,
+            "gap_convergence": gate_gap_convergence,
+            "theoretical_falsification": gate_theoretical_falsification,
+            "sweep_artifact": gate_sweep_artifact,
+        }
+        if gate_name in gate_functions:
+            return gate_functions[gate_name]().ok, f"gate:{gate_name}"
+        path = _safe_repo_relative_path(source)
+        return (path.exists() if path is not None else False), source
+    if isinstance(source, dict):
+        if source.get("human_attested") is True:
+            return None, "human_attested"
+        if isinstance(source.get("gate"), str):
+            return _derived_source_state(f"gate:{source['gate']}")
+        path = _safe_repo_relative_path(source.get("path"))
+        if path is None or not path.exists():
+            return False, str(source.get("path"))
+        expected_sha = source.get("sha256")
+        if isinstance(expected_sha, str) and path.is_file():
+            actual_sha, _ = _sha256_and_bytes(path)
+            return actual_sha == expected_sha, path.as_posix()
+        return True, path.as_posix()
+    return False, repr(source)
+
+
+def gate_checklist_derivation() -> GateResult:
+    venue, error = _load_venue_contract()
+    if error is not None:
+        return GateResult(
+            ok=False,
+            details={"status": "invalid_venue", "failures": [_science_failure("invalid_venue_contract", subject="contracts/venue.yaml", actual=error)]},
+        )
+    if venue is None or "checklist" not in venue:
+        return GateResult(ok=True, details={"status": "no_checklist", "skipped": True, "failures": []})
+    checklist = venue.get("checklist")
+    failures: list[dict[str, object]] = []
+    if not isinstance(checklist, list):
+        failures.append(_science_failure("venue_checklist_not_list", subject="contracts/venue.yaml"))
+        checklist = []
+    human_attested = 0
+    for index, item in enumerate(checklist):
+        subject = f"contracts/venue.yaml:checklist[{index}]"
+        if not isinstance(item, dict):
+            failures.append(_science_failure("checklist_item_not_object", subject=subject))
+            continue
+        for field in ("question", "answer", "derived_from"):
+            if field not in item:
+                failures.append(_science_failure("checklist_field_missing", subject=subject, field=field))
+        source = item.get("derived_from")
+        sources = source if isinstance(source, list) else [source]
+        states = [_derived_source_state(entry) for entry in sources]
+        machine_states = [(state, label) for state, label in states if state is not None]
+        has_human_attestation = item.get("human_attested") is True or any(
+            state is None for state, _ in states
+        )
+        if has_human_attestation:
+            human_attested += 1
+        answer = item.get("answer")
+        affirmative = answer is True or (isinstance(answer, str) and answer.strip().lower() in {"yes", "true", "pass", "passed"})
+        if affirmative and machine_states and not all(
+            state is True for state, _ in machine_states
+        ):
+            failures.append(
+                _science_failure(
+                    "checklist_answer_not_supported",
+                    subject=subject,
+                    field="derived_from",
+                    expected="all machine-derivable sources present/green",
+                    actual=[{"source": label, "state": state} for state, label in states],
+                )
+            )
+        elif affirmative and not machine_states and not has_human_attestation:
+            failures.append(
+                _science_failure(
+                    "checklist_answer_not_supported",
+                    subject=subject,
+                    field="derived_from",
+                    expected="machine derivation or human_attested",
+                    actual=[{"source": label, "state": state} for state, label in states],
+                )
+            )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "ok",
+            "item_count": len(checklist),
+            "human_attested_count": human_attested,
+            "failures": failures,
+        },
+    )
+
+
+_CORE_GATE_NAMES = (
+    "framework_contract",
+    "repo_structure",
+    "project_contract",
+    "protocol_complete",
+    "workstreams_complete",
+    "task_hygiene",
+    "task_dependencies",
+    "integration_ready_policy",
+    "operator_surface_ownership",
+    "raw_manifest_validity",
+    "processed_manifest_validity",
+    "swarm_run_manifest_validity",
+    "judge_review_log_validity",
+    "review_bundle_integrity",
+    "processed_manifest_hashes",
+    "raw_manifest_hashes",
+    "validation_report_content_binding",
+    "projection_drift",
+    "historical_exemptions",
+    "network_strings",
+    "task_lint",
+    "prereg_lock_coverage",
+)
+_MODE_INDEPENDENT_SCIENCE_GATES = (
+    "citation_integrity",
+    "rigor_sections",
+    "amendment_exploratory_tagging",
+    "headline_confirmatory",
+    "render_qa",
+    "text_overlap",
+    "checklist_derivation",
+)
+_EMPIRICAL_SCIENCE_GATES = (
+    "prereg_conformance",
+    "claim_evidence_ledger",
+    "etl_decision_log",
+)
+_MODELING_SCIENCE_GATES = (
+    "prereg_conformance",
+    "claim_evidence_ledger",
+    "etl_decision_log",
+    "instance_manifest_conformance",
+    "seed_budget_lock",
+    "gap_convergence",
+    "theoretical_falsification",
+    "sweep_artifact",
+)
+_ALL_GATE_NAMES = _CORE_GATE_NAMES + (
+    "prereg_conformance",
+    "claim_evidence_ledger",
+    "citation_integrity",
+    "etl_decision_log",
+    "rigor_sections",
+    "instance_manifest_conformance",
+    "seed_budget_lock",
+    "gap_convergence",
+    "theoretical_falsification",
+    "sweep_artifact",
+    "hybrid_interface_conformance",
+    "amendment_exploratory_tagging",
+    "headline_confirmatory",
+    "render_qa",
+    "text_overlap",
+    "checklist_derivation",
+)
+
+
+def _active_gates(mode: str, task_kind: str | None = None) -> tuple[str, ...]:
+    """Select the §5.2 gate form for a project mode and optional task kind."""
+    active = set(_CORE_GATE_NAMES) | set(_MODE_INDEPENDENT_SCIENCE_GATES)
+    if mode == "empirical":
+        active.update(_EMPIRICAL_SCIENCE_GATES)
+    elif mode == "modeling":
+        active.update(_MODELING_SCIENCE_GATES)
+    elif mode == "hybrid":
+        if task_kind in {"etl", "analysis", "validation"}:
+            active.update(_EMPIRICAL_SCIENCE_GATES)
+        elif task_kind in {"model", "proof"}:
+            active.update(_MODELING_SCIENCE_GATES)
+        elif task_kind == "bridge":
+            active.update({"etl_decision_log", "hybrid_interface_conformance"})
+        elif task_kind in {"lit_review", "ops", "integrity_audit", "repair"}:
+            pass
+        else:
+            active.update(_EMPIRICAL_SCIENCE_GATES)
+            active.update(_MODELING_SCIENCE_GATES)
+            active.add("hybrid_interface_conformance")
+    return tuple(name for name in _ALL_GATE_NAMES if name in active)
+
+
+def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResult]:
+    mode = _parse_project_mode(Path("contracts/project.yaml")) or "empirical"
+    active = set(_active_gates(mode, task_kind))
+    functions = {
+        "framework_contract": gate_framework_contract,
+        "repo_structure": gate_repo_structure,
+        "project_contract": gate_project_contract,
+        "protocol_complete": gate_protocol_complete,
+        "workstreams_complete": gate_workstreams_complete,
+        "task_hygiene": gate_task_hygiene,
+        "task_dependencies": gate_task_dependencies,
+        "integration_ready_policy": gate_integration_ready_policy,
+        "operator_surface_ownership": gate_operator_surface_ownership,
+        "raw_manifest_validity": gate_raw_manifest_validity,
+        "processed_manifest_validity": gate_processed_manifest_validity,
+        "swarm_run_manifest_validity": gate_swarm_run_manifest_validity,
+        "judge_review_log_validity": gate_judge_review_log_validity,
+        "review_bundle_integrity": gate_review_bundle_integrity,
+        "processed_manifest_hashes": gate_processed_manifest_hashes,
+        "raw_manifest_hashes": gate_raw_manifest_hashes,
+        "validation_report_content_binding": gate_validation_report_content_binding,
+        "projection_drift": gate_projection_drift,
+        "historical_exemptions": gate_historical_exemptions,
+        "network_strings": gate_network_strings,
+        "task_lint": gate_task_lint,
+        "prereg_lock_coverage": gate_prereg_lock_coverage,
+        "claim_evidence_ledger": gate_claim_evidence_ledger,
+        "citation_integrity": gate_citation_integrity,
+        "rigor_sections": gate_rigor_sections,
+        "instance_manifest_conformance": gate_instance_manifest_conformance,
+        "seed_budget_lock": gate_seed_budget_lock,
+        "gap_convergence": gate_gap_convergence,
+        "theoretical_falsification": gate_theoretical_falsification,
+        "sweep_artifact": gate_sweep_artifact,
+        "amendment_exploratory_tagging": gate_amendment_exploratory_tagging,
+        "headline_confirmatory": gate_headline_confirmatory,
+        "render_qa": gate_render_qa,
+        "text_overlap": gate_text_overlap,
+        "checklist_derivation": gate_checklist_derivation,
+    }
+    results: dict[str, GateResult] = {}
+    for name in _ALL_GATE_NAMES:
+        if name not in active:
+            results[name] = GateResult(
+                ok=True,
+                details={
+                    "status": "inactive_for_mode",
+                    "skipped": True,
+                    "mode": mode,
+                    "task_kind": task_kind,
+                    "failures": [],
+                },
+            )
+        elif name == "prereg_conformance":
+            form = None
+            if mode == "hybrid":
+                if task_kind in {"etl", "analysis", "validation"}:
+                    form = "empirical"
+                elif task_kind in {"model", "proof"}:
+                    form = "modeling"
+            results[name] = gate_prereg_conformance(form=form)
+        elif name == "etl_decision_log":
+            form = None
+            if mode == "hybrid":
+                if task_kind in {"etl", "analysis", "validation"}:
+                    form = "empirical"
+                elif task_kind in {"model", "proof", "bridge"}:
+                    form = "modeling"
+            results[name] = gate_etl_decision_log(form=form)
+        elif name == "hybrid_interface_conformance":
+            results[name] = gate_hybrid_interface_conformance(task_kind=task_kind)
+        else:
+            results[name] = functions[name]()
+    return results
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="quality_gates.py")
+    # allow_abbrev=False so a gate command cannot smuggle the kernel-injected
+    # --task-kind via a unique prefix like --task-k (verification-pass bypass).
+    parser = argparse.ArgumentParser(prog="quality_gates.py", allow_abbrev=False)
     parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    parser.add_argument(
+        "--task-kind",
+        choices=["etl", "analysis", "validation", "writing", "lit_review", "model", "proof", "bridge", "ops", "integrity_audit", "repair"],
+        help="Apply hybrid composition at one task-kind boundary; omitted means writing/release union",
+    )
     args = parser.parse_args(argv)
 
-    results = _collect_gate_results()
+    results = _collect_gate_results(task_kind=args.task_kind)
     overall_ok = all(result.ok for result in results.values())
 
     if args.json:

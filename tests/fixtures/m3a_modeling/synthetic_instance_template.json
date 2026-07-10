@@ -1,0 +1,17 @@
+{
+  "schema_version": "research_swarm.instance_manifest.v1",
+  "instance_id": "toy",
+  "generator_command": "python scripts/generate_toy.py",
+  "parameter_ranges": {
+    "alpha": [1, 2]
+  },
+  "seeds": [11, 12],
+  "git_sha": "abcdef0",
+  "outputs": [
+    {
+      "path": "reports/models/toy_instance.txt",
+      "sha256": "__OUTPUT_SHA256__",
+      "bytes": "__OUTPUT_BYTES__"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": "research_swarm.experiment_spec.v1",
+  "grid": {
+    "dimensions": {
+      "alpha": [1, 2]
+    }
+  },
+  "seeds": [11, 12],
+  "solver": {
+    "name": "toy",
+    "version": "1"
+  },
+  "budget": [100, 200],
+  "convergence_tolerance": 0.001,
+  "sweep_survival_criterion": 0.5
+}

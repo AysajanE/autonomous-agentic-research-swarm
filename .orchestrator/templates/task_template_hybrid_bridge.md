@@ -26,7 +26,7 @@ disallowed_paths:
   - ".orchestrator/workstreams.md"
 outputs:
   - "src/model/<instance_generator_script>.py"
-  - "contracts/instances/<instance_set>/manifest.yaml"
+  - "contracts/instances/<instance_id>.json"
 gates:
   - "make gate"
 stop_conditions:
@@ -58,12 +58,12 @@ Define the contract boundary between empirical artifacts and modeling inputs. Do
   - `src/model/<instance_generator_script>.py`
   - `python src/model/<instance_generator_script>.py --in ... --out ...`
 - Output instance manifest:
-  - `contracts/instances/<instance_set>/manifest.yaml`
+  - `contracts/instances/<instance_id>.json`
 
 ## Outputs
 
 - deterministic instance-generator code
-- an instance-set manifest with explicit source manifests, generator command, git SHA, and output paths
+- a bridge instance manifest with content-bound source manifests, generator command, generation time, content-bound outputs, and green pre-bridge validation records
 - optional bridge report under `reports/models/`
 
 ## Success Criteria

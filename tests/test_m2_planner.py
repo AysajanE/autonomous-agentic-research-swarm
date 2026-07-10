@@ -51,6 +51,30 @@ def _fixture_root(root: Path):
         yield
 
 
+def _activate_analysis_lock(root: Path) -> None:
+    path = root / "docs/prereg/analysis_plan.lock.md"
+    lock, error = swarm.load_prereg_lock(path, expected_phase="2b")
+    assert error is None and lock is not None
+    path.write_text(
+        "\n".join(
+            [
+                "---",
+                "schema_version: research_swarm.prereg_lock.v1",
+                "phase: 2b",
+                "status: locked",
+                "locked_at_utc: 2026-07-10T12:00:00Z",
+                f"locked_sha256: {lock['body_sha256']}",
+                "locked_by: Test Owner",
+                "lock_version: 1",
+                "---",
+                "",
+            ]
+        )
+        + str(lock["body"]),
+        encoding="utf-8",
+    )
+
+
 def _planner_args(*, backend: str = "mock", no_push: bool = True) -> argparse.Namespace:
     return argparse.Namespace(
         planner_backend=backend,
@@ -248,6 +272,7 @@ class M2PlannerTests(unittest.TestCase):
     def test_valid_backlog_proposal_is_committed_linted_and_claimable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._root(tmp)
+            _activate_analysis_lock(root)
             content = _render_task(root, "T902")
             init_git_fixture_repo(root)
 
@@ -343,6 +368,7 @@ class M2PlannerTests(unittest.TestCase):
     def test_plan_program_requires_approval_and_tick_unblocks_after_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._root(tmp)
+            _activate_analysis_lock(root)
             first = _render_task(root, "T905")
             second = _render_task(root, "T906")
             # a valid planner update PRESERVES the existing workstreams
@@ -418,6 +444,7 @@ class M2PlannerTests(unittest.TestCase):
     def test_triage_confirm_makes_l_task_claimable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._root(tmp)
+            _activate_analysis_lock(root)
             task_path = write_task(
                 root,
                 "backlog",
@@ -512,6 +539,7 @@ class M2PlannerTests(unittest.TestCase):
     def test_heuristic_multi_input_etl_and_many_outputs_require_triage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._root(tmp)
+            _activate_analysis_lock(root)
             anchor = write_task(
                 root,
                 "backlog",
@@ -779,6 +807,9 @@ class M2PlannerTests(unittest.TestCase):
                 )
                 if filled:
                     task.write_text(_with_recon(task.read_text()), encoding="utf-8")
+                # An analysis task requires an active 2b lock to claim (§6.1);
+                # activate it so this test isolates the recon-promotion behavior.
+                _activate_analysis_lock(root)
                 _write_mock_executor(root, task_id)
                 init_git_fixture_repo(root)
 

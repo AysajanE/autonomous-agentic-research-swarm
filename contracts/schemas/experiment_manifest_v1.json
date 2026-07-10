@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "research_swarm.experiment_manifest.v1.schema",
+  "title": "Experiment execution manifest v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "instance_id",
+    "seed",
+    "budget",
+    "solver",
+    "solver_version",
+    "converged",
+    "outputs"
+  ],
+  "properties": {
+    "schema_version": {"const": "research_swarm.experiment_manifest.v1"},
+    "experiment_id": {"type": "string", "minLength": 1},
+    "instance_id": {"type": "string", "minLength": 1},
+    "seed": {"type": "integer"},
+    "budget": {"type": "number", "exclusiveMinimum": 0},
+    "solver": {"type": "string", "minLength": 1},
+    "solver_version": {"type": "string", "minLength": 1},
+    "optimality_gap": {"type": "number", "minimum": 0},
+    "converged": {"type": "boolean"},
+    "outputs": {"type": ["array", "object"]}
+  }
+}

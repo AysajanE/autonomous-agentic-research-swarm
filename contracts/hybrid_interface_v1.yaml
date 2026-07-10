@@ -1,67 +1,16 @@
-version: 1
-interface_id: empirical_to_modeling_v1
-status: contract_ready_not_battle_tested
-current_project_mode: empirical
-
-purpose:
-  - "Provide the only allowed empirical-to-modeling boundary for this repo."
-  - "Prevent modeling tasks from consuming ad hoc empirical CSV paths."
-
-policies:
-  modeling_may_consume_only:
-    - "contracts/instances/<instance_set>/manifest.yaml"
-  modeling_may_not_consume_directly:
-    - "data/raw/**"
-    - "data/processed/**"
-    - "data/processed_manifest/**"
-  integration_ready_allowed_for_bridge_tasks: true
-  required_downstream_allowlist_field: "integration_ready_dependencies"
-
-empirical_exports:
-  - dataset_id: daily_rollup_panel
-    description: "Canonical daily rollup panel with growthepie denominators and authoritative on-chain rent."
-    processed_manifest_pattern: "data/processed_manifest/daily_rollup_panel_<YYYY-MM-DD>.json"
-    data_path: "data/processed/panels/daily_rollup_panel.csv"
-    required_fields:
-      - "date_utc"
-      - "rollup_id"
-      - "l2_fees_eth"
-      - "rent_paid_eth"
-  - dataset_id: daily_l1_rent_decomposition
-    description: "Authoritative daily Ethereum L1 rent decomposition."
-    processed_manifest_pattern: "data/processed_manifest/daily_l1_rent_decomposition_<YYYY-MM-DD>.json"
-    data_path: "data/processed/l1_rent/daily_l1_rent_decomposition.csv"
-    required_fields:
-      - "date_utc"
-      - "l1_base_fee_burn_eth"
-      - "l1_blob_fee_burn_eth"
-      - "l1_priority_fee_eth"
-      - "l1_total_rent_eth"
-
-bridge_requirements:
-  allowed_task_kind: bridge
-  generator_script_path_pattern: "src/model/<instance_generator_script>.py"
-  instance_manifest_root: "contracts/instances/"
-  instance_manifest_format: "yaml"
-  required_instance_manifest_fields:
-    - "instance_set_id"
-    - "source_processed_manifests"
-    - "generator_command"
-    - "git_sha"
-    - "generated_at_utc"
-    - "outputs"
-  required_source_metadata:
-    - "as_of_utc_date"
-    - "inputs"
-    - "transform"
-
-validation_requirements:
-  required_empirical_validation_artifacts:
-    - "reports/validation/rollup_panel_validation.json"
-    - "reports/validation/l1_rent_decomposition_validation.json"
-    - "reports/validation/cross_source_reconciliation.json"
-  gate_command: "make gate"
-
-notes:
-  - "Current project mode remains empirical until the empirical end-to-end release is accepted."
-  - "Future hybrid tasks must update this contract through W0 review before widening the interface."
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "research_swarm.hybrid_interface.v1",
+  "title": "Executable empirical-to-modeling bridge interface",
+  "description": "A bridge-generated instance manifest plus generation-time empirical validation evidence.",
+  "allOf": [
+    {
+      "$ref": "schemas/instance_manifest_v1.json#/$defs/bridge"
+    },
+    {
+      "required": [
+        "pre_bridge_validation"
+      ]
+    }
+  ]
+}

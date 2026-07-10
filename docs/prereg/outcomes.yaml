@@ -1,0 +1,5 @@
+{
+  "schema_version": "research_swarm.prereg_outcomes.v1",
+  "description": "Terminal outcomes for hypotheses in the active analysis-plan lock.",
+  "outcomes": []
+}

@@ -261,6 +261,7 @@ class GoldenM0Test(unittest.TestCase):
             )
             stale_bytes = stale_path.read_bytes()
             stale_sha256 = hashlib.sha256(stale_bytes).hexdigest()
+            repo.git("add", "-A")
             output.write_text("date,value\n2026-07-09,2\n", encoding="utf-8")
 
             with chdir(repo.root):

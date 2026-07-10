@@ -104,6 +104,18 @@ Describe why this task exists and which stage of the artifact DAG it advances.
 - Planner and Operator handle folder moves via sweep or `git mv`.
 - `integration_ready` may be used only for interface/export tasks named in downstream `integration_ready_dependencies`.
 
+## Evidence table
+
+For `analysis` and `writing` tasks, replace this instruction with a table that maps each reported result to its committed evidence surface. Other task kinds may leave the instruction intact.
+
+## Alternative explanations considered
+
+For `analysis` and `writing` tasks, replace this instruction with the alternatives evaluated or retained for substantive review. Other task kinds may leave the instruction intact.
+
+## Uncertainty statement
+
+For `analysis` and `writing` tasks, replace this instruction with the scope and uncertainty attached to the task's results. Other task kinds may leave the instruction intact.
+
 ## Status
 
 - State: backlog
