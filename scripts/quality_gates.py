@@ -3875,16 +3875,21 @@ def gate_claim_evidence_ledger() -> GateResult:
                 command_tokens = normalized_command.split()
             # Self-referential by parsed semantics, not three literal strings:
             # any `make gate` target or any invocation of the gate runner itself
-            # (with or without flags like --json/--gate, and with the path in any
-            # spelling such as ./scripts/quality_gates.py) cannot be a claim's
-            # independent verification.
+            # cannot be a claim's independent verification — regardless of flags
+            # (--json), path spelling (./ or quoted), OR interpreter options
+            # before the script (python -B/-u/-- scripts/quality_gates.py). The
+            # script operand is the first non-option token, matching
+            # gate_command_violation's own operand rule.
+            script_operand: str | None = None
+            if command_tokens and command_tokens[0] in {"python", "python3"}:
+                for token in command_tokens[1:]:
+                    if token.startswith("-"):
+                        continue
+                    script_operand = os.path.normpath(token)
+                    break
             is_self_referential = (
                 command_tokens[:2] == ["make", "gate"]
-                or (
-                    len(command_tokens) >= 2
-                    and command_tokens[0] in {"python", "python3"}
-                    and os.path.normpath(command_tokens[1]) == "scripts/quality_gates.py"
-                )
+                or script_operand == "scripts/quality_gates.py"
             )
             if is_self_referential:
                 failures.append(
@@ -4145,9 +4150,10 @@ _REPORTABLE_UNIT_RE = re.compile(
     r"\s*%(?!\w)"
     r"|\s*-?\s*(?:ETH|USD|EUR|GBP|bps?|basis\s+points?|x)\b"
     # count/time nouns tolerate ONE optional descriptor word ("12,563
-    # rent-component rows", "7 consecutive days") so a reported quantity can't
-    # dodge the ledger by inserting an adjective between the number and the noun.
-    r"|\s+(?:[A-Za-z][\w-]*\s+)?(?:rollup-days?|rollups?|observations?|rows?|dates?|"
+    # rent-component rows", "7 consecutive days") and a hyphen boundary
+    # ("14-day") so a reported quantity can't dodge the ledger by inserting an
+    # adjective or a hyphen between the number and the noun.
+    r"|[\s-]+(?:[A-Za-z][\w-]*[\s-]+)?(?:rollup-days?|rollups?|observations?|rows?|dates?|"
     r"days?|weeks?|months?|years?|instances?|seeds?|runs?)\b"
     r")",
     flags=re.IGNORECASE,

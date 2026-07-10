@@ -119,6 +119,8 @@ class VerificationCommandSemanticsTest(unittest.TestCase):
             "python scripts/quality_gates.py --json",
             "python ./scripts/quality_gates.py --json",  # non-canonical path (R2-10)
             'python "scripts/quality_gates.py" --json',  # quoted path (R3 finding 6)
+            "python -B scripts/quality_gates.py --json",  # interpreter flag (R4 finding 2)
+            "python -- scripts/quality_gates.py",         # -- separator (R4 finding 2)
         ):
             with self.subTest(command=command), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp) / "repo"
