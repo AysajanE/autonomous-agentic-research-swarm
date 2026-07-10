@@ -1,0 +1,353 @@
+{
+  "schema_version": "responses_runner_v2.input_manifest.v1",
+  "manifest_id": "research_swarm_post_battletest_improvement.stage1",
+  "workflow_id": "research_swarm_post_battletest_improvement",
+  "stage_id": "diagnosis_and_evidence_lock",
+  "description": "Stage 1 is the broad diagnosis corpus. It attaches the framework contracts, control-plane docs, runtime scripts, task templates, modeling and hybrid contract surfaces, the operator retrospective, and the specific battle-test artifacts that reveal framework-wide strengths and failures. It intentionally excludes raw data, processed datasets, rendered paper binaries, broad status directories, and unrelated historical scaffolding so the stage sees the latest framework state and the actual battle-test evidence rather than a noisy dump of the whole empirical project.",
+  "primary_job_inputs": [
+    {
+      "path": "docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/corpus/mission_brief.md",
+      "kind": "file",
+      "notes": "authoritative statement of the improvement round and the general-framework scope"
+    },
+    {
+      "path": "docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/corpus/improvement_targets.md",
+      "kind": "file",
+      "notes": "authoritative list of framework-wide weaknesses to address and strengths to preserve"
+    },
+    {
+      "path": "docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/corpus/final_packet_contract.md",
+      "kind": "file",
+      "notes": "authoritative final-stage output contract"
+    }
+  ],
+  "reviewed_handoff_inputs": [],
+  "attached_repository_files": [
+    {
+      "path": "AGENTS.md",
+      "kind": "file",
+      "notes": "root operating manual for roles, state semantics, and execution-path separation"
+    },
+    {
+      "path": "README.md",
+      "kind": "file",
+      "notes": "framework-first repository overview and current evidence claims across empirical, modeling, and hybrid modes"
+    },
+    {
+      "path": "Makefile",
+      "kind": "file",
+      "notes": "current gate and test entrypoints used throughout the framework"
+    },
+    {
+      "path": ".orchestrator/workstreams.md",
+      "kind": "file",
+      "notes": "current path-ownership model, workstream boundaries, and W6/W7 scope"
+    },
+    {
+      "path": ".orchestrator/templates/task_template.md",
+      "kind": "file",
+      "notes": "default task contract template for routine work"
+    },
+    {
+      "path": ".orchestrator/templates/task_template_w0_protocol.md",
+      "kind": "file",
+      "notes": "protocol-contract task template"
+    },
+    {
+      "path": ".orchestrator/templates/task_template_w1_w2_etl.md",
+      "kind": "file",
+      "notes": "networked ETL task template"
+    },
+    {
+      "path": ".orchestrator/templates/task_template_w8_modeling.md",
+      "kind": "file",
+      "notes": "modeling task template"
+    },
+    {
+      "path": ".orchestrator/templates/task_template_hybrid_bridge.md",
+      "kind": "file",
+      "notes": "hybrid bridge task template"
+    },
+    {
+      "path": ".orchestrator/templates/handoff_template.md",
+      "kind": "file",
+      "notes": "downstream handoff-note template"
+    },
+    {
+      "path": ".orchestrator/templates/workstreams_template.md",
+      "kind": "file",
+      "notes": "template for workstream ownership design"
+    },
+    {
+      "path": "contracts/README.md",
+      "kind": "file",
+      "notes": "contract-surface overview and mutation rules"
+    },
+    {
+      "path": "contracts/framework.json",
+      "kind": "file",
+      "notes": "framework policy contract for roles, states, execution engines, and release policy"
+    },
+    {
+      "path": "contracts/project.yaml",
+      "kind": "file",
+      "notes": "current project-instance contract and battle-test artifact DAG"
+    },
+    {
+      "path": "contracts/data_dictionary.md",
+      "kind": "file",
+      "notes": "canonical empirical table definitions and audit-surface contracts"
+    },
+    {
+      "path": "contracts/decisions.md",
+      "kind": "file",
+      "notes": "decision log showing how result-affecting contract issues were handled during the battle test"
+    },
+    {
+      "path": "contracts/model_spec.md",
+      "kind": "file",
+      "notes": "current modeling specification surface, useful for judging generality beyond empirical mode"
+    },
+    {
+      "path": "contracts/hybrid_interface_v1.yaml",
+      "kind": "file",
+      "notes": "current empirical-to-modeling interface contract"
+    },
+    {
+      "path": "contracts/instances/README.md",
+      "kind": "file",
+      "notes": "current instance-manifest contract surface for modeling work"
+    },
+    {
+      "path": "contracts/experiments/README.md",
+      "kind": "file",
+      "notes": "current experiment-spec surface for modeling work"
+    },
+    {
+      "path": "contracts/experiments/exp_001.yaml",
+      "kind": "file",
+      "notes": "current modeling experiment template, useful for judging how mature the non-empirical path really is"
+    },
+    {
+      "path": "docs/protocol.md",
+      "kind": "file",
+      "notes": "empirical protocol contract, included as current evidence rather than as the redesign scope"
+    },
+    {
+      "path": "docs/runbook_swarm.md",
+      "kind": "file",
+      "notes": "manual swarm operating path and battle-test queue ordering"
+    },
+    {
+      "path": "docs/runbook_swarm_automation.md",
+      "kind": "file",
+      "notes": "automation runbook for the local swarm path and current human-loop behavior"
+    },
+    {
+      "path": "docs/empirical_battle_test_retrospective_2026-04-12.md",
+      "kind": "file",
+      "notes": "operator retrospective summarizing the battle test, its failure modes, and the next-round improvement pressure"
+    },
+    {
+      "path": "docs/prompts/planner.md",
+      "kind": "file",
+      "notes": "current Planner prompt, included to diagnose how much real planning it actually enforces"
+    },
+    {
+      "path": "docs/prompts/worker.md",
+      "kind": "file",
+      "notes": "current Worker prompt and execution contract"
+    },
+    {
+      "path": "docs/prompts/judge.md",
+      "kind": "file",
+      "notes": "current Judge prompt and review contract"
+    },
+    {
+      "path": "docs/prompts/operator.md",
+      "kind": "file",
+      "notes": "current Operator prompt and runtime-ownership contract"
+    },
+    {
+      "path": "scripts/swarm.py",
+      "kind": "file",
+      "notes": "live runtime supervisor implementation, including heuristic task selection, loop behavior, run-task, and deterministic Judge path"
+    },
+    {
+      "path": "scripts/quality_gates.py",
+      "kind": "file",
+      "notes": "live deterministic gate implementation and contract enforcement"
+    },
+    {
+      "path": "scripts/sweep_tasks.py",
+      "kind": "file",
+      "notes": "lifecycle-folder projection tool"
+    },
+    {
+      "path": "scripts/release_assembly.py",
+      "kind": "file",
+      "notes": "release assembly path for the current framework instance"
+    },
+    {
+      "path": ".orchestrator/done/T035_onchain_l1_rent_etl_and_decomposition.md",
+      "kind": "file",
+      "notes": "primary evidence of an oversized exploratory task that should have been decomposed earlier"
+    },
+    {
+      "path": ".orchestrator/done/T040_metrics_str_module_and_tests.md",
+      "kind": "file",
+      "notes": "example of a relatively well-bounded task contract"
+    },
+    {
+      "path": ".orchestrator/done/T048_lock_rent_paid_contract_and_vendor_benchmark_policy.md",
+      "kind": "file",
+      "notes": "evidence that contract conflicts surfaced late and required a W0 resolution task"
+    },
+    {
+      "path": ".orchestrator/done/T049_emit_rollup_day_rent_components_for_auditability.md",
+      "kind": "file",
+      "notes": "evidence of late component-audit decomposition and contract clarification pressure"
+    },
+    {
+      "path": ".orchestrator/done/T050_validation_str_pipeline_checks.md",
+      "kind": "file",
+      "notes": "validation firewall contract and the battle-test path that exposed substantive review boundaries"
+    },
+    {
+      "path": ".orchestrator/done/T051_lock_starknet_shared_settlement_attribution_contract.md",
+      "kind": "file",
+      "notes": "evidence of late protocol-contract repair driven by battle-test learning"
+    },
+    {
+      "path": ".orchestrator/done/T052_repair_starknet_shared_sharp_allocation_in_canonical_etl.md",
+      "kind": "file",
+      "notes": "evidence of late ETL repair after contract clarification"
+    },
+    {
+      "path": ".orchestrator/done/T060_analysis_str_figures_and_tables.md",
+      "kind": "file",
+      "notes": "evidence that W6 analysis was contracted as a minimal release bundle rather than as a scientific program"
+    },
+    {
+      "path": ".orchestrator/done/T070_quarto_paper_build.md",
+      "kind": "file",
+      "notes": "evidence that W7 writing was scoped as a thin downstream paper surface"
+    },
+    {
+      "path": ".orchestrator/done/T080_release_candidate_assembly.md",
+      "kind": "file",
+      "notes": "evidence of operator/manual repair, release assembly, and final contract drift"
+    },
+    {
+      "path": "reports/status/swarm_runs/T035_20260408T144706Z.json",
+      "kind": "file",
+      "notes": "final run manifest for the long T035 repair campaign"
+    },
+    {
+      "path": "reports/status/swarm_runs/T050_20260410T211117Z.json",
+      "kind": "file",
+      "notes": "validation-stage run manifest after contract and ETL repair"
+    },
+    {
+      "path": "reports/status/swarm_runs/T060_20260411T140930Z.json",
+      "kind": "file",
+      "notes": "analysis-stage run manifest showing manual completion and narrow scope"
+    },
+    {
+      "path": "reports/status/swarm_runs/T070_20260411T153246Z.json",
+      "kind": "file",
+      "notes": "paper-source run manifest showing runtime visibility and reconciliation issues"
+    },
+    {
+      "path": "reports/status/swarm_runs/T080_20260411T161258Z.json",
+      "kind": "file",
+      "notes": "release-stage run manifest showing operator direct completion after stalled execution"
+    },
+    {
+      "path": "reports/status/reviews/T050_20260410T211201Z.json",
+      "kind": "file",
+      "notes": "Judge approval log for the repaired validation firewall"
+    },
+    {
+      "path": "reports/status/reviews/T070_20260411T153559Z.json",
+      "kind": "file",
+      "notes": "Judge review log after operator/runtime reconciliation"
+    },
+    {
+      "path": "reports/status/reviews/T080_20260411T161630Z.json",
+      "kind": "file",
+      "notes": "Judge review log showing release-task placeholder drift and deterministic approval"
+    },
+    {
+      "path": "reports/validation/rollup_panel_validation.md",
+      "kind": "file",
+      "notes": "current validation-report style and substantive report surface"
+    },
+    {
+      "path": "reports/validation/cross_source_reconciliation.md",
+      "kind": "file",
+      "notes": "current cross-source reconciliation output and caveat style"
+    },
+    {
+      "path": "src/analysis/build_str_release_outputs.py",
+      "kind": "file",
+      "notes": "current W6 analysis builder that emits a minimal release bundle"
+    },
+    {
+      "path": "reports/paper/index.qmd",
+      "kind": "file",
+      "notes": "current W7 manuscript source, useful as evidence of writing-scope thinness"
+    },
+    {
+      "path": "reports/paper/references.bib",
+      "kind": "file",
+      "notes": "current bibliography surface for the working paper"
+    },
+    {
+      "path": "reports/status/releases/release_2026-04-11.json",
+      "kind": "file",
+      "notes": "release-manifest evidence of the current framework's provenance strengths"
+    },
+    {
+      "path": "src/model/README.md",
+      "kind": "file",
+      "notes": "current modeling code-surface guidance"
+    },
+    {
+      "path": "src/model/AGENTS.md",
+      "kind": "file",
+      "notes": "current modeling rules and validation expectations"
+    },
+    {
+      "path": "tests/README.md",
+      "kind": "file",
+      "notes": "repo-level test discipline and speed boundary"
+    },
+    {
+      "path": "tests/runtime_test_utils.py",
+      "kind": "file",
+      "notes": "runtime test scaffolding that reveals what the framework currently treats as enforceable contract"
+    },
+    {
+      "path": "tests/test_swarm_role_state_semantics.py",
+      "kind": "file",
+      "notes": "tests for role/state semantics and projection logic"
+    },
+    {
+      "path": "tests/test_quality_gates_integration_ready.py",
+      "kind": "file",
+      "notes": "tests for current integration-ready policy"
+    },
+    {
+      "path": "tests/test_quality_gates_judge_operator.py",
+      "kind": "file",
+      "notes": "tests for Judge and Operator ownership constraints"
+    },
+    {
+      "path": "tests/test_quality_gates_repo_structure.py",
+      "kind": "file",
+      "notes": "tests for current repo-structure contract"
+    }
+  ],
+  "reference_context": []
+}

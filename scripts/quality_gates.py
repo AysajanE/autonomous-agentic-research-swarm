@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -21,8 +23,22 @@ import sys
 from typing import Any
 
 
-SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v1"
-JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v1"
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from swarm_taskfile import parse_status_value as _parse_status_value
+from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
+from sweep_tasks import plan_sweep as _plan_sweep
+
+
+SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
+JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
+JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1 = "research_swarm.judge_review_log.v1"
+PROCESSED_MANIFEST_SCHEMA_VERSION = "research_swarm.processed_manifest.v2"
+MANIFEST_REBASELINE_SCHEMA_VERSION = "research_swarm.manifest_rebaseline.v1"
+VALIDATION_REPORT_SCHEMA_VERSION = "research_swarm.validation_report.v2"
 
 DEFAULT_ALLOWED_STATES = (
     "backlog",
@@ -256,67 +272,6 @@ def _parse_required_paths(value: object, mode: str | None) -> list[str]:
             out.extend(_coerce_str_list(value.get(mode)))
         return out
     return []
-
-
-def _parse_task_frontmatter(text: str) -> dict[str, object] | None:
-    lines = text.splitlines()
-    if len(lines) < 3 or lines[0].strip() != "---":
-        return None
-
-    end_idx = None
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            end_idx = index
-            break
-    if end_idx is None:
-        return None
-
-    data: dict[str, object] = {}
-    current_list_key: str | None = None
-    for raw_line in lines[1:end_idx]:
-        line = raw_line.split("#", 1)[0].rstrip()
-        if line.strip() == "":
-            continue
-
-        list_match = re.match(r"^\s*-\s+(.*)\s*$", line)
-        if current_list_key is not None and list_match is not None:
-            value = list_match.group(1).strip().strip("'\"")
-            current = data.get(current_list_key)
-            if isinstance(current, list):
-                current.append(value)
-            continue
-
-        current_list_key = None
-        if ":" not in line:
-            continue
-
-        key, rest = line.split(":", 1)
-        key = key.strip()
-        rest = rest.strip()
-
-        if rest == "":
-            data[key] = []
-            current_list_key = key
-            continue
-
-        if rest.startswith("[") and rest.endswith("]"):
-            inner = rest[1:-1].strip()
-            if inner == "":
-                data[key] = []
-            else:
-                data[key] = [item.strip().strip("'\"") for item in inner.split(",") if item.strip()]
-            continue
-
-        data[key] = rest.strip("'\"")
-
-    return data
-
-
-def _parse_status_value(text: str, field: str) -> str | None:
-    match = re.search(rf"^\s*-\s*{re.escape(field)}:\s*(.+?)\s*$", text, flags=re.MULTILINE)
-    if match is None:
-        return None
-    return match.group(1).strip()
 
 
 def load_framework_contract(repo: Path = Path(".")) -> FrameworkContract:
@@ -771,6 +726,483 @@ def _validate_required_keys(data: object, required_keys: set[str], prefix: str) 
     return failures
 
 
+HISTORICAL_EXEMPTIONS_PATH = Path("contracts/historical_exemptions.json")
+
+
+def _historical_exemption_entries(section: str) -> dict[str, dict[str, object]]:
+    """Path → entry map for one section of the hash-pinned historical
+    exemption list. Empty when the list (or section) is absent — absence
+    exempts nothing."""
+    if not HISTORICAL_EXEMPTIONS_PATH.exists():
+        return {}
+    payload, error = _load_json_file(HISTORICAL_EXEMPTIONS_PATH)
+    if error is not None or not isinstance(payload, dict):
+        return {}
+    out: dict[str, dict[str, object]] = {}
+    for item in payload.get(section, []):
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            out[item["path"]] = item
+    return out
+
+
+def _historical_exemption_hashes(section: str) -> dict[str, str]:
+    return {
+        path: entry["sha256"]
+        for path, entry in _historical_exemption_entries(section).items()
+        if isinstance(entry.get("sha256"), str)
+    }
+
+
+def _sha256_and_bytes(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _hash_claim_failure(
+    *,
+    manifest: Path,
+    path: object,
+    reason: str,
+    expected: object,
+    actual: object,
+) -> dict[str, object]:
+    return {
+        "manifest": manifest.as_posix(),
+        "path": path,
+        "reason": reason,
+        "expected": expected,
+        "actual": actual,
+    }
+
+
+def _verify_hash_claim(
+    *,
+    manifest: Path,
+    entry: object,
+    mismatch_reason: str | None = None,
+) -> list[dict[str, object]]:
+    if not isinstance(entry, dict):
+        return [
+            _hash_claim_failure(
+                manifest=manifest,
+                path=None,
+                reason="invalid_manifest",
+                expected="entry object with path, sha256, and bytes",
+                actual=entry,
+            )
+        ]
+
+    rel_path = entry.get("path")
+    expected_sha = entry.get("sha256")
+    expected_bytes = entry.get("bytes")
+    if (
+        not isinstance(rel_path, str)
+        or not rel_path
+        or not isinstance(expected_sha, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
+        or not isinstance(expected_bytes, int)
+        or isinstance(expected_bytes, bool)
+        or expected_bytes < 0
+    ):
+        return [
+            _hash_claim_failure(
+                manifest=manifest,
+                path=rel_path,
+                reason="invalid_manifest",
+                expected="path string, sha256 hex digest, and non-negative integer bytes",
+                actual=entry,
+            )
+        ]
+
+    disk_path = Path(rel_path)
+    expected = {"sha256": expected_sha, "bytes": expected_bytes}
+    if not disk_path.is_file():
+        return [
+            _hash_claim_failure(
+                manifest=manifest,
+                path=rel_path,
+                reason=mismatch_reason or "missing_file",
+                expected=expected,
+                actual=None,
+            )
+        ]
+
+    actual_sha, actual_bytes = _sha256_and_bytes(disk_path)
+    actual = {"sha256": actual_sha, "bytes": actual_bytes}
+    if mismatch_reason is not None:
+        if actual != expected:
+            return [
+                _hash_claim_failure(
+                    manifest=manifest,
+                    path=rel_path,
+                    reason=mismatch_reason,
+                    expected=expected,
+                    actual=actual,
+                )
+            ]
+        return []
+
+    failures: list[dict[str, object]] = []
+    if actual_sha != expected_sha:
+        failures.append(
+            _hash_claim_failure(
+                manifest=manifest,
+                path=rel_path,
+                reason="sha256_mismatch",
+                expected=expected_sha,
+                actual=actual_sha,
+            )
+        )
+    if actual_bytes != expected_bytes:
+        failures.append(
+            _hash_claim_failure(
+                manifest=manifest,
+                path=rel_path,
+                reason="bytes_mismatch",
+                expected=expected_bytes,
+                actual=actual_bytes,
+            )
+        )
+    return failures
+
+
+def _invalid_rebaseline_failure(
+    *,
+    manifest: Path,
+    sidecar: Path,
+    expected: object,
+    actual: object,
+) -> dict[str, object]:
+    return _hash_claim_failure(
+        manifest=manifest,
+        path=sidecar.as_posix(),
+        reason="invalid_rebaseline",
+        expected=expected,
+        actual=actual,
+    )
+
+
+def _manifest_hash_gate(
+    *,
+    manifest_dir: Path,
+    entries_key: str,
+    allow_raw_evidence_unavailable: bool,
+) -> GateResult:
+    if not manifest_dir.exists():
+        return GateResult(ok=False, details={"failures": [f"missing_dir:{manifest_dir}"]})
+
+    failures: list[dict[str, object]] = []
+    annotations: list[dict[str, object]] = []
+    checked_entries = 0
+    manifest_paths = sorted(manifest_dir.glob("*.json"))
+
+    for manifest_path in manifest_paths:
+        payload, error = _load_json_file(manifest_path)
+        if error is not None or payload is None:
+            failures.append(
+                _hash_claim_failure(
+                    manifest=manifest_path,
+                    path=manifest_path.as_posix(),
+                    reason="invalid_manifest",
+                    expected="JSON object",
+                    actual=error,
+                )
+            )
+            continue
+
+        entries = payload.get(entries_key)
+        if not isinstance(entries, list):
+            failures.append(
+                _hash_claim_failure(
+                    manifest=manifest_path,
+                    path=manifest_path.as_posix(),
+                    reason="invalid_manifest",
+                    expected=f"{entries_key} list",
+                    actual=entries,
+                )
+            )
+            continue
+
+        checked_entries += len(entries)
+        sidecar_path = manifest_dir / "rebaselines" / f"{manifest_path.name}.rebaseline.json"
+        if not sidecar_path.exists():
+            for entry in entries:
+                failures.extend(_verify_hash_claim(manifest=manifest_path, entry=entry))
+            continue
+
+        # A rebaseline is a one-time historical remediation, not a general
+        # mechanism: the sidecar is honored only when both the manifest and
+        # the sidecar itself are hash-pinned on the exemption list. Anything
+        # else gets direct verification — a new manifest cannot green itself
+        # by shipping its own sidecar.
+        exempted_sidecars = _historical_exemption_hashes("rebaselines")
+        sidecar_rel = sidecar_path.as_posix()
+        pinned_sidecar_sha = exempted_sidecars.get(sidecar_rel)
+        if pinned_sidecar_sha is None:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected="sidecar hash-pinned in contracts/historical_exemptions.json",
+                    actual="rebaseline_not_exempted",
+                )
+            )
+            for entry in entries:
+                failures.extend(_verify_hash_claim(manifest=manifest_path, entry=entry))
+            continue
+        actual_sidecar_sha, _ = _sha256_and_bytes(sidecar_path)
+        if actual_sidecar_sha != pinned_sidecar_sha:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected=pinned_sidecar_sha,
+                    actual=f"rebaseline_sidecar_drift:{actual_sidecar_sha}",
+                )
+            )
+            continue
+
+        sidecar, sidecar_error = _load_json_file(sidecar_path)
+        if sidecar_error is not None or sidecar is None:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected="valid rebaseline JSON object",
+                    actual=sidecar_error,
+                )
+            )
+            continue
+
+        required = {
+            "schema_version",
+            "rebaseline_of",
+            "original_manifest_sha256",
+            "mode",
+            "provenance_note",
+            "rebaselined_at_utc",
+        }
+        missing = sorted(required - set(sidecar))
+        expected_manifest_path = manifest_path.as_posix()
+        provenance_note = sidecar.get("provenance_note")
+        rebaselined_at = sidecar.get("rebaselined_at_utc")
+        common_errors: list[str] = []
+        if missing:
+            common_errors.append(f"missing_keys:{','.join(missing)}")
+        if sidecar.get("schema_version") != MANIFEST_REBASELINE_SCHEMA_VERSION:
+            common_errors.append("invalid_schema_version")
+        if sidecar.get("rebaseline_of") != expected_manifest_path:
+            common_errors.append("rebaseline_of_mismatch")
+        if not isinstance(provenance_note, str) or not provenance_note.strip():
+            common_errors.append("empty_provenance_note")
+        if not isinstance(rebaselined_at, str) or not rebaselined_at.strip():
+            common_errors.append("invalid_rebaselined_at_utc")
+
+        actual_manifest_sha, _ = _sha256_and_bytes(manifest_path)
+        if sidecar.get("original_manifest_sha256") != actual_manifest_sha:
+            common_errors.append("original_manifest_sha256_mismatch")
+
+        mode = sidecar.get("mode")
+        if mode not in {"recomputed_against_disk", "superseded", "raw_evidence_unavailable"}:
+            common_errors.append("invalid_mode")
+        if mode == "raw_evidence_unavailable" and not allow_raw_evidence_unavailable:
+            common_errors.append("raw_evidence_unavailable_not_allowed")
+
+        if common_errors:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected={
+                        "schema_version": MANIFEST_REBASELINE_SCHEMA_VERSION,
+                        "rebaseline_of": expected_manifest_path,
+                        "original_manifest_sha256": actual_manifest_sha,
+                    },
+                    actual={"errors": common_errors, "sidecar": sidecar},
+                )
+            )
+            continue
+
+        original_paths = {
+            entry.get("path")
+            for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+        }
+
+        if mode == "recomputed_against_disk":
+            rebaseline_entries = sidecar.get("entries")
+            if not isinstance(rebaseline_entries, list):
+                failures.append(
+                    _invalid_rebaseline_failure(
+                        manifest=manifest_path,
+                        sidecar=sidecar_path,
+                        expected="entries list for recomputed_against_disk",
+                        actual=rebaseline_entries,
+                    )
+                )
+                continue
+            rebaseline_paths = {
+                entry.get("path")
+                for entry in rebaseline_entries
+                if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+            }
+            if not original_paths.issubset(rebaseline_paths):
+                failures.append(
+                    _invalid_rebaseline_failure(
+                        manifest=manifest_path,
+                        sidecar=sidecar_path,
+                        expected={"paths_covering": sorted(original_paths)},
+                        actual={"paths": sorted(rebaseline_paths)},
+                    )
+                )
+                continue
+            stale_failures: list[dict[str, object]] = []
+            for entry in rebaseline_entries:
+                stale_failures.extend(
+                    _verify_hash_claim(
+                        manifest=manifest_path,
+                        entry=entry,
+                        mismatch_reason="rebaseline_stale",
+                    )
+                )
+            failures.extend(stale_failures)
+            if not stale_failures:
+                annotations.append(
+                    {
+                        "manifest": manifest_path.as_posix(),
+                        "mode": mode,
+                        "entries": len(rebaseline_entries),
+                    }
+                )
+            continue
+
+        if mode == "raw_evidence_unavailable":
+            unavailable_entries = sidecar.get("entries")
+            if unavailable_entries == "all":
+                unavailable_paths = original_paths
+            elif isinstance(unavailable_entries, list) and all(
+                isinstance(entry, dict) and isinstance(entry.get("path"), str)
+                for entry in unavailable_entries
+            ):
+                unavailable_paths = {entry["path"] for entry in unavailable_entries}
+            else:
+                failures.append(
+                    _invalid_rebaseline_failure(
+                        manifest=manifest_path,
+                        sidecar=sidecar_path,
+                        expected='entries "all" or list of path objects',
+                        actual=unavailable_entries,
+                    )
+                )
+                continue
+
+            annotated_entries = 0
+            for entry in entries:
+                entry_path = entry.get("path") if isinstance(entry, dict) else None
+                if entry_path in unavailable_paths:
+                    annotated_entries += 1
+                else:
+                    failures.extend(_verify_hash_claim(manifest=manifest_path, entry=entry))
+            if annotated_entries:
+                annotations.append(
+                    {
+                        "manifest": manifest_path.as_posix(),
+                        "mode": mode,
+                        "annotated": "raw_evidence_unavailable",
+                        "entries": annotated_entries,
+                    }
+                )
+            continue
+
+        superseded_by = sidecar.get("superseded_by")
+        if not isinstance(superseded_by, str) or not superseded_by:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected="non-empty superseded_by path",
+                    actual=superseded_by,
+                )
+            )
+            continue
+        superseding_path = Path(superseded_by)
+        superseding_payload, superseding_error = _load_json_file(superseding_path)
+        if superseding_error is not None or superseding_payload is None:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected="existing superseding manifest JSON object",
+                    actual={"path": superseded_by, "error": superseding_error},
+                )
+            )
+            continue
+        superseding_entries = superseding_payload.get(entries_key)
+        if not isinstance(superseding_entries, list):
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected=f"superseding manifest {entries_key} list",
+                    actual=superseding_entries,
+                )
+            )
+            continue
+        superseding_paths = {
+            entry.get("path")
+            for entry in superseding_entries
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+        }
+        if not original_paths.issubset(superseding_paths):
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected={"paths_covering": sorted(original_paths)},
+                    actual={"paths": sorted(superseding_paths)},
+                )
+            )
+            continue
+        stale_failures = []
+        for entry in superseding_entries:
+            stale_failures.extend(
+                _verify_hash_claim(
+                    manifest=manifest_path,
+                    entry=entry,
+                    mismatch_reason="superseding_manifest_stale",
+                )
+            )
+        failures.extend(stale_failures)
+        if not stale_failures:
+            annotations.append(
+                {
+                    "manifest": manifest_path.as_posix(),
+                    "mode": mode,
+                    "superseded_by": superseded_by,
+                }
+            )
+
+    # Rule-level diagnostics stay, volume stays bounded: a fully deleted raw
+    # layer must not turn every gate run into a 135k-entry dump.
+    max_failure_details = 50
+    return GateResult(
+        ok=len(failures) == 0,
+        details={
+            "count": len(manifest_paths),
+            "checked_entries": checked_entries,
+            "annotations": annotations,
+            "failure_count": len(failures),
+            "failures": failures[:max_failure_details],
+            "failures_truncated": max(0, len(failures) - max_failure_details),
+        },
+    )
+
+
 def _matching_task_jsons(directory: Path, task_id: str) -> list[Path]:
     if not directory.exists():
         return []
@@ -792,8 +1224,19 @@ def _validate_swarm_run_manifest(path: Path, contract: FrameworkContract) -> lis
         )
     )
 
-    if payload.get("schema_version") != SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version not in {
+        SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1,
+        SWARM_RUN_MANIFEST_SCHEMA_VERSION,
+    }:
         failures.append(f"{path}:invalid_schema_version:{payload.get('schema_version')}")
+    elif schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 and path.as_posix() not in _historical_exemption_entries("run_manifests"):
+        failures.append(f"{path}:unexempted_v1_schema")
+
+    if schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+        provenance_class = payload.get("provenance_class")
+        if provenance_class not in {"executor_run", "manual_operator", "backfill"}:
+            failures.append(f"{path}:invalid_provenance_class:{provenance_class}")
 
     task = payload.get("task")
     failures.extend(
@@ -826,9 +1269,12 @@ def _validate_swarm_run_manifest(path: Path, contract: FrameworkContract) -> lis
             failures.append(f"{path}:invalid_executor_role:{executor.get('role')}")
 
     commands = payload.get("commands")
+    command_keys = {"executor", "gates"}
+    if schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+        command_keys.update({"executor_log_path", "executor_log_sha256"})
     failures.extend(
         f"{path}:{failure}"
-        for failure in _validate_required_keys(commands, {"executor", "gates"}, "commands")
+        for failure in _validate_required_keys(commands, command_keys, "commands")
     )
 
     ownership = payload.get("ownership")
@@ -874,17 +1320,30 @@ def _validate_judge_review_log(path: Path, contract: FrameworkContract) -> list[
         )
     )
 
-    if payload.get("schema_version") != JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version not in {
+        JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1,
+        JUDGE_REVIEW_LOG_SCHEMA_VERSION,
+    }:
         failures.append(f"{path}:invalid_schema_version:{payload.get('schema_version')}")
+    elif schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1 and path.as_posix() not in _historical_exemption_entries("review_logs"):
+        failures.append(f"{path}:unexempted_v1_schema")
 
     reviewer = payload.get("reviewer")
+    reviewer_keys = {"role"}
+    if schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+        reviewer_keys.update({"session_id", "recorded_at_utc"})
     failures.extend(
         f"{path}:{failure}"
-        for failure in _validate_required_keys(reviewer, {"role"}, "reviewer")
+        for failure in _validate_required_keys(reviewer, reviewer_keys, "reviewer")
     )
     if isinstance(reviewer, dict):
         if reviewer.get("role") != contract.scientific_review_role:
             failures.append(f"{path}:invalid_reviewer_role:{reviewer.get('role')}")
+        if schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+            session_id = reviewer.get("session_id")
+            if not isinstance(session_id, str) or not session_id.strip():
+                failures.append(f"{path}:invalid_reviewer_session_id")
 
     task = payload.get("task")
     failures.extend(
@@ -1354,6 +1813,36 @@ def gate_processed_manifest_validity() -> GateResult:
             for failure in _validate_required_keys(transform, {"script_path", "git_sha", "command"}, "transform")
         )
 
+        if payload.get("schema_version") != PROCESSED_MANIFEST_SCHEMA_VERSION and path.as_posix() not in _historical_exemption_entries("processed_manifests"):
+            failures.append(f"{path}:unexempted_legacy_processed_manifest")
+
+        if payload.get("schema_version") == PROCESSED_MANIFEST_SCHEMA_VERSION:
+            failures.extend(
+                f"{path}:{failure}"
+                for failure in _validate_required_keys(
+                    transform,
+                    {"script_sha256", "dirty"},
+                    "transform",
+                )
+            )
+            if isinstance(transform, dict):
+                script_sha = transform.get("script_sha256")
+                if not isinstance(script_sha, str) or re.fullmatch(r"[0-9a-f]{64}", script_sha) is None:
+                    failures.append(f"{path}:transform:invalid_script_sha256")
+                dirty = transform.get("dirty")
+                if not isinstance(dirty, bool):
+                    failures.append(f"{path}:transform:dirty_not_boolean")
+                elif dirty and not isinstance(transform.get("tree_diff"), str):
+                    failures.append(f"{path}:transform:dirty_without_tree_diff")
+
+            environment = payload.get("environment")
+            failures.extend(
+                f"{path}:{failure}"
+                for failure in _validate_required_keys(environment, {"dependencies"}, "environment")
+            )
+            if isinstance(environment, dict) and not isinstance(environment.get("dependencies"), dict):
+                failures.append(f"{path}:environment:dependencies_not_object")
+
         outputs = payload.get("outputs")
         if not isinstance(outputs, list):
             failures.append(f"{path}:outputs_not_list")
@@ -1370,6 +1859,120 @@ def gate_processed_manifest_validity() -> GateResult:
                     failures.append(f"{path}:outputs[{index}]:invalid_sha256")
 
     return GateResult(ok=len(failures) == 0, details={"count": len(manifest_paths), "failures": failures})
+
+
+def gate_processed_manifest_hashes() -> GateResult:
+    return _manifest_hash_gate(
+        manifest_dir=Path("data/processed_manifest"),
+        entries_key="outputs",
+        allow_raw_evidence_unavailable=False,
+    )
+
+
+def gate_raw_manifest_hashes() -> GateResult:
+    return _manifest_hash_gate(
+        manifest_dir=Path("data/raw_manifest"),
+        entries_key="files",
+        allow_raw_evidence_unavailable=True,
+    )
+
+
+def gate_validation_report_content_binding() -> GateResult:
+    report_dir = Path("reports/validation")
+    if not report_dir.exists():
+        return GateResult(ok=True, details={"skipped": True, "reason": "validation_report_dir_missing"})
+
+    failures: list[dict[str, object]] = []
+    legacy_reports = 0
+    v2_reports = 0
+    checked_inputs = 0
+    report_paths = sorted(report_dir.glob("*.json"))
+    for report_path in report_paths:
+        payload, error = _load_json_file(report_path)
+        if error is not None or payload is None:
+            failures.append(
+                {
+                    "report": report_path.as_posix(),
+                    "path": report_path.as_posix(),
+                    "reason": "invalid_validation_report",
+                    "expected": "JSON object",
+                    "actual": error,
+                    "message": "validation report is date-bound to data that has drifted",
+                }
+            )
+            continue
+        if payload.get("schema_version") != VALIDATION_REPORT_SCHEMA_VERSION:
+            legacy_reports += 1
+            if report_path.as_posix() not in _historical_exemption_entries("validation_reports"):
+                failures.append(
+                    {
+                        "report": report_path.as_posix(),
+                        "path": report_path.as_posix(),
+                        "reason": "unexempted_legacy_validation_report",
+                        "expected": VALIDATION_REPORT_SCHEMA_VERSION,
+                        "actual": payload.get("schema_version"),
+                        "message": "legacy validation reports are accepted only from the hash-pinned historical exemption list",
+                    }
+                )
+            continue
+
+        v2_reports += 1
+        status = payload.get("status")
+        inputs_consumed = payload.get("inputs_consumed")
+        if status not in {"pass", "fail"}:
+            failures.append(
+                {
+                    "report": report_path.as_posix(),
+                    "path": report_path.as_posix(),
+                    "reason": "invalid_status",
+                    "expected": ["fail", "pass"],
+                    "actual": status,
+                    "message": "validation report is date-bound to data that has drifted",
+                }
+            )
+        if not isinstance(inputs_consumed, list) or not inputs_consumed:
+            failures.append(
+                {
+                    "report": report_path.as_posix(),
+                    "path": report_path.as_posix(),
+                    "reason": "invalid_inputs_consumed",
+                    "expected": "non-empty list of path, sha256, and bytes objects",
+                    "actual": inputs_consumed,
+                    "message": "validation report is date-bound to data that has drifted",
+                }
+            )
+            continue
+
+        checked_inputs += len(inputs_consumed)
+        for entry in inputs_consumed:
+            claim_failures = _verify_hash_claim(manifest=report_path, entry=entry)
+            for failure in claim_failures:
+                failure["report"] = failure.pop("manifest")
+                failure["message"] = "validation report is date-bound to data that has drifted"
+            failures.extend(claim_failures)
+
+    return GateResult(
+        ok=len(failures) == 0,
+        details={
+            "count": len(report_paths),
+            "v2_reports": v2_reports,
+            "legacy_reports": legacy_reports,
+            "checked_inputs": checked_inputs,
+            "failures": failures,
+        },
+    )
+
+
+def gate_projection_drift() -> GateResult:
+    moves, problems = _plan_sweep(Path(".").resolve())
+    serialized_moves = [
+        {"source": source.as_posix(), "target": target.as_posix()}
+        for source, target in moves
+    ]
+    return GateResult(
+        ok=not moves and not problems,
+        details={"moves": serialized_moves, "problems": problems},
+    )
 
 
 def gate_swarm_run_manifest_validity() -> GateResult:
@@ -1406,6 +2009,254 @@ def gate_judge_review_log_validity() -> GateResult:
         failures.extend(_validate_judge_review_log(path, contract))
 
     return GateResult(ok=len(failures) == 0, details={"count": len(review_paths), "failures": failures})
+
+
+HISTORICAL_EXEMPTIONS_SCHEMA_VERSION = "research_swarm.historical_exemptions.v1"
+PROVENANCE_ANNOTATION_SCHEMA_VERSION = "research_swarm.provenance_annotation.v1"
+VALID_PROVENANCE_CLASSES = {"executor_run", "manual_operator", "backfill"}
+
+
+def gate_historical_exemptions() -> GateResult:
+    """Gate-scoping rule (plan §4.0 remediation): strict checks apply to
+    schema_version >= 2 artifacts; v1 artifacts must sit on the checked-in,
+    hash-pinned exemption list, and every exempted run manifest must carry a
+    provenance annotation that still matches the untouched original."""
+    try:
+        contract = load_framework_contract()
+    except ValueError as exc:
+        return GateResult(ok=False, details={"failures": [str(exc)]})
+
+    failures: list[str] = []
+    exempted: dict[str, dict[str, str]] = {"run_manifests": {}, "review_logs": {}}
+    exemptions_path = Path("contracts/historical_exemptions.json")
+
+    if exemptions_path.exists():
+        payload, error = _load_json_file(exemptions_path)
+        if error is not None or not isinstance(payload, dict):
+            return GateResult(ok=False, details={"failures": [f"{exemptions_path}:{error}"]})
+        if payload.get("schema_version") != HISTORICAL_EXEMPTIONS_SCHEMA_VERSION:
+            failures.append(f"{exemptions_path}:invalid_schema_version")
+        for kind in ("run_manifests", "review_logs"):
+            for item in payload.get(kind, []):
+                if not isinstance(item, dict):
+                    failures.append(f"{exemptions_path}:{kind}:invalid_entry")
+                    continue
+                rel = item.get("path")
+                expected_sha = item.get("sha256")
+                if not isinstance(rel, str) or not isinstance(expected_sha, str):
+                    failures.append(f"{exemptions_path}:{kind}:invalid_entry:{rel}")
+                    continue
+                artifact = Path(rel)
+                if not artifact.is_file():
+                    failures.append(f"exemption_list_drift:missing_file:{rel}")
+                    continue
+                actual_sha, _ = _sha256_and_bytes(artifact)
+                if actual_sha != expected_sha:
+                    failures.append(f"exemption_list_drift:sha256_mismatch:{rel}")
+                    continue
+                exempted[kind][rel] = expected_sha
+
+    def sweep_v1(directory: Path, kind: str, v1_version: str) -> int:
+        count = 0
+        if not directory.exists():
+            return count
+        for path in sorted(directory.glob("*.json")):
+            payload, error = _load_json_file(path)
+            if error is not None or not isinstance(payload, dict):
+                continue  # shape gates own malformed artifacts
+            if payload.get("schema_version") != v1_version:
+                continue
+            count += 1
+            rel = path.as_posix()
+            if rel not in exempted[kind]:
+                failures.append(f"unexempted_v1_artifact:{rel}")
+        return count
+
+    v1_runs = sweep_v1(Path(contract.run_manifest_dir), "run_manifests", SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1)
+    v1_reviews = sweep_v1(Path(contract.judge_review_dir), "review_logs", JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1)
+
+    annotations_checked = 0
+    annotation_class_counts: dict[str, int] = {}
+    exempted_entries = _historical_exemption_entries("run_manifests")
+    for rel in sorted(exempted["run_manifests"]):
+        manifest_path = Path(rel)
+        annotation_path = manifest_path.parent / "annotations" / f"{manifest_path.name}.provenance.json"
+        if not annotation_path.is_file():
+            failures.append(f"provenance_annotation_missing:{rel}")
+            continue
+        annotation, error = _load_json_file(annotation_path)
+        if error is not None or not isinstance(annotation, dict):
+            failures.append(f"provenance_annotation_invalid:{rel}:{error}")
+            continue
+        annotations_checked += 1
+        if annotation.get("schema_version") != PROVENANCE_ANNOTATION_SCHEMA_VERSION:
+            failures.append(f"provenance_annotation_invalid:{rel}:schema_version")
+        if annotation.get("annotates") != rel:
+            failures.append(f"provenance_annotation_invalid:{rel}:annotates_mismatch")
+        annotation_class = annotation.get("provenance_class")
+        if annotation_class not in VALID_PROVENANCE_CLASSES:
+            failures.append(f"provenance_annotation_invalid:{rel}:provenance_class")
+        else:
+            annotation_class_counts[annotation_class] = annotation_class_counts.get(annotation_class, 0) + 1
+        annotated_sha = annotation.get("annotates_sha256")
+        if annotated_sha != exempted["run_manifests"][rel]:
+            failures.append(f"provenance_annotation_invalid:{rel}:annotates_sha256_mismatch")
+
+        # the annotation FILE is itself hash-pinned, and its class must agree
+        # with both the pinned class and a mechanical re-derivation from the
+        # manifest's own executor fields — labels are immutable, not editable.
+        entry = exempted_entries.get(rel, {})
+        pinned_annotation_sha = entry.get("annotation_sha256")
+        if isinstance(pinned_annotation_sha, str):
+            actual_annotation_sha, _ = _sha256_and_bytes(annotation_path)
+            if actual_annotation_sha != pinned_annotation_sha:
+                failures.append(f"provenance_annotation_invalid:{rel}:annotation_file_drift")
+        else:
+            failures.append(f"provenance_annotation_invalid:{rel}:annotation_not_pinned")
+        pinned_class = entry.get("provenance_class")
+        if pinned_class != annotation_class:
+            failures.append(f"provenance_annotation_invalid:{rel}:class_pin_mismatch")
+        manifest_payload, manifest_error = _load_json_file(manifest_path)
+        if manifest_error is None and isinstance(manifest_payload, dict):
+            executor = manifest_payload.get("executor") if isinstance(manifest_payload.get("executor"), dict) else {}
+            runner = executor.get("runner")
+            tool = executor.get("tool")
+            if runner == "legacy_backfill" or tool == "operator_backfill":
+                derived = "backfill"
+            elif tool == "codex":
+                derived = "executor_run"
+            elif tool == "manual":
+                derived = "manual_operator"
+            else:
+                derived = None
+            if derived is not None and derived != annotation_class:
+                failures.append(f"provenance_annotation_invalid:{rel}:class_derivation_mismatch:{derived}")
+
+    # the release amendment's per-class counts must agree with the annotations
+    release_dir = Path("reports/status/releases")
+    if annotation_class_counts and release_dir.exists():
+        for release_path in sorted(release_dir.glob("release_*.json")):
+            release_payload, release_error = _load_json_file(release_path)
+            if release_error is not None or not isinstance(release_payload, dict):
+                continue
+            for note in release_payload.get("notes", []):
+                if isinstance(note, dict) and note.get("type") == "raw_evidence_unavailable":
+                    recorded = note.get("provenance_class_run_counts")
+                    if recorded != annotation_class_counts:
+                        failures.append(
+                            f"release_amendment_count_mismatch:{release_path.name}:{recorded}!={annotation_class_counts}"
+                        )
+
+    return GateResult(
+        ok=len(failures) == 0,
+        details={
+            "exemptions_file": exemptions_path.exists(),
+            "exempted_run_manifests": len(exempted["run_manifests"]),
+            "exempted_review_logs": len(exempted["review_logs"]),
+            "v1_run_manifests": v1_runs,
+            "v1_review_logs": v1_reviews,
+            "annotations_checked": annotations_checked,
+            "failures": failures,
+        },
+    )
+
+
+def _parse_utc_iso(value: object) -> dt.datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _review_min_separation_seconds(repo: Path) -> int:
+    framework_path = repo / "contracts" / "framework.json"
+    try:
+        payload = json.loads(framework_path.read_text(encoding="utf-8"))
+        return int(payload["review_bundle"]["min_separation_seconds"])
+    except Exception:
+        return 60
+
+
+def _done_bundle_approval_failures(valid_review_logs: list[Path], repo: Path) -> list[str]:
+    approve_logs: list[tuple[Path, dict[str, object]]] = []
+    for path in valid_review_logs:
+        payload, error = _load_json_file(path)
+        if error is not None or not isinstance(payload, dict):
+            continue
+        decision = payload.get("decision")
+        if isinstance(decision, dict) and decision.get("outcome") == "approve":
+            approve_logs.append((path, payload))
+
+    if not approve_logs:
+        return ["missing_approving_review_log"]
+
+    review_path, review = approve_logs[-1]
+    if review.get("schema_version") == JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1:
+        # historical bundle: the validator already required exemption-list membership
+        return []
+
+    task_block = review.get("task") if isinstance(review.get("task"), dict) else {}
+    manifest_rel = task_block.get("run_manifest_path")
+    if not isinstance(manifest_rel, str) or not manifest_rel:
+        return [f"approving_review_missing_manifest_link:{review_path.name}"]
+    manifest, error = _load_json_file(repo / manifest_rel)
+    if error is not None or not isinstance(manifest, dict):
+        return [f"approving_review_manifest_unreadable:{manifest_rel}"]
+    if manifest.get("schema_version") != SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+        return [f"approving_review_manifest_not_v2:{manifest_rel}"]
+    result = manifest.get("result") if isinstance(manifest.get("result"), dict) else {}
+    if result.get("status") != "ok":
+        return [f"approving_review_manifest_not_passing:{manifest_rel}"]
+    if manifest.get("provenance_class") != "executor_run":
+        return [f"approving_review_manifest_provenance:{manifest.get('provenance_class')}:{manifest_rel}"]
+    return []
+
+
+def _review_log_actor_separation_failures(review_path: Path, repo: Path) -> list[str]:
+    """§4.0 #17: a v2 review log is invalid if written by the same actor session
+    as the run manifest it reviews, or inside the minimum separation window."""
+    payload, error = _load_json_file(review_path)
+    if error is not None or payload is None:
+        return []
+    if payload.get("schema_version") != JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+        return []
+
+    reviewer = payload.get("reviewer") if isinstance(payload.get("reviewer"), dict) else {}
+    task_block = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+    manifest_rel = task_block.get("run_manifest_path")
+    if not isinstance(manifest_rel, str) or not manifest_rel:
+        return []
+    manifest_payload, manifest_error = _load_json_file(repo / manifest_rel)
+    if manifest_error is not None or manifest_payload is None:
+        return []
+    if manifest_payload.get("schema_version") != SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+        return []
+
+    failures: list[str] = []
+    actor = manifest_payload.get("actor") if isinstance(manifest_payload.get("actor"), dict) else {}
+    run_session = actor.get("session_id")
+    review_session = reviewer.get("session_id")
+    if (
+        isinstance(run_session, str)
+        and run_session.strip()
+        and run_session == review_session
+    ):
+        failures.append(f"actor_separation_same_session:{review_path.name}")
+
+    run_time = _parse_utc_iso(manifest_payload.get("generated_at_utc"))
+    review_time = _parse_utc_iso(payload.get("generated_at_utc"))
+    if run_time is None or review_time is None:
+        failures.append(f"actor_separation_window_unverifiable:{review_path.name}")
+    else:
+        separation = (review_time - run_time).total_seconds()
+        minimum = _review_min_separation_seconds(repo)
+        if separation < minimum:
+            failures.append(
+                f"actor_separation_window:{review_path.name}:{int(separation)}s<{minimum}s"
+            )
+    return failures
 
 
 def gate_review_bundle_integrity() -> GateResult:
@@ -1457,6 +2308,17 @@ def gate_review_bundle_integrity() -> GateResult:
                     f"{task.path}:"
                     + ("invalid_review_log" if matching_review_logs else "missing_review_log")
                 )
+            for review_path in valid_review_logs:
+                for reason in _review_log_actor_separation_failures(review_path, repo):
+                    failures.append(f"{task.path}:{reason}")
+
+            # done requires an APPROVING review whose linked run manifest is a
+            # passing executor_run — a blocking review or a backfill/blocked
+            # manifest can never durably satisfy done (§4.0 #6).
+            failures.extend(
+                f"{task.path}:{reason}"
+                for reason in _done_bundle_approval_failures(valid_review_logs, repo)
+            )
 
     return GateResult(ok=len(failures) == 0, details={"failures": failures})
 
@@ -1477,6 +2339,11 @@ def _collect_gate_results() -> dict[str, GateResult]:
         "swarm_run_manifest_validity": gate_swarm_run_manifest_validity(),
         "judge_review_log_validity": gate_judge_review_log_validity(),
         "review_bundle_integrity": gate_review_bundle_integrity(),
+        "processed_manifest_hashes": gate_processed_manifest_hashes(),
+        "raw_manifest_hashes": gate_raw_manifest_hashes(),
+        "validation_report_content_binding": gate_validation_report_content_binding(),
+        "projection_drift": gate_projection_drift(),
+        "historical_exemptions": gate_historical_exemptions(),
     }
 
 

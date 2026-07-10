@@ -1,0 +1,289 @@
+{
+  "schema_version": "responses_runner_v2.input_manifest.v1",
+  "manifest_id": "research_swarm_post_battletest_improvement.stage2",
+  "workflow_id": "research_swarm_post_battletest_improvement",
+  "stage_id": "target_architecture_and_change_contract",
+  "description": "Stage 2 is the exact change-contract corpus. It removes most historical battle-test artifacts because the approved stage-one review bundle should already lock the diagnosis. It keeps direct architecture-control surfaces attached at higher authority: control-plane docs and templates, framework contracts, runtime/review/release schemas, the current official swarm runbooks, runtime scripts, and the tests that currently encode role/state/gate/release semantics. Supporting scientific-definition surfaces, example templates, mode examples, and worked-instance evidence remain available, but they are demoted to reference context so stage 2 can preserve empirical/modeling/hybrid generality without letting supporting examples outrank the direct framework control surfaces. The required reviewed handoff is injected dynamically through workflow carry_forward, so reviewed_handoff_inputs remains empty here by design. Ad-hoc local operator workflow notes are intentionally excluded so stage 2 designs the supervision layer from the official framework surfaces and the approved stage-one diagnosis rather than from interim operator workarounds.",
+  "primary_job_inputs": [
+    {
+      "path": "docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/corpus/mission_brief.md",
+      "kind": "file",
+      "notes": "authoritative statement of the improvement round and general framework scope"
+    },
+    {
+      "path": "docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/corpus/improvement_targets.md",
+      "kind": "file",
+      "notes": "authoritative framework-wide improvement targets"
+    },
+    {
+      "path": "docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/corpus/final_packet_contract.md",
+      "kind": "file",
+      "notes": "authoritative final-stage output contract"
+    }
+  ],
+  "reviewed_handoff_inputs": [],
+  "attached_repository_files": [
+    {
+      "path": "AGENTS.md",
+      "kind": "file",
+      "notes": "root role, state, and execution-path contract"
+    },
+    {
+      "path": "README.md",
+      "kind": "file",
+      "notes": "top-level framework description and general mode claims"
+    },
+    {
+      "path": "Makefile",
+      "kind": "file",
+      "notes": "current validation entrypoints"
+    },
+    {
+      "path": ".orchestrator/workstreams.md",
+      "kind": "file",
+      "notes": "current workstream boundary map and W6/W7 scope"
+    },
+    {
+      "path": ".orchestrator/templates/task_template.md",
+      "kind": "file",
+      "notes": "default task contract template"
+    },
+    {
+      "path": ".orchestrator/templates/task_template_w0_protocol.md",
+      "kind": "file",
+      "notes": "protocol task template"
+    },
+    {
+      "path": ".orchestrator/templates/task_template_w1_w2_etl.md",
+      "kind": "file",
+      "notes": "ETL task template"
+    },
+    {
+      "path": ".orchestrator/templates/task_template_w8_modeling.md",
+      "kind": "file",
+      "notes": "modeling task template"
+    },
+    {
+      "path": ".orchestrator/templates/task_template_hybrid_bridge.md",
+      "kind": "file",
+      "notes": "hybrid bridge task template"
+    },
+    {
+      "path": ".orchestrator/templates/handoff_template.md",
+      "kind": "file",
+      "notes": "handoff template likely to change if reconnaissance or supervisory notes are formalized"
+    },
+    {
+      "path": ".orchestrator/templates/workstreams_template.md",
+      "kind": "file",
+      "notes": "workstream template used by planners and operators"
+    },
+    {
+      "path": "contracts/README.md",
+      "kind": "file",
+      "notes": "canonical contract-surface overview and mutation rules"
+    },
+    {
+      "path": "contracts/schemas/README.md",
+      "kind": "file",
+      "notes": "schema-surface overview for durable runtime and release artifacts"
+    },
+    {
+      "path": "contracts/framework.json",
+      "kind": "file",
+      "notes": "framework policy contract and likely change surface"
+    },
+    {
+      "path": "contracts/schemas/swarm_run_manifest_v1.yaml",
+      "kind": "file",
+      "notes": "published runtime-manifest schema and change-contract surface"
+    },
+    {
+      "path": "contracts/schemas/judge_review_log_v1.yaml",
+      "kind": "file",
+      "notes": "published Judge review schema and change-contract surface"
+    },
+    {
+      "path": "contracts/schemas/release_manifest_v1.yaml",
+      "kind": "file",
+      "notes": "published release-manifest schema and change-contract surface"
+    },
+    {
+      "path": "contracts/model_spec.md",
+      "kind": "file",
+      "notes": "current modeling spec surface and possible generality change target"
+    },
+    {
+      "path": "contracts/hybrid_interface_v1.yaml",
+      "kind": "file",
+      "notes": "current hybrid interface contract and possible generality change target"
+    },
+    {
+      "path": "docs/runbook_swarm.md",
+      "kind": "file",
+      "notes": "manual swarm runbook"
+    },
+    {
+      "path": "docs/runbook_swarm_automation.md",
+      "kind": "file",
+      "notes": "automation runbook and current supervision model"
+    },
+    {
+      "path": "docs/prompts/planner.md",
+      "kind": "file",
+      "notes": "Planner prompt and likely change surface"
+    },
+    {
+      "path": "docs/prompts/worker.md",
+      "kind": "file",
+      "notes": "Worker prompt and likely change surface"
+    },
+    {
+      "path": "docs/prompts/judge.md",
+      "kind": "file",
+      "notes": "Judge prompt and likely change surface"
+    },
+    {
+      "path": "docs/prompts/operator.md",
+      "kind": "file",
+      "notes": "Operator prompt and likely change surface"
+    },
+    {
+      "path": "scripts/swarm.py",
+      "kind": "file",
+      "notes": "runtime supervisor implementation and likely change surface"
+    },
+    {
+      "path": "scripts/quality_gates.py",
+      "kind": "file",
+      "notes": "deterministic gate implementation and likely change surface"
+    },
+    {
+      "path": "scripts/release_assembly.py",
+      "kind": "file",
+      "notes": "release assembly and release-integrity implementation that closes the runtime/review/release control plane"
+    },
+    {
+      "path": "scripts/sweep_tasks.py",
+      "kind": "file",
+      "notes": "projection-sweep implementation and likely change surface"
+    },
+    {
+      "path": "tests/runtime_test_utils.py",
+      "kind": "file",
+      "notes": "runtime-test harness and scaffold utilities"
+    },
+    {
+      "path": "tests/test_swarm_role_state_semantics.py",
+      "kind": "file",
+      "notes": "role and state semantics coverage"
+    },
+    {
+      "path": "tests/test_quality_gates_integration_ready.py",
+      "kind": "file",
+      "notes": "integration-ready gate coverage"
+    },
+    {
+      "path": "tests/test_quality_gates_processed_manifests.py",
+      "kind": "file",
+      "notes": "processed-manifest and review-bundle integrity coverage"
+    },
+    {
+      "path": "tests/test_quality_gates_judge_operator.py",
+      "kind": "file",
+      "notes": "Judge and Operator ownership gate coverage"
+    },
+    {
+      "path": "tests/test_quality_gates_repo_structure.py",
+      "kind": "file",
+      "notes": "repo-structure gate coverage"
+    },
+    {
+      "path": "tests/test_release_assembly.py",
+      "kind": "file",
+      "notes": "release-manifest and catalog assembly coverage"
+    },
+    {
+      "path": "tests/test_release_catalog_integrity.py",
+      "kind": "file",
+      "notes": "release-namespace and catalog drift coverage"
+    }
+  ],
+  "reference_context": [
+    {
+      "path": "contracts/project.yaml",
+      "kind": "file",
+      "notes": "current empirical instance contract; keep as reference only unless an approved stage-one decision requires a framework-level update here"
+    },
+    {
+      "path": "docs/empirical_battle_test_retrospective_2026-04-12.md",
+      "kind": "file",
+      "notes": "compact operator synthesis of battle-test pressure; reference-only because the reviewed stage-one handoff should carry the approved diagnosis forward"
+    },
+    {
+      "path": "docs/protocol.md",
+      "kind": "file",
+      "notes": "reference-only scientific-program and protocol-definition surface for coherence checks across empirical work"
+    },
+    {
+      "path": "contracts/decisions.md",
+      "kind": "file",
+      "notes": "reference-only decision-log surface that helps keep framework wording coherent without making historical decisions rewrite targets by default"
+    },
+    {
+      "path": "contracts/data_dictionary.md",
+      "kind": "file",
+      "notes": "reference-only data-definition surface for empirical coherence checks"
+    },
+    {
+      "path": ".orchestrator/templates/examples/README.md",
+      "kind": "file",
+      "notes": "reference-only example-template index so stage 2 can keep user-facing examples coherent with any main template changes"
+    },
+    {
+      "path": ".orchestrator/templates/examples/T100_example_w1_etl_task.md",
+      "kind": "file",
+      "notes": "reference-only ETL example task so template changes do not silently drift away from the example scaffold"
+    },
+    {
+      "path": ".orchestrator/templates/examples/T110_example_w3_registry_task.md",
+      "kind": "file",
+      "notes": "reference-only registry example task for example-coherence checks"
+    },
+    {
+      "path": ".orchestrator/templates/examples/T120_example_w5_validation_task.md",
+      "kind": "file",
+      "notes": "reference-only validation example task for example-coherence checks"
+    },
+    {
+      "path": "contracts/instances/README.md",
+      "kind": "file",
+      "notes": "supporting instance-manifest example for modeling work; keep below direct framework control surfaces"
+    },
+    {
+      "path": "contracts/experiments/README.md",
+      "kind": "file",
+      "notes": "supporting experiment-spec example for modeling work; reference-only unless the architecture requires a direct rewrite here"
+    },
+    {
+      "path": "contracts/experiments/exp_001.yaml",
+      "kind": "file",
+      "notes": "worked modeling experiment example; reference-only so examples do not drive the exact file inventory by default"
+    },
+    {
+      "path": "src/model/README.md",
+      "kind": "file",
+      "notes": "supporting modeling code-surface guidance for cross-mode generality checks"
+    },
+    {
+      "path": "src/model/AGENTS.md",
+      "kind": "file",
+      "notes": "supporting modeling execution guidance for cross-mode guardrails"
+    },
+    {
+      "path": "tests/README.md",
+      "kind": "file",
+      "notes": "general test-discipline guidance; reference-only because stage 2 should anchor primarily on executable semantics tests"
+    }
+  ]
+}

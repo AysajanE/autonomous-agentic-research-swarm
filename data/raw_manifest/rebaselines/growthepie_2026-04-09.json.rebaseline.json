@@ -1,0 +1,9 @@
+{
+  "entries": "all",
+  "mode": "raw_evidence_unavailable",
+  "original_manifest_sha256": "487fbe118b718d20c5ab617ff9cf85b7264eead4922b360445ed20405c8b9b8c",
+  "provenance_note": "Honest re-baseline of the battle-test record (plan \u00a74.0 #11 + \u00a77.3): every file attested by this raw manifest was deleted from disk after the release and exists in no archive; 135,648 manifested raw files are unavailable across the six raw manifests. The manifest is preserved as the only surviving attestation of what was fetched. Nothing here claims the data can be reproduced; the release record is amended with raw_evidence_unavailable. Future snapshots fall under the M4 raw-archive retention contract.",
+  "rebaseline_of": "data/raw_manifest/growthepie_2026-04-09.json",
+  "rebaselined_at_utc": "2026-07-10T02:34:34Z",
+  "schema_version": "research_swarm.manifest_rebaseline.v1"
+}

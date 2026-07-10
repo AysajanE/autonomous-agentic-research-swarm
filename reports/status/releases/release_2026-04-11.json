@@ -531,7 +531,23 @@
     "runtime_manifest_dir": "reports/status/swarm_runs",
     "scientific_review_role": "Judge"
   },
-  "notes": [],
+  "notes": [
+    {
+      "amended_at_utc": "2026-07-10T02:34:34Z",
+      "explanation": "Post-release amendment (M0 remediation): the raw evidence layer this release attested (135,648 files across six raw manifests) was deleted after release assembly and archived nowhere; it cannot be recovered or regenerated. Ten of twenty processed-manifest output hash claims were stale at attestation time against the 04-01/04-08 manifest generations; the 2026-04-09 generation matches disk and honest superseded-rebaseline sidecars now record this without altering the original manifests.",
+      "provenance_annotations_dir": "reports/status/swarm_runs/annotations/",
+      "provenance_class_run_counts": {
+        "backfill": 5,
+        "executor_run": 18,
+        "manual_operator": 9
+      },
+      "rebaselines_dirs": [
+        "data/processed_manifest/rebaselines/",
+        "data/raw_manifest/rebaselines/"
+      ],
+      "type": "raw_evidence_unavailable"
+    }
+  ],
   "quality_gates": {
     "all_required_ok": true,
     "required_gate_names": [

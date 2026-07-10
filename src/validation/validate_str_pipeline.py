@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
+import hashlib
 import itertools
 import json
 from pathlib import Path
@@ -139,13 +140,14 @@ def main(argv: list[str]) -> int:
 
     try:
         artifacts = resolve_artifacts(mode=mode, as_of_utc_date=as_of)
+        inputs_consumed = build_inputs_consumed(validation_input_paths(artifacts))
         reports = build_reports(mode=mode, artifacts=artifacts)
     except ValidationBlocked as exc:
         reports = build_blocked_reports(mode=mode, as_of_utc_date=as_of, issues=exc.issues)
         write_reports(reports)
         return 2
 
-    write_reports(reports)
+    write_reports(reports, inputs_consumed=inputs_consumed)
     if any(report.status != "pass" for report in reports):
         return 1
     return 0
@@ -1670,7 +1672,7 @@ def aggregate_status(checks: Iterable[CheckResult]) -> str:
     if "fail" in statuses:
         return "fail"
     if "blocked" in statuses:
-        return "blocked"
+        return "fail"
     return "pass"
 
 
@@ -1698,13 +1700,54 @@ def decimal_from_value(value: object) -> Decimal:
     return Decimal(value)
 
 
-def write_reports(reports: list[ReportPayload]) -> None:
+def validation_input_paths(artifacts: dict[str, DataArtifact]) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for artifact in artifacts.values():
+        for path in (artifact.manifest_path, artifact.path):
+            if path is None:
+                continue
+            resolved = path.resolve()
+            if resolved not in seen:
+                paths.append(resolved)
+                seen.add(resolved)
+    return paths
+
+
+def build_inputs_consumed(paths: Iterable[Path]) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for path in paths:
+        resolved = path.resolve()
+        digest = hashlib.sha256()
+        size = 0
+        with resolved.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        entries.append(
+            {
+                "path": resolved.relative_to(REPO_ROOT.resolve()).as_posix(),
+                "sha256": digest.hexdigest(),
+                "bytes": size,
+            }
+        )
+    return entries
+
+
+def write_reports(
+    reports: list[ReportPayload],
+    *,
+    inputs_consumed: list[dict[str, object]] | None = None,
+) -> None:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     for report in reports:
         json_path = REPORT_DIR / f"{report.report_id}.json"
         md_path = REPORT_DIR / f"{report.report_id}.md"
         json_payload = asdict(report)
         json_payload["checks"] = [asdict(check) for check in report.checks]
+        if inputs_consumed:
+            json_payload["schema_version"] = "research_swarm.validation_report.v2"
+            json_payload["inputs_consumed"] = inputs_consumed
         json_path.write_text(
             json.dumps(json_payload, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

@@ -1,0 +1,8 @@
+{
+  "annotated_at_utc": "2026-07-10T02:34:34Z",
+  "annotates": "reports/status/swarm_runs/T030_20260401T115602Z.json",
+  "annotates_sha256": "828b37f4cb5989da600b30add41de17e37fd9afb2efdd8375d4bcc6a36e9b7c1",
+  "provenance_class": "executor_run",
+  "rationale": "M0 historical-record remediation: provenance_class backfilled from the manifest's own executor fields (runner/tool), matching the battle-test forensics (18 executor runs, 9 manual operator records, 5 legacy backfills). The original manifest is untouched; it predates schema v2.",
+  "schema_version": "research_swarm.provenance_annotation.v1"
+}

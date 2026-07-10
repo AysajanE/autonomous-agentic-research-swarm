@@ -1,0 +1,9 @@
+{
+  "mode": "superseded",
+  "original_manifest_sha256": "49d14a747630577193d3186031d115967928485e47145131dd0b08fc9e592102",
+  "provenance_note": "Honest re-baseline of the battle-test record (plan \u00a74.0 #11): this manifest's output hash claims refer to an earlier generation of the named output paths; the outputs were rebuilt during the 2026-04-08/09 repair campaign and the 2026-04-09 manifest for the same surface matches current disk. The original manifest file is preserved byte-for-byte (it is hash-inventoried by release_2026-04-11). This annotation supersedes, it does NOT claim regeneration; the raw evidence layer needed for regeneration was deleted and no such claim is made.",
+  "rebaseline_of": "data/processed_manifest/vendor_daily_rollup_panel_2026-04-08.json",
+  "rebaselined_at_utc": "2026-07-10T02:34:34Z",
+  "schema_version": "research_swarm.manifest_rebaseline.v1",
+  "superseded_by": "data/processed_manifest/vendor_daily_rollup_panel_2026-04-09.json"
+}

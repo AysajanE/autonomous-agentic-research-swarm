@@ -3,10 +3,12 @@ from __future__ import annotations
 import contextlib
 import copy
 import importlib.util
+import hashlib
 import json
 import os
 from functools import lru_cache
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any
 
@@ -16,8 +18,24 @@ SWARM_PATH = REPO_ROOT / "scripts" / "swarm.py"
 QUALITY_GATES_PATH = REPO_ROOT / "scripts" / "quality_gates.py"
 SWEEP_TASKS_PATH = REPO_ROOT / "scripts" / "sweep_tasks.py"
 
-SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v1"
-JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v1"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
+JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
+JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1 = "research_swarm.judge_review_log.v1"
+
+
+def _git_read_or_default(root: Path, args: list[str], default: str) -> str:
+    try:
+        cp = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        value = cp.stdout.strip()
+        return value or default
+    except Exception:
+        return default
 
 
 def _load_module(module_name: str, path: Path):
@@ -304,6 +322,19 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     write_text(root, "tests/README.md", "# tests\n")
 
 
+def init_git_fixture_repo(root: Path) -> None:
+    subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "swarm-bot"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "swarm-bot@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "initial fixture"], cwd=root, check=True, capture_output=True, text=True)
+
+    origin = Path(f"{root}.origin.git")
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=root, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=root, check=True, capture_output=True, text=True)
+
+
 def _emit_list(key: str, values: list[str]) -> str:
     if not values:
         return f"{key}: []"
@@ -417,12 +448,44 @@ def write_run_manifest(
     workstream: str = "W1",
     state_before: str = "active",
     state_after: str = "ready_for_review",
+    provenance_class: str = "executor_run",
+    result_status: str = "ok",
+    schema_version: str = SWARM_RUN_MANIFEST_SCHEMA_VERSION,
+    branch: str | None = None,
+    git_sha: str | None = None,
+    actor_session_id: str = "fixture-worker-session",
+    generated_at_utc: str = "2026-03-29T00:00:00Z",
 ) -> Path:
+    task_disk_path = root / task_path
+    pinned_frontmatter_sha = "0" * 64
+    task_gates = ["make gate"]
+    if task_disk_path.is_file():
+        lines = task_disk_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        if lines and lines[0].strip() == "---":
+            for index in range(1, len(lines)):
+                if lines[index].strip() == "---":
+                    block = "".join(lines[1:index])
+                    pinned_frontmatter_sha = hashlib.sha256(block.encode("utf-8")).hexdigest()
+                    break
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import swarm_taskfile as _taskfile
+
+        frontmatter = _taskfile.parse_task_frontmatter(task_disk_path.read_text(encoding="utf-8"))
+        if isinstance(frontmatter, dict) and isinstance(frontmatter.get("gates"), list):
+            parsed_gates = [item for item in frontmatter["gates"] if isinstance(item, str)]
+            if parsed_gates:
+                task_gates = parsed_gates
+    if branch is None:
+        branch = _git_read_or_default(root, ["rev-parse", "--abbrev-ref", "HEAD"], f"{task_id}_branch")
+    if git_sha is None:
+        git_sha = _git_read_or_default(
+            root, ["rev-parse", "HEAD"], "0123456789abcdef0123456789abcdef01234567"
+        )
     rel = f"reports/status/swarm_runs/{task_id}_20260329T000000Z.json"
     payload = {
-        "schema_version": SWARM_RUN_MANIFEST_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "run_id": f"{task_id}_20260329T000000Z",
-        "generated_at_utc": "2026-03-29T00:00:00Z",
+        "generated_at_utc": generated_at_utc,
         "task": {
             "task_id": task_id,
             "task_path": task_path,
@@ -436,8 +499,8 @@ def write_run_manifest(
             "state_after": state_after,
         },
         "repo": {
-            "branch": f"{task_id}_branch",
-            "git_sha": "0123456789abcdef0123456789abcdef01234567",
+            "branch": branch,
+            "git_sha": git_sha,
             "base_branch": "main",
             "remote": "origin",
         },
@@ -455,14 +518,15 @@ def write_run_manifest(
         "commands": {
             "executor": [],
             "executor_log_path": None,
-            "gates": ["make gate"],
+            "gates": list(task_gates),
         },
         "gates": [
             {
-                "command": "make gate",
+                "command": gate,
                 "returncode": 0,
                 "output_tail": "",
             }
+            for gate in task_gates
         ],
         "ownership": {
             "ok": True,
@@ -476,10 +540,29 @@ def write_run_manifest(
             "missing_manifests": [],
         },
         "result": {
-            "status": "ok",
-            "blocked_reasons": [],
+            "status": result_status,
+            "blocked_reasons": [] if result_status == "ok" else ["fixture_blocked"],
         },
     }
+    if schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+        payload["provenance_class"] = provenance_class
+        payload["actor"] = {
+            "session_id": actor_session_id,
+            "recorded_at_utc": "2026-03-29T00:00:00Z",
+        }
+        if provenance_class == "executor_run":
+            log_rel = f"reports/status/swarm_runs/logs/{task_id}_20260329T000000Z.log"
+            log_path = write_text(root, log_rel, "fixture executor log\n")
+            payload["commands"]["executor_log_path"] = log_rel
+            payload["commands"]["executor_log_sha256"] = hashlib.sha256(log_path.read_bytes()).hexdigest()
+        else:
+            payload["commands"]["executor_log_sha256"] = None
+        payload["frontmatter"] = {
+            "pinned_sha256": pinned_frontmatter_sha,
+            "tampered": False,
+            "tampered_keys": [],
+        }
+        payload["ownership"]["uncommitted_violations"] = []
     return write_json(root, rel, payload)
 
 
@@ -494,15 +577,20 @@ def write_review_log(
     state_before: str = "ready_for_review",
     state_after: str = "done",
     outcome: str = "approve",
+    schema_version: str = JUDGE_REVIEW_LOG_SCHEMA_VERSION,
+    reviewer_session_id: str = "fixture-judge-session",
+    generated_at_utc: str = "2026-03-29T01:00:00Z",
 ) -> Path:
     rel = f"reports/status/reviews/{task_id}_20260329T010000Z.json"
+    reviewer: dict[str, Any] = {"role": reviewer_role}
+    if schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+        reviewer["session_id"] = reviewer_session_id
+        reviewer["recorded_at_utc"] = generated_at_utc
     payload = {
-        "schema_version": JUDGE_REVIEW_LOG_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "review_id": f"{task_id}_20260329T010000Z",
-        "generated_at_utc": "2026-03-29T01:00:00Z",
-        "reviewer": {
-            "role": reviewer_role,
-        },
+        "generated_at_utc": generated_at_utc,
+        "reviewer": reviewer,
         "task": {
             "task_id": task_id,
             "task_path": task_path,
@@ -523,4 +611,37 @@ def write_review_log(
             "note": "review note",
         },
     }
+    if schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION:
+        payload["operator_attestation"] = None
     return write_json(root, rel, payload)
+
+
+def register_historical_exemption(root: Path, *, section: str, rel_path: str, extra: dict[str, Any] | None = None) -> Path:
+    """Add (or refresh) a hash-pinned entry in the fixture's historical
+    exemption list, creating the file when absent."""
+    exemptions_path = root / "contracts/historical_exemptions.json"
+    if exemptions_path.exists():
+        payload = json.loads(exemptions_path.read_text(encoding="utf-8"))
+    else:
+        payload = {
+            "schema_version": "research_swarm.historical_exemptions.v1",
+            "created_at_utc": "2026-07-09T00:00:00Z",
+            "rationale": "test fixture",
+            "run_manifests": [],
+            "review_logs": [],
+            "processed_manifests": [],
+            "raw_manifests": [],
+            "validation_reports": [],
+            "rebaselines": [],
+        }
+    entries = payload.setdefault(section, [])
+    entries[:] = [item for item in entries if item.get("path") != rel_path]
+    entry: dict[str, Any] = {
+        "path": rel_path,
+        "sha256": hashlib.sha256((root / rel_path).read_bytes()).hexdigest(),
+        "schema_version": "fixture",
+    }
+    if extra:
+        entry.update(extra)
+    entries.append(entry)
+    return write_json(root, "contracts/historical_exemptions.json", payload)

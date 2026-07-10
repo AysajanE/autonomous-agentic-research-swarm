@@ -117,8 +117,18 @@ data/processed/panels/*
 
 # Logs / temp
 *.log
+# Durable executor logs are control-plane evidence (plan §4.0 #7), not temp files.
+!reports/status/swarm_runs/logs/*.log
 *.tmp
 .local/
 
 # Internal documents
 docs/feedbacks/
+!docs/feedbacks/
+docs/feedbacks/*
+!docs/feedbacks/runner_task_packs/
+docs/feedbacks/runner_task_packs/*
+!docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/
+docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/*
+!docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/review_templates/
+!docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/review_templates/*.md
