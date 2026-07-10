@@ -648,3 +648,31 @@ def register_historical_exemption(root: Path, *, section: str, rel_path: str, ex
         entry.update(extra)
     entries.append(entry)
     return write_json(root, "contracts/historical_exemptions.json", payload)
+
+
+def attest_containment_fixture(root: Path) -> None:
+    """Write the machine-local containment marker + vendor ack an unattended
+    fixture needs (pair with a patched clean HOME so the credential scan is
+    hermetic)."""
+    write_json(
+        root,
+        ".swarm/containment.json",
+        {
+            "schema_version": "research_swarm.containment_marker.v1",
+            "contained": True,
+            "attested_by": "fixture",
+            "attested_at_utc": "2026-07-10T00:00:00Z",
+            "note": "test fixture",
+        },
+    )
+    write_json(
+        root,
+        ".swarm/vendor_policy_ack.json",
+        {
+            "schema_version": "research_swarm.vendor_policy_ack.v1",
+            "vendor": "codex",
+            "policy_note": "fixture ack",
+            "acked_by": "fixture",
+            "acked_at_utc": "2026-07-10T00:00:00Z",
+        },
+    )

@@ -1454,10 +1454,79 @@ def _gh_create_pr_if_missing(*, cwd: Path, base_branch: str, title: str, body: s
     )
 
 
-def _require_unattended_ack() -> None:
-    if os.environ.get("SWARM_UNATTENDED_I_UNDERSTAND") == "1":
-        return
-    raise SystemExit("missing_unattended_ack:SWARM_UNATTENDED_I_UNDERSTAND=1")
+CONTAINMENT_MARKER_RELPATH = ".swarm/containment.json"
+VENDOR_ACK_RELPATH = ".swarm/vendor_policy_ack.json"
+CONTAINMENT_MARKER_SCHEMA_VERSION = "research_swarm.containment_marker.v1"
+VENDOR_ACK_SCHEMA_VERSION = "research_swarm.vendor_policy_ack.v1"
+
+# Credential classes whose readability disproves containment (§9.4): an
+# unattended swarm must not run where user-level credentials beyond a scoped
+# deploy key are readable.
+_SENSITIVE_CREDENTIAL_PATHS = (
+    (".aws/credentials", "aws_credentials"),
+    (".ssh/id_rsa", "ssh_private_key"),
+    (".ssh/id_ecdsa", "ssh_private_key"),
+    (".ssh/id_ed25519", "ssh_private_key"),
+    (".config/gcloud/application_default_credentials.json", "gcloud_adc"),
+    (".netrc", "netrc"),
+    (".docker/config.json", "docker_auth"),
+)
+
+
+def _readable_credential_classes(home: Path) -> list[str]:
+    found: set[str] = set()
+    for rel, klass in _SENSITIVE_CREDENTIAL_PATHS:
+        candidate = home / rel
+        try:
+            if candidate.is_file() and os.access(candidate, os.R_OK):
+                found.add(klass)
+        except OSError:
+            continue
+    return sorted(found)
+
+
+def _require_containment(repo: Path) -> None:
+    """§9.4 (M1): unattended automation refuses to start outside a sandboxed,
+    attested environment. The marker is a machine-local human attestation;
+    the credential scan is the mechanical disproof."""
+    marker_path = repo / CONTAINMENT_MARKER_RELPATH
+    if not marker_path.is_file():
+        raise SystemExit(
+            f"containment_marker_missing:{CONTAINMENT_MARKER_RELPATH}"
+            " (attest with: python scripts/swarm.py attest-containment --attested-by <name>)"
+        )
+    try:
+        marker = json.loads(_read_text(marker_path))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"containment_marker_invalid:{exc}") from exc
+    if not isinstance(marker, dict) or marker.get("contained") is not True:
+        raise SystemExit("containment_marker_invalid:contained_not_true")
+
+    credentials = _readable_credential_classes(Path(os.path.expanduser("~")))
+    if credentials:
+        raise SystemExit(
+            "containment_credentials_readable:" + ",".join(credentials)
+        )
+
+    ack_path = repo / VENDOR_ACK_RELPATH
+    if not ack_path.is_file():
+        raise SystemExit(
+            f"vendor_policy_ack_missing:{VENDOR_ACK_RELPATH}"
+            " (record with: python scripts/swarm.py ack-vendor-policy"
+            " --vendor <vendor> --note <policy note> --acked-by <name>)"
+        )
+    try:
+        ack = json.loads(_read_text(ack_path))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"vendor_policy_ack_invalid:{exc}") from exc
+    if not isinstance(ack, dict) or not str(ack.get("vendor", "")).strip():
+        raise SystemExit("vendor_policy_ack_invalid:missing_vendor")
+
+
+def _require_unattended_ack(repo: Path | None = None) -> None:
+    if os.environ.get("SWARM_UNATTENDED_I_UNDERSTAND") != "1":
+        raise SystemExit("missing_unattended_ack:SWARM_UNATTENDED_I_UNDERSTAND=1")
+    _require_containment(repo if repo is not None else _repo_root())
 
 
 def _local_base_ahead_count(*, repo: Path, remote: str, base_branch: str) -> int:
@@ -1637,7 +1706,10 @@ def _path_is_allowed(
     if norm in _task_projection_paths(task_file_path):
         return True, None
     if norm.startswith(".orchestrator/handoff/"):
-        return True, None
+        digits = task_id[1:] if task_id.startswith("T") else task_id
+        if Path(norm).name.startswith(f"H{digits}_"):
+            return True, None
+        return False, "handoff_namespace_violation"
     if norm.startswith("reports/status/swarm_runs/") and Path(norm).name.startswith(f"{task_id}_"):
         return True, None
     if norm.startswith("reports/status/reviews/") and Path(norm).name.startswith(f"{task_id}_"):
@@ -2349,6 +2421,44 @@ def _render_status_text(payload: dict[str, object]) -> str:
     )
     lines.append(f"spend_usd: {payload['spend']}")
     return "\n".join(lines)
+
+
+def cmd_attest_containment(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    marker_path = repo / CONTAINMENT_MARKER_RELPATH
+    payload = {
+        "schema_version": CONTAINMENT_MARKER_SCHEMA_VERSION,
+        "contained": True,
+        "attested_by": args.attested_by,
+        "attested_at_utc": _utc_now_iso(),
+        "note": args.note or "",
+    }
+    _write_json(marker_path, payload)
+    _record_swarm_event(
+        repo,
+        {"event": "containment_attested", "attested_by": args.attested_by},
+    )
+    print(json.dumps({"written": CONTAINMENT_MARKER_RELPATH}, sort_keys=True))
+    return 0
+
+
+def cmd_ack_vendor_policy(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    ack_path = repo / VENDOR_ACK_RELPATH
+    payload = {
+        "schema_version": VENDOR_ACK_SCHEMA_VERSION,
+        "vendor": args.vendor,
+        "policy_note": args.note,
+        "acked_by": args.acked_by,
+        "acked_at_utc": _utc_now_iso(),
+    }
+    _write_json(ack_path, payload)
+    _record_swarm_event(
+        repo,
+        {"event": "vendor_policy_acked", "vendor": args.vendor, "acked_by": args.acked_by},
+    )
+    print(json.dumps({"written": VENDOR_ACK_RELPATH}, sort_keys=True))
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -4551,6 +4661,14 @@ def cmd_run_task(args: argparse.Namespace) -> int:
 
     task = _resolve_runtime_task(tasks, quarantined, args.task_id)
 
+    if args.codex_sandbox == "danger-full-access" and not (
+        getattr(args, "i_accept_full_access", False) and task.allow_network
+    ):
+        raise SystemExit(
+            "full_access_requires_double_opt_in:"
+            "--i-accept-full-access AND task allow_network: true (§9.4)"
+        )
+
     if task.role not in set(contract.task_execution_roles):
         raise SystemExit(f"task_not_runtime_executable:{task.task_id}:{task.role}")
 
@@ -4876,6 +4994,20 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             "model": args.codex_model,
             "sandbox": args.codex_sandbox,
             "allow_network": task.allow_network,
+            "full_access_opt_in": bool(
+                args.codex_sandbox == "danger-full-access"
+                and getattr(args, "i_accept_full_access", False)
+            ),
+            "effective_network": {
+                "declared_allow_network": task.allow_network,
+                "sandbox": args.codex_sandbox,
+                "backend": getattr(args, "executor_backend", "codex"),
+                "enforcement": (
+                    "mock_backend"
+                    if getattr(args, "executor_backend", "codex") == "mock"
+                    else "codex_sandbox"
+                ),
+            },
             "repair_context": args.repair_context,
             "returncode": executor_returncode,
             "error": executor_error,
@@ -5308,6 +5440,7 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--executor-backend", choices=["codex", "mock"], default="codex")
     tick.add_argument("--codex-model", default=None)
     tick.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
+    tick.add_argument("--i-accept-full-access", action="store_true", dest="i_accept_full_access")
     tick.add_argument("--unattended", action="store_true")
     tick.add_argument("--max-worker-seconds", type=int, default=0)
     tick.add_argument("--create-pr", action="store_true")
@@ -5348,6 +5481,7 @@ def build_parser() -> argparse.ArgumentParser:
     loop.add_argument("--base-branch", default="main")
     loop.add_argument("--codex-model", default=None)
     loop.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
+    loop.add_argument("--i-accept-full-access", action="store_true", dest="i_accept_full_access")
     loop.add_argument("--unattended", action="store_true")
     loop.add_argument("--max-worker-seconds", type=int, default=0)
     loop.add_argument("--create-pr", action="store_true")
@@ -5366,6 +5500,7 @@ def build_parser() -> argparse.ArgumentParser:
     tmux_start.add_argument("--base-branch", default="main")
     tmux_start.add_argument("--codex-model", default=None)
     tmux_start.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
+    tmux_start.add_argument("--i-accept-full-access", action="store_true", dest="i_accept_full_access")
     tmux_start.add_argument("--unattended", action="store_true")
     tmux_start.add_argument("--max-worker-seconds", type=int, default=0)
     tmux_start.add_argument("--create-pr", action="store_true")
@@ -5379,6 +5514,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_task.add_argument("--executor-backend", choices=["codex", "mock"], default="codex")
     run_task.add_argument("--codex-model", default=None)
     run_task.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
+    run_task.add_argument("--i-accept-full-access", action="store_true", dest="i_accept_full_access")
     run_task.add_argument("--unattended", action="store_true")
     run_task.add_argument("--skip-executor", action="store_true")
     run_task.add_argument("--record-session", action="store_true")
@@ -5398,6 +5534,17 @@ def build_parser() -> argparse.ArgumentParser:
     judge_task.add_argument("--note", default="")
     judge_task.add_argument("--approve-only", action="store_true")
     judge_task.set_defaults(func=cmd_judge_task)
+
+    attest = subparsers.add_parser("attest-containment", help="Record the machine-local containment attestation required for unattended runs")
+    attest.add_argument("--attested-by", required=True)
+    attest.add_argument("--note", default="")
+    attest.set_defaults(func=cmd_attest_containment)
+
+    ack = subparsers.add_parser("ack-vendor-policy", help="Record the one-time vendor-policy compatibility acknowledgment for unattended use")
+    ack.add_argument("--vendor", required=True)
+    ack.add_argument("--note", required=True)
+    ack.add_argument("--acked-by", required=True)
+    ack.set_defaults(func=cmd_ack_vendor_policy)
 
     return parser
 

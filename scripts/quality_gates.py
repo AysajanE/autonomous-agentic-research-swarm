@@ -2351,6 +2351,31 @@ def gate_review_bundle_integrity() -> GateResult:
     return GateResult(ok=len(failures) == 0, details={"failures": failures})
 
 
+NETWORK_COMMAND_TOKENS = ("curl", "wget", "http://", "https://")
+
+
+def gate_network_strings() -> GateResult:
+    """§9.4 (M1): gate-command strings in non-network workstreams must not
+    reference network tools or URLs — deterministic gates stay offline."""
+    try:
+        contract = load_framework_contract()
+    except ValueError as exc:
+        return GateResult(ok=False, details={"failures": [str(exc)]})
+
+    tasks, parse_failures = _collect_tasks(contract)
+    failures: list[str] = list(parse_failures)
+    network_workstreams = set(contract.network_workstreams)
+    for task in tasks.values():
+        if task.workstream in network_workstreams:
+            continue
+        for gate in task.gates:
+            lowered = gate.lower()
+            hits = sorted(token for token in NETWORK_COMMAND_TOKENS if token in lowered)
+            if hits:
+                failures.append(f"{task.path}:network_string_in_gate:{','.join(hits)}:{gate}")
+    return GateResult(ok=len(failures) == 0, details={"failures": failures})
+
+
 def _collect_gate_results() -> dict[str, GateResult]:
     return {
         "framework_contract": gate_framework_contract(),
@@ -2372,6 +2397,7 @@ def _collect_gate_results() -> dict[str, GateResult]:
         "validation_report_content_binding": gate_validation_report_content_binding(),
         "projection_drift": gate_projection_drift(),
         "historical_exemptions": gate_historical_exemptions(),
+        "network_strings": gate_network_strings(),
     }
 
 

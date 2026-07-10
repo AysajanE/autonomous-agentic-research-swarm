@@ -20,6 +20,7 @@ if str(_TESTS_ROOT) not in sys.path:
 
 from golden.harness import GoldenRepo
 from runtime_test_utils import (
+    attest_containment_fixture,
     register_historical_exemption,
     chdir,
     load_quality_gates_module,
@@ -431,19 +432,22 @@ class GoldenM0Test(unittest.TestCase):
             loop_args = repo.tick_args(max_workers=2, unattended=True, dry_run=False)
             stdout = io.StringIO()
             swarm._PREFLIGHT_STRICT_SYNC_CACHE.clear()
-            with (
-                mock.patch.dict(
-                    os.environ,
-                    {
-                        "SWARM_REPO_ROOT": str(repo.root),
-                        "SWARM_UNATTENDED_I_UNDERSTAND": "1",
-                    },
-                    clear=False,
-                ),
-                mock.patch.object(swarm, "_REPO_ROOT_CACHE", None),
-                contextlib.redirect_stdout(stdout),
-            ):
-                exit_code = swarm._loop_iteration(loop_args)
+            attest_containment_fixture(repo.root)
+            with tempfile.TemporaryDirectory() as clean_home:
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "SWARM_REPO_ROOT": str(repo.root),
+                            "SWARM_UNATTENDED_I_UNDERSTAND": "1",
+                            "HOME": clean_home,
+                        },
+                        clear=False,
+                    ),
+                    mock.patch.object(swarm, "_REPO_ROOT_CACHE", None),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    exit_code = swarm._loop_iteration(loop_args)
             summary = json.loads(stdout.getvalue())
             self.assertEqual(exit_code, 0)
             self.assertIn("T211", summary["claimed"])
