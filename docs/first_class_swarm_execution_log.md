@@ -10,7 +10,26 @@ Delivery: one branch per milestone (`milestone/<id>-<slug>`), red/green-tested b
 
 ---
 
-## M1 — Supervisor (branch: `milestone/m1-supervisor`) — IN PROGRESS
+## M2 — Planner + task schema v2 (branch: `milestone/m2-planner`) — IN PROGRESS
+
+Scope: plan §4.2 (Planner runtime), §4.4 (task schema v2 + strict lint), §4.3 (read-only Claude planner profile).
+
+Batch record:
+
+- **M2-A** (schema v2 + task-lint) — LANDED (Codex workhorse; one mid-run kill, preserved+completed). Frontmatter v2 (task_kind enum, complexity_tier, machine-readable success_criteria, budgets, hash-declared inputs) via a byte-compatible one-level-nested parser extension; strict `gate_task_lint` (30+ diagnostics incl. validation-independence); lint-failing tasks unclaimable; 20 historical v1 tasks hash-pinned.
+- **M2-B** (Planner runtime) — LANDED (Codex workhorse; one mid-run kill, preserved+completed). Kernel-bounded write authority (backlog + workstreams only, symlink-safe, in-memory lint before disk); machine-enforced human plan-approval gate; T035-rule triage with journaled split lineage; three replan triggers; hypothesis-retirement L3 escalation; recon-phase promotion enforcement.
+- **M2-C** (read-only Claude wrapper + live eval) — LANDED (owner inline). The CLI planner wrapper; **live tier-(c) T035-replica eval over 3 rounds** with a real Opus 4.8 planner — refused decomposition-free confirmation every round, and the kernel lint caught two of my own defects (block-mapping parser gap; over-strict checkpoint rule) before the split applied cleanly.
+- **Dual-vendor review** of frozen `main..HEAD`: Codex 12 findings (3 BLOCKER), NOT-MERGEABLE; Claude adversary 6 findings (1 BLOCKER), NOT-MERGEABLE. **Convergent top BLOCKER (both, independently): the plan-approval gate was enforced only in manual `cmd_tick`, not the autonomous `_step_tick` the supervisor runs** — Claude's closing note flagged it deliberately hunted the "two parallel dispatch paths, gate on one" pattern *because* it shares the author's lineage. Both also flagged gate-as-code, task_id non-uniqueness, recon integration_ready bypass. **Codex-unique and correct:** `--allowedTools` vs `--tools` (a CLI-semantics fact Claude missed). **Codex flagged, Claude cleared:** same-path/different-hash validation independence (Codex right on the specific hole). Recorded, not averaged.
+- **Two owner fix tranches** (`ec2bea2`, `88350df`): approval gate centralized into the shared `ready_backlog_tasks` funnel + direct-run-task guard; gate-as-code closed by a shared `gate_command_violation` validator at lint AND execution (permits only `make <target>` / `python <repo .py>`); real `--tools` read-only restriction + strict MCP isolation; content-bound plan approval (digest of backlog+workstreams, drift-refused); task_id↔filename binding + global uniqueness; split rejects any baseline-relative lint regression anywhere; update_workstreams content-validated; validation-independence path-disjoint; triage split/first-of-kind fixes; recon placeholder-detection + integration_ready coverage; list-aware hypothesis guard; replan idempotency via evidence fingerprints + a dedicated threshold. 12 attack-scenario regressions. Deferred to M3a: canonical hypothesis↔prereg linkage, per-tier numeric ceilings. Post-fix: 236 tests, 21/21 gates.
+
+Design decisions:
+
+- **D-M2-1 (gate form policy).** Gates are restricted to `make <target>` / `python[3] <repo-relative .py>` at both lint and execution — an autonomously-authored gate can never be an inline-code channel (`-c`/`-m`/stdin rejected). Fixtures moved to `scripts/noop_gate.py`; sandbox-mechanics tests keep raw `python -c` via an explicit `enforce_form=False` with the policy separately tested. Retro-hardens M0's residual injection→execution bridge.
+- **D-M2-2 (trust boundary for the read-only planner).** `--tools Read,Glob,Grep` + `--strict-mcp-config` are defense-in-depth; the AUTHORITATIVE boundary is the kernel's bounded proposal application, which never lets the planner write anything directly — a prompt-injected planner can at most emit proposals the lint + authority checks reject.
+
+---
+
+## M1 — Supervisor (branch: `milestone/m1-supervisor`) — COMPLETE (merged to main via PR #2, squash `0a2c3e1`)
 
 Scope: plan §4.1 + §9.4 M1 items + §9.1 basic usage capture + mock executor (§9.3 tier-a precondition).
 

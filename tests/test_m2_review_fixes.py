@@ -355,5 +355,124 @@ def _minimal_v2_task(task_id: str, slug: str) -> str:
     )
 
 
+
+class VerificationPassRegressionsTest(unittest.TestCase):
+    """Regressions the fix-verification pass demanded (tranche 3)."""
+
+    def test_make_dash_c_gate_is_rejected(self) -> None:
+        self.assertEqual(
+            swarm_taskfile.gate_command_violation("make -C /outside gate").split(":")[0],
+            "gate_make_flag_forbidden",
+        )
+        self.assertIsNone(swarm_taskfile.gate_command_violation("make gate"))
+
+    def test_force_deps_cannot_bypass_plan_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            write_task(root, "active", "T840", state="active", slug="p", **_v2_task_kwargs())
+            init_git_fixture_repo(root)
+            write_json(root, ".swarm/plan_approval_pending.json", {"x": 1})
+            args = _run_task_args("T840")
+            args.force_deps = True
+            with _fixture_root(root):
+                with self.assertRaisesRegex(SystemExit, "plan_unapproved:T840"):
+                    swarm.cmd_run_task(args)
+
+    def test_approve_plan_fails_closed_on_missing_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            init_git_fixture_repo(root)
+            write_json(root, ".swarm/plan_approval_pending.json", {"schema_version": "x"})
+            stdout = io.StringIO()
+            with _fixture_root(root), contextlib.redirect_stdout(stdout):
+                rc = swarm.cmd_approve_plan(argparse.Namespace(approved_by="owner"))
+            self.assertEqual(rc, 1)
+            self.assertTrue((root / ".swarm/plan_approval_pending.json").exists())
+
+    def test_first_of_kind_is_per_task_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_runtime_repo(root)
+            write_task(
+                root, "backlog", "T860", task_kind="analysis",
+                **{k: v for k, v in _v2_task_kwargs().items() if k != "task_kind"},
+            )
+            write_task(
+                root, "backlog", "T861", task_kind="proof",
+                **{k: v for k, v in _v2_task_kwargs().items() if k != "task_kind"},
+            )
+            with _fixture_root(root):
+                contract = swarm.load_framework_contract(root)
+                tasks, _ = swarm.load_tasks_quarantined(contract)
+                reasons = swarm._task_triage_reasons(tasks["T861"], tasks)
+            self.assertIn("first_of_kind_in_workstream", reasons)
+
+    def test_split_orphaning_validation_link_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            write_task(
+                root, "backlog", "T100", schema="v2", task_kind="etl", complexity_tier="S",
+                gates=["python scripts/noop_gate.py"], outputs=["data/processed/p.csv"],
+                inputs=[{"manifest": "data/raw_manifest/a.json", "sha256": "a" * 64}],
+            )
+            write_task(
+                root, "backlog", "T101", schema="v2", task_kind="validation", complexity_tier="S",
+                gates=["python scripts/noop_gate.py"], outputs=["reports/validation/v.json"],
+                constructed_by="T100",
+                inputs=[{"manifest": "data/raw_manifest/b.json", "sha256": "b" * 64, "comparison_basis": True}],
+            )
+            init_git_fixture_repo(root)
+            proposals = [{
+                "action": "split_task", "task_id": "T100",
+                "into": [{"path": ".orchestrator/backlog/T110_x.md", "content": _minimal_v2_task("T110", "x")}],
+            }]
+            with _fixture_root(root):
+                summary = swarm._apply_planner_proposals(
+                    mode="replan", proposals=proposals, repo=root, args=_supervise_args()
+                )
+            self.assertEqual(summary["outcomes"][0]["status"], "lint_failed")
+            self.assertTrue((root / ".orchestrator/backlog/T100_task.md").exists())
+
+    def test_integration_ready_promotion_enforces_recon(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            write_task(
+                root, "active", "T870", state="active", schema="v2", task_kind="model",
+                complexity_tier="M", recon_required=True, workstream="W8",
+                gates=["python scripts/noop_gate.py"], outputs=["README.md"],
+            )
+            init_git_fixture_repo(root)
+            args = _run_task_args("T870")
+            args.final_state = "integration_ready"
+            with _fixture_root(root):
+                swarm.cmd_run_task(args)
+            manifest = json.loads(
+                sorted((root / "reports/status/swarm_runs").glob("T870_*.json"))[0].read_text()
+            )
+            self.assertIn("recon_missing", manifest["result"]["blocked_reasons"])
+
+    def test_recon_placeholder_suffix_does_not_count(self) -> None:
+        placeholder = (
+            "## Reconnaissance\n"
+            "- Scope understanding: TBD\n"
+            "- Risks and unknowns: ???\n"
+            "- Decomposition pressure assessment: N/A\n"
+            "## Status\n"
+        )
+        self.assertLess(swarm._reconnaissance_line_count(placeholder), 3)
+        substantive = (
+            "## Reconnaissance\n"
+            "- Scope understanding: two vendor sources, keyed by rollup_id\n"
+            "- Risks and unknowns: scroll attribution unresolved pre-Dencun\n"
+            "- Decomposition pressure assessment: split discovery from build\n"
+            "## Status\n"
+        )
+        self.assertGreaterEqual(swarm._reconnaissance_line_count(substantive), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

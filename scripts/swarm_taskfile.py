@@ -111,8 +111,11 @@ def gate_command_violation(gate: str) -> str | None:
         return f"gate_interpreter_not_allowlisted:{interpreter}"
     rest = argv[1:]
     if interpreter == "make":
+        # No flags at all: `make <target>...` only. -C (and any other flag)
+        # is rejected outright — an approved gate must never point make at an
+        # external directory's Makefile (verification-pass BLOCKER).
         for token in rest:
-            if token.startswith("-") and token not in ("-C",):
+            if token.startswith("-"):
                 return f"gate_make_flag_forbidden:{token}"
         return None
     # python / python3
@@ -919,7 +922,14 @@ def lint_task_files(
                 for key in TASK_INPUT_REFERENCE_KEYS:
                     ref = _string(item.get(key))
                     if ref is not None:
-                        return ref
+                        # canonicalize: `path` and `./path` and `a//b` are the
+                        # same artifact (C6 verification-pass hardening)
+                        norm = ref.strip().replace("\\", "/")
+                        while norm.startswith("./"):
+                            norm = norm[2:]
+                        while "//" in norm:
+                            norm = norm.replace("//", "/")
+                        return norm.rstrip("/")
                 return None
 
             comparison_paths = {

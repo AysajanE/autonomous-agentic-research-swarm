@@ -1566,12 +1566,16 @@ def _reconnaissance_line_count(task_text: str) -> int:
         line = raw.strip()
         if not line or line in {"-", "*"} or line.startswith("<!--"):
             continue
-        # a bare template label ("- Risks and unknowns:") with nothing after
-        # the colon is a placeholder, not reconnaissance (C7)
-        if any(line == prefix or line.rstrip() == prefix for prefix in _RECON_PLACEHOLDER_PREFIXES):
-            continue
-        if line.endswith(":") and any(line.startswith(prefix[:-1]) for prefix in _RECON_PLACEHOLDER_PREFIXES):
-            continue
+        # a template label with nothing (or a trivial placeholder) after the
+        # colon is not reconnaissance (C7 + verification pass)
+        matched_prefix = next(
+            (prefix for prefix in _RECON_PLACEHOLDER_PREFIXES if line.startswith(prefix[:-1])),
+            None,
+        )
+        if matched_prefix is not None:
+            after = line.split(":", 1)[1].strip() if ":" in line else ""
+            if after == "" or after.lower() in {"tbd", "todo", "n/a", "na", "none", "-", "???", "xxx"}:
+                continue
         count += 1
     return count
 
@@ -3346,11 +3350,15 @@ def _planner_lint_diagnostics(
         network_workstreams=contract.network_workstreams,
         v1_exemptions=_load_v1_task_exemptions(repo),
     )
-    baseline_keys = {(d.task, d.field, d.reason) for d in baseline}
+    def _key(d) -> tuple:
+        as_dict = d.as_dict()
+        return (d.task, d.field, d.reason, str(as_dict.get("expected")), str(as_dict.get("actual")))
+
+    baseline_keys = {_key(d) for d in baseline}
     return [
         diagnostic.as_dict()
         for diagnostic in diagnostics
-        if (diagnostic.task, diagnostic.field, diagnostic.reason) not in baseline_keys
+        if _key(diagnostic) not in baseline_keys
     ]
 
 
@@ -3423,15 +3431,33 @@ def _task_hypothesis_links(frontmatter: object) -> list[str]:
 
 
 def _workstreams_content_valid(content: str) -> bool:
-    """A proposed workstreams.md must have at least one well-formed workstream
-    row (| W# | purpose | owns | not-owns |...) — mirrors
-    gate_workstreams_complete so a poisoned proposal cannot erase the
-    coordination contract (C10)."""
+    """A proposed workstreams.md must have >=1 well-formed workstream row AND
+    contain no arbitrary prose: every non-blank line must be a heading, a
+    table header/separator, or a valid workstream row — so a single fake row
+    cannot smuggle in content that erases the coordination contract (C10 +
+    verification pass). Workstream ids must be unique."""
     rows = 0
-    for line in content.splitlines():
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) >= 4 and re.fullmatch(r"W\d+", cells[0]) and all(cells[1:4]):
+    seen_ids: set[str] = set()
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            continue
+        if set(line) <= set("|-: "):  # table separator row
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 4:
+            return False
+        if cells[0] in {"Workstream", "workstream"}:  # header row
+            continue
+        if re.fullmatch(r"W\d+", cells[0]) and all(cells[1:4]):
+            if cells[0] in seen_ids:
+                return False
+            seen_ids.add(cells[0])
             rows += 1
+            continue
+        return False
     return rows >= 1
 
 
@@ -3529,13 +3555,12 @@ def _apply_planner_proposals(
                 outcome["reason"] = "planner_task_already_exists"
                 outcomes.append(outcome)
                 continue
-            deleted_ids = {
-                _parse_task_id_from_branch(dp.stem) for dp in deleted_paths
-            }
+            # every id ever touched in this batch stays reserved — a deleted
+            # parent's id cannot be reused, and no two proposals share an id
             id_error = _proposed_task_id_error(
                 path=path,
                 content=content,
-                existing_ids=existing_task_ids - {i for i in deleted_ids if i},
+                existing_ids=existing_task_ids,
                 batch_ids=batch_task_ids,
             )
             if id_error is not None:
@@ -3625,13 +3650,10 @@ def _apply_planner_proposals(
                     child_error = "planner_task_already_exists"
                     break
                 parent_id = _parse_task_id_from_branch(parent.stem)
-                deleted_ids = {
-                    _parse_task_id_from_branch(dp.stem) for dp in deleted_paths
-                } | ({parent_id} if parent_id else set())
                 id_error = _proposed_task_id_error(
                     path=path,
                     content=content,
-                    existing_ids=existing_task_ids - {i for i in deleted_ids if i},
+                    existing_ids=existing_task_ids,
                     batch_ids=batch_task_ids | set(child_ids),
                 )
                 child_id = _parse_task_id_from_branch(path.stem)
@@ -3649,6 +3671,9 @@ def _apply_planner_proposals(
                 outcomes.append(outcome)
                 continue
             deleted_paths.add(parent)
+            batch_task_ids.update(cid for cid in child_ids if cid)
+            if parent_id:
+                batch_task_ids.add(parent_id)
             changed_paths.update(child_paths)
             outcome["children"] = child_ids
             split_events.append(
@@ -3874,7 +3899,7 @@ def cmd_approve_plan(args: argparse.Namespace) -> int:
         pending = {}
     recorded_digest = pending.get("plan_digest")
     current_digest = _plan_content_digest(repo)
-    if isinstance(recorded_digest, str) and recorded_digest != current_digest:
+    if not isinstance(recorded_digest, str) or recorded_digest != current_digest:
         # the plan changed after it was proposed — approval of DIFFERENT
         # content must not succeed (C4)
         _record_swarm_event(
@@ -6311,10 +6336,15 @@ def _step_plan(args: argparse.Namespace) -> dict[str, object]:
         # (C12); a new failed run or a fresh marker changes the fingerprint.
         already_fired = _fired_replan_fingerprints(repo)
         for trigger in triggers:
+            marker_note = ""
+            if trigger == "planner_marker":
+                notes = _extract_section(_read_text(task.path), "Notes / Decisions") or ""
+                marker_lines = [ln.strip() for ln in notes.splitlines() if ln.strip()]
+                marker_note = marker_lines[-1] if marker_lines else ""
             fingerprint = _replan_fingerprint(
                 task_id=task_id,
                 trigger=trigger,
-                evidence=f"{len(failed)}:{int(wall_clock_seconds)}:{failure_context['blocked_reasons']}",
+                evidence=f"{len(failed)}:{int(wall_clock_seconds)}:{failure_context['blocked_reasons']}:{marker_note}",
             )
             if fingerprint in already_fired:
                 continue
@@ -6832,8 +6862,8 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     if (
         _plan_approval_pending(repo)
         and TaskV2Fields(_task_frontmatter(task)).task_schema == TASK_SCHEMA_VERSION
-        and not getattr(args, "force_deps", False)
     ):
+        # force_deps overrides DEPENDENCY ordering, never the human plan gate
         raise SystemExit(f"plan_unapproved:{task.task_id}:{PLAN_APPROVAL_PENDING_PATH.as_posix()}")
 
     if args.codex_sandbox == "danger-full-access" and not (
@@ -7029,11 +7059,10 @@ def cmd_run_task(args: argparse.Namespace) -> int:
 
     pinned_fields = TaskV2Fields(pinned_frontmatter)
     if (
-        args.final_state == "ready_for_review"
+        args.final_state in {"ready_for_review", "integration_ready"}
         and pinned_fields.task_schema == TASK_SCHEMA_VERSION
         and pinned_fields.complexity_tier in {"M", "L"}
         and pinned_fields.recon_required is True
-        and args.final_state in {"ready_for_review", "integration_ready"}
         and _reconnaissance_line_count(task_text_after_executor) < 3
     ):
         blocked_reasons.append("recon_missing")
