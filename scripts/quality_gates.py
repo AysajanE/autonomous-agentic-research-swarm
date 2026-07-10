@@ -21,6 +21,14 @@ import sys
 from typing import Any
 
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from swarm_taskfile import parse_status_value as _parse_status_value
+from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
+
+
 SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v1"
 JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v1"
 
@@ -256,67 +264,6 @@ def _parse_required_paths(value: object, mode: str | None) -> list[str]:
             out.extend(_coerce_str_list(value.get(mode)))
         return out
     return []
-
-
-def _parse_task_frontmatter(text: str) -> dict[str, object] | None:
-    lines = text.splitlines()
-    if len(lines) < 3 or lines[0].strip() != "---":
-        return None
-
-    end_idx = None
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            end_idx = index
-            break
-    if end_idx is None:
-        return None
-
-    data: dict[str, object] = {}
-    current_list_key: str | None = None
-    for raw_line in lines[1:end_idx]:
-        line = raw_line.split("#", 1)[0].rstrip()
-        if line.strip() == "":
-            continue
-
-        list_match = re.match(r"^\s*-\s+(.*)\s*$", line)
-        if current_list_key is not None and list_match is not None:
-            value = list_match.group(1).strip().strip("'\"")
-            current = data.get(current_list_key)
-            if isinstance(current, list):
-                current.append(value)
-            continue
-
-        current_list_key = None
-        if ":" not in line:
-            continue
-
-        key, rest = line.split(":", 1)
-        key = key.strip()
-        rest = rest.strip()
-
-        if rest == "":
-            data[key] = []
-            current_list_key = key
-            continue
-
-        if rest.startswith("[") and rest.endswith("]"):
-            inner = rest[1:-1].strip()
-            if inner == "":
-                data[key] = []
-            else:
-                data[key] = [item.strip().strip("'\"") for item in inner.split(",") if item.strip()]
-            continue
-
-        data[key] = rest.strip("'\"")
-
-    return data
-
-
-def _parse_status_value(text: str, field: str) -> str | None:
-    match = re.search(rf"^\s*-\s*{re.escape(field)}:\s*(.+?)\s*$", text, flags=re.MULTILINE)
-    if match is None:
-        return None
-    return match.group(1).strip()
 
 
 def load_framework_contract(repo: Path = Path(".")) -> FrameworkContract:

@@ -42,6 +42,17 @@ import time
 from typing import Any, Iterable
 
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from swarm_taskfile import WorktreeCollisionError
+from swarm_taskfile import parse_status_value as _parse_status_value
+from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
+from swarm_taskfile import parse_task_id_from_branch as _parse_task_id_from_branch
+from swarm_taskfile import update_task_status_and_notes as _shared_update_task_status_and_notes
+
+
 SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v1"
 JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v1"
 
@@ -146,10 +157,6 @@ class Task:
 
 def _utc_now_iso() -> str:
     return dt.datetime.now(tz=dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _utc_today() -> str:
-    return dt.datetime.now(tz=dt.timezone.utc).date().isoformat()
 
 
 def _utc_timestamp_compact() -> str:
@@ -325,68 +332,6 @@ def _resolve_repo_relative_path(repo: Path, raw_path: str) -> Path:
     if path.is_absolute():
         return path.resolve()
     return (repo / path).resolve()
-
-
-def _parse_task_frontmatter(text: str) -> dict[str, object] | None:
-    lines = text.splitlines()
-    if len(lines) < 3 or lines[0].strip() != "---":
-        return None
-
-    end_idx = None
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            end_idx = index
-            break
-    if end_idx is None:
-        return None
-
-    data: dict[str, object] = {}
-    current_list_key: str | None = None
-    for raw_line in lines[1:end_idx]:
-        line = raw_line.split("#", 1)[0].rstrip()
-        if line.strip() == "":
-            continue
-
-        list_match = re.match(r"^\s*-\s+(.*)\s*$", line)
-        if current_list_key is not None and list_match is not None:
-            value = list_match.group(1).strip().strip("'\"")
-            current = data.get(current_list_key)
-            if isinstance(current, list):
-                current.append(value)
-            continue
-
-        current_list_key = None
-        if ":" not in line:
-            continue
-
-        key, rest = line.split(":", 1)
-        key = key.strip()
-        rest = rest.strip()
-
-        if rest == "":
-            data[key] = []
-            current_list_key = key
-            continue
-
-        if rest.startswith("[") and rest.endswith("]"):
-            inner = rest[1:-1].strip()
-            if inner == "":
-                data[key] = []
-            else:
-                data[key] = [item.strip().strip("'\"") for item in inner.split(",") if item.strip()]
-            continue
-
-        data[key] = rest.strip("'\"")
-
-    return data
-
-
-def _parse_status_value(text: str, field: str) -> str | None:
-    pattern = rf"^\s*-\s*{re.escape(field)}:\s*(.+?)\s*$"
-    match = re.search(pattern, text, flags=re.MULTILINE)
-    if match is None:
-        return None
-    return match.group(1).strip()
 
 
 def load_framework_contract(repo: Path) -> FrameworkContract:
@@ -590,13 +535,36 @@ def _iter_task_files(contract: FrameworkContract) -> Iterable[Path]:
             yield path
 
 
-def load_tasks(contract: FrameworkContract) -> dict[str, Task]:
+def load_tasks_quarantined(contract: FrameworkContract) -> tuple[dict[str, Task], list[dict[str, str]]]:
     tasks: dict[str, Task] = {}
+    quarantined: list[dict[str, str]] = []
     for path in _iter_task_files(contract):
-        task = load_task(path, contract)
+        try:
+            task = load_task(path, contract)
+        except ValueError as exc:
+            quarantined.append(
+                {
+                    "path": path.resolve().relative_to(contract.repo_root.resolve()).as_posix(),
+                    "error": str(exc),
+                }
+            )
+            continue
         if task.task_id in tasks:
-            raise ValueError(f"duplicate_task_id:{task.task_id}:{tasks[task.task_id].path}:{path}")
+            quarantined.append(
+                {
+                    "path": path.resolve().relative_to(contract.repo_root.resolve()).as_posix(),
+                    "error": f"duplicate_task_id:{task.task_id}:{tasks[task.task_id].path}:{path}",
+                }
+            )
+            continue
         tasks[task.task_id] = task
+    return tasks, quarantined
+
+
+def load_tasks(contract: FrameworkContract) -> dict[str, Task]:
+    tasks, quarantined = load_tasks_quarantined(contract)
+    if quarantined:
+        raise ValueError(quarantined[0]["error"])
     return tasks
 
 
@@ -715,11 +683,6 @@ def _build_prompt_context(task: Task, repo: Path, repair_context: str | None) ->
         "runner_mode": "local_swarm",
         "base_branch": "",
     }
-
-
-def _parse_task_id_from_branch(branch_name: str) -> str | None:
-    match = re.match(r"^(T\d{3})\b", branch_name)
-    return match.group(1) if match else None
 
 
 def _git_current_branch(cwd: Path) -> str:
@@ -845,7 +808,7 @@ def ensure_worktree(*, repo: Path, task: Task, worktree_parent: Path, base_ref: 
     worktree_path = worktree_parent / f"wt-{task.task_id}"
 
     if worktree_path.exists():
-        raise SystemExit(f"worktree_path_already_exists:{worktree_path}")
+        raise WorktreeCollisionError(worktree_path)
 
     branch_exists = _run(
         ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
@@ -1349,36 +1312,12 @@ def _is_valid_review_log(path: Path, task_id: str, scientific_review_role: str) 
 
 
 def _update_task_status_and_notes(*, task_path: Path, new_state: str, note_line: str) -> None:
-    text = _read_text(task_path)
-
-    if new_state not in set(DEFAULT_ALLOWED_STATES):
-        raise ValueError(f"invalid_state:{new_state}")
-
-    updated_text, state_subs = re.subn(
-        r"^\s*-\s*State:\s*.+?\s*$",
-        f"- State: {new_state}",
-        text,
-        flags=re.MULTILINE,
+    _shared_update_task_status_and_notes(
+        task_path=task_path,
+        new_state=new_state,
+        note_line=note_line,
+        allowed_states=DEFAULT_ALLOWED_STATES,
     )
-    if state_subs == 0:
-        raise SystemExit(f"missing_state_line:{task_path}")
-
-    updated_text, last_updated_subs = re.subn(
-        r"^\s*-\s*Last updated:\s*\d{4}-\d{2}-\d{2}\s*$",
-        f"- Last updated: {_utc_today()}",
-        updated_text,
-        flags=re.MULTILINE,
-    )
-    if last_updated_subs == 0:
-        raise SystemExit(f"missing_last_updated_line:{task_path}")
-
-    if "## Notes / Decisions" not in updated_text:
-        raise SystemExit(f"missing_notes_heading:{task_path}")
-
-    if not updated_text.endswith("\n"):
-        updated_text += "\n"
-    updated_text += f"- {_utc_today()}: {note_line}\n"
-    task_path.write_text(updated_text, encoding="utf-8")
 
 
 def _codex_exec_cmd(
@@ -1437,7 +1376,7 @@ def _executor_prompt_path(task: Task, contract: FrameworkContract) -> Path:
 def cmd_plan(args: argparse.Namespace) -> int:
     repo = _repo_root()
     contract = load_framework_contract(repo)
-    tasks = load_tasks(contract)
+    tasks, quarantined = load_tasks_quarantined(contract)
 
     done_ids = sorted(task_id for task_id, task in tasks.items() if task.state == "done")
     integration_ready_ids = sorted(task_id for task_id, task in tasks.items() if task.state == "integration_ready")
@@ -1448,6 +1387,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "done": done_ids,
         "integration_ready": integration_ready_ids,
         "claimed": claimed_ids,
+        "quarantined": quarantined,
         "ready": [_task_summary(task) for task in ready],
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1468,7 +1408,7 @@ def cmd_tick(args: argparse.Namespace) -> int:
             create_pr=bool(args.create_pr),
         )
 
-    tasks = load_tasks(contract)
+    tasks, quarantined = load_tasks_quarantined(contract)
     claimed_ids = claimed_task_ids(repo, args.remote, args.base_branch)
     ready = ready_backlog_tasks(tasks, claimed_ids, contract)
 
@@ -1479,8 +1419,10 @@ def cmd_tick(args: argparse.Namespace) -> int:
         "done": sorted(task_id for task_id, task in tasks.items() if task.state == "done"),
         "integration_ready": sorted(task_id for task_id, task in tasks.items() if task.state == "integration_ready"),
         "claimed": sorted(claimed_ids),
+        "quarantined": quarantined,
         "ready": [task.task_id for task in ready],
         "selected": [task.task_id for task in selected],
+        "skipped": [],
         "dry_run": bool(args.dry_run),
     }
 
@@ -1498,12 +1440,22 @@ def cmd_tick(args: argparse.Namespace) -> int:
             _tmux("set-environment", "-g", "SWARM_UNATTENDED_I_UNDERSTAND", "1")
 
     for task in selected:
-        worktree_path, branch = ensure_worktree(
-            repo=repo,
-            task=task,
-            worktree_parent=worktree_parent,
-            base_ref=args.base_branch,
-        )
+        try:
+            worktree_path, branch = ensure_worktree(
+                repo=repo,
+                task=task,
+                worktree_parent=worktree_parent,
+                base_ref=args.base_branch,
+            )
+        except WorktreeCollisionError as exc:
+            summary["skipped"].append(
+                {
+                    "task_id": task.task_id,
+                    "reason": "worktree_collision",
+                    "worktree": str(exc.worktree_path),
+                }
+            )
+            continue
         started.append(
             {
                 "task_id": task.task_id,
@@ -1551,6 +1503,41 @@ def cmd_tick(args: argparse.Namespace) -> int:
     return 0
 
 
+def _loop_iteration(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    _supervisor_sync_to_remote_base(repo=repo, remote=args.remote, base_branch=args.base_branch)
+    return cmd_tick(args)
+
+
+def _handle_loop_failure(exc: BaseException, *, interval_seconds: int, consecutive_failures: int) -> int:
+    print(
+        f"[loop] escalation iteration_failed kind={type(exc).__name__} detail={exc}",
+        file=sys.stderr,
+    )
+    return min(3600, interval_seconds * (2 ** max(0, consecutive_failures - 1)))
+
+
+def _attempt_loop_iteration(
+    args: argparse.Namespace,
+    *,
+    interval_seconds: int,
+    consecutive_failures: int,
+) -> tuple[int, int]:
+    try:
+        _loop_iteration(args)
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        consecutive_failures += 1
+        backoff_seconds = _handle_loop_failure(
+            exc,
+            interval_seconds=interval_seconds,
+            consecutive_failures=consecutive_failures,
+        )
+        return consecutive_failures, backoff_seconds
+    return 0, 0
+
+
 def cmd_loop(args: argparse.Namespace) -> int:
     repo = _repo_root()
 
@@ -1566,17 +1553,16 @@ def cmd_loop(args: argparse.Namespace) -> int:
 
     interval_seconds = max(5, int(args.interval_seconds))
     print(f"swarm_loop_started interval={interval_seconds}s repo={repo}")
+    consecutive_failures = 0
 
     while True:
         try:
-            _supervisor_sync_to_remote_base(repo=repo, remote=args.remote, base_branch=args.base_branch)
-            cmd_tick(args)
-        except Exception as exc:
-            print(f"[loop] tick_failed: {exc}", file=sys.stderr)
-            if args.unattended:
-                return 1
-        try:
-            remaining = interval_seconds
+            consecutive_failures, backoff_seconds = _attempt_loop_iteration(
+                args,
+                interval_seconds=interval_seconds,
+                consecutive_failures=consecutive_failures,
+            )
+            remaining = interval_seconds + backoff_seconds
             while remaining > 0:
                 sleep_seconds = min(5, remaining)
                 time.sleep(sleep_seconds)

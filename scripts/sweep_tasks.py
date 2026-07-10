@@ -13,9 +13,15 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-import re
 import subprocess
 import sys
+
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from swarm_taskfile import parse_status_value
 
 
 DEFAULT_PROJECTION_DIRS = (
@@ -73,8 +79,7 @@ def _load_projection_dirs(repo: Path) -> tuple[str, ...]:
 
 
 def _parse_state(text: str) -> str | None:
-    match = re.search(r"^\s*-\s*State:\s*(\S+)\s*$", text, flags=re.MULTILINE)
-    return match.group(1).strip() if match else None
+    return parse_status_value(text, "State")
 
 
 def _iter_task_files(orchestrator_dir: Path, projection_dirs: tuple[str, ...]) -> list[Path]:
