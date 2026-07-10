@@ -12,10 +12,12 @@ This runtime keeps the file-based control plane intact:
 - `ready_for_review` requires outputs, gates, manifests, and a durable run manifest
 - `done` requires a deterministic Judge review log
 
-The public operator-facing commands remain:
+The public operator-facing commands are:
 
+- `status`
 - `plan`
 - `tick`
+- `supervise`
 - `loop`
 - `tmux-start`
 
@@ -28,9 +30,11 @@ Internal helper commands used by the supervisor:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import datetime as dt
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -48,7 +52,11 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+import swarm_claims
+import swarm_events
+import sweep_tasks
 from swarm_taskfile import WorktreeCollisionError
+from swarm_taskfile import extract_section as _extract_section
 from swarm_taskfile import parse_status_value as _parse_status_value
 from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 from swarm_taskfile import parse_task_id_from_branch as _parse_task_id_from_branch
@@ -56,12 +64,18 @@ from swarm_taskfile import update_task_status_and_notes as _shared_update_task_s
 
 
 SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
 JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
+MOCK_TRANSCRIPT_SCHEMA_VERSION = "research_swarm.mock_transcript.v1"
+EXECUTOR_SESSION_SCHEMA_VERSION = "research_swarm.executor_session.v1"
 
 EXECUTOR_LOG_MAX_BYTES = 128 * 1024
 EXECUTOR_LOG_SEGMENT_BYTES = 64 * 1024
+EXECUTOR_SESSION_SEGMENT_BYTES = 16 * 1024
 
 DEFAULT_REVIEW_MIN_SEPARATION_SECONDS = 60
+DEFAULT_REPAIR_MAX_ATTEMPTS = 2
+DEFAULT_MAX_READY_FOR_REVIEW = 4
 
 GATE_OUTPUT_SEGMENT_BYTES = 8 * 1024
 DEFAULT_GATE_INTERPRETER_ALLOWLIST = ("python", "python3", "make")
@@ -151,6 +165,11 @@ class FrameworkContract:
     review_min_separation_seconds: int
     gate_interpreter_allowlist: tuple[str, ...]
     gate_timeout_seconds: int
+    repair_max_attempts: int
+    wip_max_active: int | None
+    wip_max_ready_for_review: int
+    budget_max_program_usd: float | None
+    claim_lease_ttl_seconds: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -174,6 +193,15 @@ class Task:
     last_updated: str
 
 
+@dataclasses.dataclass(frozen=True)
+class ExecutorOutcome:
+    returncode: int
+    stdout: str
+    wall_clock_seconds: float
+    usage: dict[str, object] | None
+    transcript_path: str | None
+
+
 def _utc_now_iso() -> str:
     return dt.datetime.now(tz=dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -189,6 +217,27 @@ def _read_text(path: Path) -> str:
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _record_swarm_event(
+    repo: Path,
+    event: dict[str, object],
+    *,
+    escalation: bool = False,
+) -> dict | None:
+    """Best-effort journaling: runtime exit semantics never depend on it."""
+    try:
+        event_repo_raw = os.environ.get("SWARM_EVENT_REPO_ROOT", "").strip()
+        event_repo = Path(event_repo_raw).expanduser().resolve() if event_repo_raw else repo
+        writer = swarm_events.escalate if escalation else swarm_events.append_event
+        return writer(event_repo, event, actor_session=_ACTOR_SESSION_ID)
+    except Exception as exc:
+        print(
+            f"[warn] event journal failed event={event.get('event')} "
+            f"error={type(exc).__name__}:{exc}",
+            file=sys.stderr,
+        )
+        return None
 
 
 def _run(
@@ -261,6 +310,221 @@ def _invoke_executor(
     )
 
 
+def _parse_codex_usage(stdout: str) -> dict[str, object] | None:
+    """Best-effort parser for token splits printed by the Codex CLI.
+
+    A total-only ``tokens used`` line is deliberately not attributed to either
+    input or output: doing so would make cost estimation look more precise than
+    the executor output permits.
+    """
+    if not isinstance(stdout, str) or not stdout:
+        return None
+
+    number = r"(\d[\d,_]*)"
+    input_matches = re.findall(
+        rf"\binput(?:\s+tokens?)?\s*[:=]\s*{number}",
+        stdout,
+        flags=re.IGNORECASE,
+    )
+    output_matches = re.findall(
+        rf"\boutput(?:\s+tokens?)?\s*[:=]\s*{number}",
+        stdout,
+        flags=re.IGNORECASE,
+    )
+    if not input_matches and not output_matches:
+        return None
+
+    usage: dict[str, object] = {"source": "parsed"}
+    if input_matches:
+        usage["input_tokens"] = int(input_matches[-1].replace(",", "").replace("_", ""))
+    if output_matches:
+        usage["output_tokens"] = int(output_matches[-1].replace(",", "").replace("_", ""))
+    return usage
+
+
+def _mock_transcript_relpath(task_id: str) -> str:
+    return f".orchestrator/mock_transcripts/{task_id}.json"
+
+
+def _safe_mock_action_path(repo: Path, raw_path: object) -> Path:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError("mock_action_path_invalid")
+    normalized = raw_path.replace("\\", "/")
+    if (
+        Path(raw_path).is_absolute()
+        or re.match(r"^[A-Za-z]:/", normalized)
+        or any(part == ".." for part in normalized.split("/"))
+    ):
+        raise ValueError(f"mock_action_path_forbidden:{raw_path}")
+    candidate = (repo / raw_path).resolve()
+    try:
+        candidate.relative_to(repo.resolve())
+    except ValueError as exc:
+        raise ValueError(f"mock_action_path_forbidden:{raw_path}") from exc
+    return candidate
+
+
+def _mock_usage(raw_usage: object) -> dict[str, object] | None:
+    if raw_usage is None:
+        return None
+    if not isinstance(raw_usage, dict):
+        raise ValueError("mock_usage_invalid")
+    usage: dict[str, object] = {"source": "mock_transcript"}
+    for key in ("input_tokens", "output_tokens"):
+        value = raw_usage.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"mock_usage_invalid:{key}")
+        usage[key] = value
+    return usage
+
+
+def _run_mock_transcript(*, repo: Path, task: Task) -> tuple[int, str, dict[str, object] | None, str]:
+    transcript_relpath = _mock_transcript_relpath(task.task_id)
+    transcript_path = repo / transcript_relpath
+    if not transcript_path.is_file():
+        return 1, f"mock_transcript_missing:{transcript_relpath}", None, transcript_relpath
+
+    try:
+        payload = json.loads(_read_text(transcript_path))
+        if not isinstance(payload, dict):
+            raise ValueError("mock_transcript_not_object")
+        if payload.get("schema_version") != MOCK_TRANSCRIPT_SCHEMA_VERSION:
+            raise ValueError(f"mock_transcript_schema_invalid:{payload.get('schema_version')}")
+        actions = payload.get("actions")
+        if not isinstance(actions, list):
+            raise ValueError("mock_transcript_actions_invalid")
+
+        for index, action in enumerate(actions):
+            if not isinstance(action, dict):
+                raise ValueError(f"mock_transcript_action_invalid:{index}")
+            action_keys = [
+                key
+                for key in ("write", "append", "set_task_state", "note", "sleep_seconds")
+                if key in action
+            ]
+            if len(action_keys) != 1:
+                raise ValueError(f"mock_transcript_action_invalid:{index}")
+            action_key = action_keys[0]
+            if action_key in {"write", "append"}:
+                target = _safe_mock_action_path(repo, action[action_key])
+                rel = target.relative_to(repo.resolve()).as_posix()
+                denied_prefixes = (".git", "reports/status/", ".orchestrator/mock_transcripts/")
+                if rel == ".git" or any(
+                    rel == prefix.rstrip("/") or rel.startswith(prefix)
+                    for prefix in denied_prefixes
+                ):
+                    raise ValueError(f"mock_transcript_path_denied:{rel}")
+                task_file_rel = task.path.resolve().relative_to(repo.resolve()).as_posix()
+                allowed, reason = _path_is_allowed(
+                    path=rel,
+                    allowed_paths=task.allowed_paths,
+                    disallowed_paths=task.disallowed_paths,
+                    task_file_path=task_file_rel,
+                    task_id=task.task_id,
+                )
+                if not allowed:
+                    raise ValueError(f"mock_transcript_path_denied:{rel}:{reason}")
+                content = action.get("content")
+                if not isinstance(content, str):
+                    raise ValueError(f"mock_transcript_content_invalid:{index}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                mode = "a" if action_key == "append" else "w"
+                with target.open(mode, encoding="utf-8") as handle:
+                    handle.write(content)
+            elif action_key == "set_task_state":
+                new_state = action[action_key]
+                if not isinstance(new_state, str):
+                    raise ValueError(f"mock_transcript_state_invalid:{index}")
+                _update_task_status_and_notes(
+                    task_path=task.path,
+                    new_state=new_state,
+                    note_line=f"Mock transcript set task state to {new_state}.",
+                )
+            elif action_key == "note":
+                note = action[action_key]
+                if not isinstance(note, str):
+                    raise ValueError(f"mock_transcript_note_invalid:{index}")
+                current_state = _parse_status_value(_read_text(task.path), "State")
+                if current_state is None:
+                    raise ValueError("mock_transcript_task_state_missing")
+                _update_task_status_and_notes(
+                    task_path=task.path,
+                    new_state=current_state,
+                    note_line=note,
+                )
+            else:
+                seconds = action[action_key]
+                if (
+                    not isinstance(seconds, (int, float))
+                    or isinstance(seconds, bool)
+                    or seconds < 0
+                ):
+                    raise ValueError(f"mock_transcript_sleep_invalid:{index}")
+                if seconds > 30:
+                    raise ValueError(f"mock_transcript_sleep_too_long:{index}:{seconds}")
+                time.sleep(float(seconds))
+
+        returncode = payload.get("returncode")
+        stdout = payload.get("stdout")
+        if not isinstance(returncode, int) or isinstance(returncode, bool):
+            raise ValueError("mock_transcript_returncode_invalid")
+        if not isinstance(stdout, str):
+            raise ValueError("mock_transcript_stdout_invalid")
+        usage = _mock_usage(payload.get("usage"))
+        return returncode, stdout, usage, transcript_relpath
+    except Exception as exc:
+        detail = str(exc).replace("\n", " ").strip()
+        return (
+            1,
+            f"mock_transcript_error:{type(exc).__name__}:{detail}",
+            None,
+            transcript_relpath,
+        )
+
+
+def _execute_task(
+    *,
+    backend: str,
+    task: Task,
+    prompt: str,
+    args: argparse.Namespace,
+    repo: Path,
+    timeout_seconds: int | None,
+) -> ExecutorOutcome:
+    started = time.perf_counter()
+    if backend == "mock":
+        returncode, stdout, usage, transcript_path = _run_mock_transcript(repo=repo, task=task)
+    elif backend == "codex":
+        prepared_command = getattr(args, "_executor_command", None)
+        command = (
+            list(prepared_command)
+            if isinstance(prepared_command, list)
+            else _codex_exec_cmd(
+                prompt=prompt,
+                model=getattr(args, "codex_model", None),
+                sandbox=getattr(args, "codex_sandbox", "workspace-write"),
+                unattended=bool(getattr(args, "unattended", False)),
+                allow_network=task.allow_network,
+                workdir=repo,
+            )
+        )
+        cp = _invoke_executor(command=command, cwd=repo, timeout_seconds=timeout_seconds)
+        returncode = cp.returncode
+        stdout = cp.stdout or ""
+        usage = _parse_codex_usage(stdout)
+        transcript_path = None
+    else:
+        raise ValueError(f"unsupported_executor_backend:{backend}")
+
+    return ExecutorOutcome(
+        returncode=returncode,
+        stdout=stdout,
+        wall_clock_seconds=max(0.0, time.perf_counter() - started),
+        usage=usage,
+        transcript_path=transcript_path,
+    )
+
+
 def _executor_output_bytes(output: object) -> bytes:
     if isinstance(output, bytes):
         return output
@@ -280,6 +544,107 @@ def _write_executor_log(*, repo: Path, run_id: str, output: object) -> tuple[str
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_bytes(raw)
     return log_path.relative_to(repo).as_posix(), hashlib.sha256(raw).hexdigest()
+
+
+def _redact_argv_env_values(argv: list[str]) -> list[str]:
+    sensitive_fragments = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH", "API_KEY")
+    environment = [(key, value) for key, value in os.environ.items() if value]
+    redacted: list[str] = []
+    for raw_arg in argv:
+        arg = str(raw_arg)
+        for key, value in environment:
+            marker = f"<redacted-env:{key}>"
+            if arg == value:
+                arg = marker
+            elif arg == f"{key}={value}":
+                arg = f"{key}={marker}"
+            elif any(fragment in key.upper() for fragment in sensitive_fragments) and value in arg:
+                arg = arg.replace(value, marker)
+        redacted.append(arg)
+    return redacted
+
+
+def _write_executor_session(
+    *,
+    repo: Path,
+    run_id: str,
+    backend: str,
+    argv: list[str],
+    returncode: int | None,
+    wall_clock_seconds: float,
+    stdout: object,
+    usage: dict[str, object],
+) -> str:
+    raw = _executor_output_bytes(stdout)
+    head = raw[:EXECUTOR_SESSION_SEGMENT_BYTES].decode("utf-8", errors="replace")
+    tail = raw[-EXECUTOR_SESSION_SEGMENT_BYTES:].decode("utf-8", errors="replace")
+    session_path = repo / "reports" / "status" / "swarm_runs" / "sessions" / f"{run_id}.json"
+    _write_json(
+        session_path,
+        {
+            "schema_version": EXECUTOR_SESSION_SCHEMA_VERSION,
+            "run_id": run_id,
+            "backend": backend,
+            "argv": _redact_argv_env_values(argv),
+            "returncode": returncode,
+            "wall_clock_seconds": wall_clock_seconds,
+            "stdout_head": head,
+            "stdout_tail": tail,
+            "stdout_sha256": hashlib.sha256(raw).hexdigest(),
+            "usage": usage,
+        },
+    )
+    return session_path.relative_to(repo).as_posix()
+
+
+def _usage_with_cost_estimate(
+    *,
+    repo: Path,
+    model: object,
+    wall_clock_seconds: float,
+    captured_usage: dict[str, object] | None,
+) -> dict[str, object]:
+    usage: dict[str, object] = {
+        "wall_clock_seconds": round(max(0.0, wall_clock_seconds), 6),
+        "source": "unavailable",
+    }
+    if captured_usage is not None:
+        usage.update(captured_usage)
+
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    if not (
+        isinstance(model, str)
+        and model
+        and isinstance(input_tokens, int)
+        and not isinstance(input_tokens, bool)
+        and isinstance(output_tokens, int)
+        and not isinstance(output_tokens, bool)
+    ):
+        return usage
+
+    try:
+        framework = json.loads(_read_text(repo / "contracts" / "framework.json"))
+    except (OSError, json.JSONDecodeError):
+        return usage
+    pricing = framework.get("pricing") if isinstance(framework, dict) else None
+    model_pricing = pricing.get(model) if isinstance(pricing, dict) else None
+    if not isinstance(model_pricing, dict):
+        return usage
+    input_rate = model_pricing.get("input_per_mtok_usd")
+    output_rate = model_pricing.get("output_per_mtok_usd")
+    if not (
+        isinstance(input_rate, (int, float))
+        and not isinstance(input_rate, bool)
+        and isinstance(output_rate, (int, float))
+        and not isinstance(output_rate, bool)
+    ):
+        return usage
+
+    estimated = ((input_tokens * float(input_rate)) + (output_tokens * float(output_rate))) / 1_000_000
+    usage["estimated_cost_usd"] = round(estimated, 4)
+    usage["pricing_source"] = "framework_contract"
+    return usage
 
 
 def _task_frontmatter_snapshot(path: Path) -> tuple[str, dict[str, object]]:
@@ -538,6 +903,44 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
     except (TypeError, ValueError):
         gate_timeout_seconds = DEFAULT_GATE_TIMEOUT_SECONDS
 
+    repair = raw.get("repair")
+    try:
+        repair_max_attempts = int(repair.get("max_attempts")) if isinstance(repair, dict) else DEFAULT_REPAIR_MAX_ATTEMPTS
+    except (TypeError, ValueError):
+        repair_max_attempts = DEFAULT_REPAIR_MAX_ATTEMPTS
+    repair_max_attempts = max(0, repair_max_attempts)
+
+    wip = raw.get("wip")
+    try:
+        configured_max_active = int(wip.get("max_active")) if isinstance(wip, dict) and wip.get("max_active") is not None else None
+    except (TypeError, ValueError):
+        configured_max_active = None
+    wip_max_active = max(0, configured_max_active) if configured_max_active is not None else None
+    try:
+        wip_max_ready_for_review = int(wip.get("max_ready_for_review")) if isinstance(wip, dict) else DEFAULT_MAX_READY_FOR_REVIEW
+    except (TypeError, ValueError):
+        wip_max_ready_for_review = DEFAULT_MAX_READY_FOR_REVIEW
+    wip_max_ready_for_review = max(0, wip_max_ready_for_review)
+
+    budgets = raw.get("budgets")
+    budget_raw = budgets.get("max_program_usd") if isinstance(budgets, dict) else None
+    budget_max_program_usd = (
+        float(budget_raw)
+        if isinstance(budget_raw, (int, float)) and not isinstance(budget_raw, bool)
+        else None
+    )
+
+    claims = raw.get("claims")
+    try:
+        claim_lease_ttl_seconds = (
+            int(claims.get("lease_ttl_seconds"))
+            if isinstance(claims, dict)
+            else swarm_claims.DEFAULT_LEASE_TTL_SECONDS
+        )
+    except (TypeError, ValueError):
+        claim_lease_ttl_seconds = swarm_claims.DEFAULT_LEASE_TTL_SECONDS
+    claim_lease_ttl_seconds = max(0, claim_lease_ttl_seconds)
+
     return FrameworkContract(
         repo_root=repo,
         control_plane_root=control_plane_root,
@@ -559,6 +962,11 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
         review_min_separation_seconds=review_min_separation_seconds,
         gate_interpreter_allowlist=gate_interpreter_allowlist,
         gate_timeout_seconds=gate_timeout_seconds,
+        repair_max_attempts=repair_max_attempts,
+        wip_max_active=wip_max_active,
+        wip_max_ready_for_review=wip_max_ready_for_review,
+        budget_max_program_usd=budget_max_program_usd,
+        claim_lease_ttl_seconds=claim_lease_ttl_seconds,
     )
 
 
@@ -820,7 +1228,10 @@ def _resolve_base_ref_for_diff(*, cwd: Path, base_branch: str, remote: str) -> s
 
 
 def claimed_task_ids(repo: Path, remote: str, base_branch: str) -> set[str]:
-    claimed: set[str] = set()
+    try:
+        claimed: set[str] = set(swarm_claims.read_claims(repo, remote))
+    except Exception:
+        claimed = set()
 
     try:
         cp = _run(
@@ -1086,10 +1497,96 @@ def _gh_create_pr_if_missing(*, cwd: Path, base_branch: str, title: str, body: s
     )
 
 
-def _require_unattended_ack() -> None:
-    if os.environ.get("SWARM_UNATTENDED_I_UNDERSTAND") == "1":
-        return
-    raise SystemExit("missing_unattended_ack:SWARM_UNATTENDED_I_UNDERSTAND=1")
+CONTAINMENT_MARKER_RELPATH = ".swarm/containment.json"
+VENDOR_ACK_RELPATH = ".swarm/vendor_policy_ack.json"
+CONTAINMENT_MARKER_SCHEMA_VERSION = "research_swarm.containment_marker.v1"
+VENDOR_ACK_SCHEMA_VERSION = "research_swarm.vendor_policy_ack.v1"
+
+# Credential classes whose readability disproves containment (§9.4): an
+# unattended swarm must not run where user-level credentials beyond a scoped
+# deploy key are readable.
+_SENSITIVE_CREDENTIAL_PATHS = (
+    (".aws/credentials", "aws_credentials"),
+    (".ssh/id_rsa", "ssh_private_key"),
+    (".ssh/id_ecdsa", "ssh_private_key"),
+    (".ssh/id_ed25519", "ssh_private_key"),
+    (".config/gcloud/application_default_credentials.json", "gcloud_adc"),
+    (".netrc", "netrc"),
+    (".docker/config.json", "docker_auth"),
+)
+
+
+def _real_home() -> Path:
+    """The account's real home (test seam): env HOME is caller-controlled and
+    must not be able to hide credentials from the containment scan."""
+    try:
+        import pwd
+
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:
+        return Path(os.path.expanduser("~"))
+
+
+def _readable_credential_classes(home: Path) -> list[str]:
+    found: set[str] = set()
+    for rel, klass in _SENSITIVE_CREDENTIAL_PATHS:
+        candidate = home / rel
+        try:
+            if candidate.is_file() and os.access(candidate, os.R_OK):
+                found.add(klass)
+        except OSError:
+            continue
+    return sorted(found)
+
+
+def _require_containment(repo: Path) -> None:
+    """§9.4 (M1): unattended automation refuses to start outside a sandboxed,
+    attested environment. The marker is a machine-local human attestation;
+    the credential scan is the mechanical disproof."""
+    marker_path = repo / CONTAINMENT_MARKER_RELPATH
+    if not marker_path.is_file():
+        raise SystemExit(
+            f"containment_marker_missing:{CONTAINMENT_MARKER_RELPATH}"
+            " (attest with: python scripts/swarm.py attest-containment --attested-by <name>)"
+        )
+    try:
+        marker = json.loads(_read_text(marker_path))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"containment_marker_invalid:{exc}") from exc
+    if not isinstance(marker, dict) or marker.get("contained") is not True:
+        raise SystemExit("containment_marker_invalid:contained_not_true")
+
+    credentials = set(_readable_credential_classes(_real_home()))
+    waived = marker.get("credential_scan_waiver")
+    if isinstance(waived, list):
+        # §9.4 allows exactly one exception class: credentials the attesting
+        # human explicitly names (e.g. a scoped deploy key). The waiver lives
+        # in the ATTESTED marker, never in env — env is caller-controlled.
+        credentials -= {item for item in waived if isinstance(item, str)}
+    if credentials:
+        raise SystemExit(
+            "containment_credentials_readable:" + ",".join(sorted(credentials))
+        )
+
+    ack_path = repo / VENDOR_ACK_RELPATH
+    if not ack_path.is_file():
+        raise SystemExit(
+            f"vendor_policy_ack_missing:{VENDOR_ACK_RELPATH}"
+            " (record with: python scripts/swarm.py ack-vendor-policy"
+            " --vendor <vendor> --note <policy note> --acked-by <name>)"
+        )
+    try:
+        ack = json.loads(_read_text(ack_path))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"vendor_policy_ack_invalid:{exc}") from exc
+    if not isinstance(ack, dict) or not str(ack.get("vendor", "")).strip():
+        raise SystemExit("vendor_policy_ack_invalid:missing_vendor")
+
+
+def _require_unattended_ack(repo: Path | None = None) -> None:
+    if os.environ.get("SWARM_UNATTENDED_I_UNDERSTAND") != "1":
+        raise SystemExit("missing_unattended_ack:SWARM_UNATTENDED_I_UNDERSTAND=1")
+    _require_containment(repo if repo is not None else _repo_root())
 
 
 def _local_base_ahead_count(*, repo: Path, remote: str, base_branch: str) -> int:
@@ -1172,6 +1669,19 @@ def _git_untracked_files(cwd: Path) -> list[str]:
     return [line.strip() for line in (cp.stdout or "").splitlines() if line.strip()]
 
 
+def _runtime_event_paths(repo: Path) -> set[str]:
+    paths = {swarm_events.EVENT_JOURNAL_PATH.as_posix()}
+    sink = swarm_events.escalation_sink_config(repo)
+    if sink.get("type") != "file":
+        return paths
+    try:
+        target = (repo / str(sink["target"])).resolve().relative_to(repo.resolve())
+    except (KeyError, ValueError):
+        return paths
+    paths.add(target.as_posix())
+    return paths
+
+
 def _git_unstage_path(cwd: Path, path: str) -> None:
     head_entry = _run(
         ["git", "ls-tree", "HEAD", "--", path],
@@ -1201,6 +1711,7 @@ def _git_unstage_path(cwd: Path, path: str) -> None:
 def _collect_changed_paths_with_sources(*, repo: Path, base_ref: str | None) -> tuple[dict[str, set[str]], list[dict[str, str]]]:
     path_sources: dict[str, set[str]] = {}
     ops: list[dict[str, str]] = []
+    runtime_event_paths = _runtime_event_paths(repo)
 
     def add_entries(source: str, entries: list[dict[str, str]]) -> None:
         for entry in entries:
@@ -1208,7 +1719,7 @@ def _collect_changed_paths_with_sources(*, repo: Path, base_ref: str | None) -> 
             record["source"] = source
             ops.append(record)
             for candidate in (entry.get("path", ""), entry.get("old_path", "")):
-                if not candidate:
+                if not candidate or candidate in runtime_event_paths:
                     continue
                 path_sources.setdefault(candidate, set()).add(source)
 
@@ -1217,6 +1728,8 @@ def _collect_changed_paths_with_sources(*, repo: Path, base_ref: str | None) -> 
     add_entries("staged", _git_diff_name_status_entries(repo, ["--cached"]))
     add_entries("unstaged", _git_diff_name_status_entries(repo, []))
     for path in _git_untracked_files(repo):
+        if path in runtime_event_paths:
+            continue
         path_sources.setdefault(path, set()).add("untracked")
         ops.append(
             {
@@ -1253,11 +1766,14 @@ def _path_is_allowed(
     if norm in _task_projection_paths(task_file_path):
         return True, None
     if norm.startswith(".orchestrator/handoff/"):
-        return True, None
+        digits = task_id[1:] if task_id.startswith("T") else task_id
+        if Path(norm).name.startswith(f"H{digits}_"):
+            return True, None
+        return False, "handoff_namespace_violation"
     if norm.startswith("reports/status/swarm_runs/") and Path(norm).name.startswith(f"{task_id}_"):
         return True, None
-    if norm.startswith("reports/status/reviews/") and Path(norm).name.startswith(f"{task_id}_"):
-        return True, None
+    # reports/status/reviews/ is deliberately NOT task-writable: review logs
+    # are Judge-only artifacts (M1 review fix — forged-approval channel).
     if norm.startswith(".orchestrator/"):
         return False, "orchestrator_write_forbidden"
 
@@ -1840,6 +2356,387 @@ def _executor_prompt_path(task: Task, contract: FrameworkContract) -> Path:
     return contract.prompt_templates[key]
 
 
+def _latest_run_manifest_status(
+    *,
+    repo: Path,
+    directory: Path,
+    task_id: str,
+) -> dict[str, object]:
+    paths = _matching_task_jsons(directory, task_id)
+    if not paths:
+        return {
+            "last_run_manifest": None,
+            "last_run_status": None,
+            "blocked_reasons": [],
+        }
+
+    path = paths[-1]
+    status: str | None = None
+    blocked_reasons: list[str] = []
+    try:
+        data = json.loads(_read_text(path))
+        task_block = data.get("task") if isinstance(data, dict) else None
+        result = data.get("result") if isinstance(data, dict) else None
+        if (
+            isinstance(task_block, dict)
+            and task_block.get("task_id") == task_id
+            and isinstance(result, dict)
+        ):
+            raw_status = result.get("status")
+            if isinstance(raw_status, str):
+                status = raw_status
+            raw_reasons = result.get("blocked_reasons")
+            if isinstance(raw_reasons, list):
+                blocked_reasons = [item for item in raw_reasons if isinstance(item, str)]
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    return {
+        "last_run_manifest": path.relative_to(repo).as_posix(),
+        "last_run_status": status,
+        "blocked_reasons": blocked_reasons,
+    }
+
+
+def _last_human_note(task: Task) -> str | None:
+    try:
+        section = _extract_section(_read_text(task.path), "Notes / Decisions")
+    except OSError:
+        return None
+    if section is None:
+        return None
+    note_lines = [line.strip() for line in section.splitlines() if line.strip()]
+    if not note_lines or "@human" not in note_lines[-1]:
+        return None
+    return note_lines[-1].removeprefix("- ").strip()
+
+
+def _run_manifest_spend(directory: Path) -> float | str:
+    values: list[float] = []
+    if directory.exists():
+        for path in sorted(directory.glob("*.json")):
+            try:
+                data = json.loads(_read_text(path))
+            except (OSError, json.JSONDecodeError):
+                continue
+            usage = data.get("usage") if isinstance(data, dict) else None
+            value = usage.get("estimated_cost_usd") if isinstance(usage, dict) else None
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                values.append(float(value))
+    return sum(values) if values else "unknown"
+
+
+def _render_status_text(payload: dict[str, object]) -> str:
+    lines = ["Swarm status"]
+    states = payload["states"]
+    assert isinstance(states, dict)
+    for state in DEFAULT_ALLOWED_STATES:
+        task_ids = states.get(state, [])
+        rendered = ", ".join(task_ids) if isinstance(task_ids, list) and task_ids else "(none)"
+        lines.append(f"{state}: {rendered}")
+
+    lines.append(f"quarantined: {payload['quarantine_count']}")
+    lines.append("non-done tasks:")
+    non_done = payload["non_done_tasks"]
+    assert isinstance(non_done, dict)
+    if not non_done:
+        lines.append("  (none)")
+    for task_id, summary in non_done.items():
+        assert isinstance(summary, dict)
+        reasons = summary.get("blocked_reasons") or []
+        reason_text = ",".join(reasons) if isinstance(reasons, list) and reasons else "(none)"
+        lines.append(
+            f"  {task_id}: state={summary.get('state')} "
+            f"last_run={summary.get('last_run_status') or 'unknown'} "
+            f"blocked_reasons={reason_text}"
+        )
+
+    lines.append("open @human questions:")
+    questions = payload["human_questions"]
+    assert isinstance(questions, list)
+    if not questions:
+        lines.append("  (none)")
+    for question in questions:
+        lines.append(f"  {question['task_id']}: {question['note']}")
+
+    lines.append("lease health:")
+    leases = payload["leases"]
+    assert isinstance(leases, list)
+    if not leases:
+        lines.append("  (none)")
+    for lease in leases:
+        lines.append(
+            f"  {lease['task_id']}: lease_id={lease['lease_id']} "
+            f"session={lease['session']} expired={lease['expired']} "
+            f"orphaned={lease['orphaned']}"
+        )
+
+    journal = payload["journal"]
+    assert isinstance(journal, dict)
+    lines.append(
+        "journal: "
+        f"events={journal['total_events']} malformed={journal['malformed_count']} "
+        f"escalations={journal['escalation_count']} "
+        f"last={journal['last_event_timestamp'] or 'none'}"
+    )
+    lines.append(f"spend_usd: {payload['spend']}")
+    return "\n".join(lines)
+
+
+def cmd_attest_containment(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    marker_path = repo / CONTAINMENT_MARKER_RELPATH
+    payload = {
+        "schema_version": CONTAINMENT_MARKER_SCHEMA_VERSION,
+        "contained": True,
+        "attested_by": args.attested_by,
+        "attested_at_utc": _utc_now_iso(),
+        "note": args.note or "",
+        "credential_scan_waiver": sorted(set(getattr(args, "waive_credential_class", []) or [])),
+    }
+    _write_json(marker_path, payload)
+    _record_swarm_event(
+        repo,
+        {"event": "containment_attested", "attested_by": args.attested_by},
+    )
+    print(json.dumps({"written": CONTAINMENT_MARKER_RELPATH}, sort_keys=True))
+    return 0
+
+
+def cmd_ack_vendor_policy(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    ack_path = repo / VENDOR_ACK_RELPATH
+    payload = {
+        "schema_version": VENDOR_ACK_SCHEMA_VERSION,
+        "vendor": args.vendor,
+        "policy_note": args.note,
+        "acked_by": args.acked_by,
+        "acked_at_utc": _utc_now_iso(),
+    }
+    _write_json(ack_path, payload)
+    _record_swarm_event(
+        repo,
+        {"event": "vendor_policy_acked", "vendor": args.vendor, "acked_by": args.acked_by},
+    )
+    print(json.dumps({"written": VENDOR_ACK_RELPATH}, sort_keys=True))
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    contract = load_framework_contract(repo)
+    tasks, quarantined = load_tasks_quarantined(contract)
+
+    states = {
+        state: sorted(task_id for task_id, task in tasks.items() if task.state == state)
+        for state in DEFAULT_ALLOWED_STATES
+    }
+    non_done_tasks: dict[str, dict[str, object]] = {}
+    human_questions: list[dict[str, str]] = []
+    for task_id, task in sorted(tasks.items()):
+        if task.state != "done":
+            non_done_tasks[task_id] = {
+                "state": task.state,
+                **_latest_run_manifest_status(
+                    repo=repo,
+                    directory=contract.run_manifest_dir,
+                    task_id=task_id,
+                ),
+            }
+        human_note = _last_human_note(task)
+        if human_note is not None:
+            human_questions.append({"task_id": task_id, "note": human_note})
+
+    now = dt.datetime.now(tz=dt.timezone.utc)
+    claims = swarm_claims.read_claims(
+        repo,
+        args.remote,
+        fetch=not bool(args.no_fetch),
+    )
+    leases = []
+    for task_id, claim in sorted(claims.items()):
+        task = tasks.get(task_id)
+        leases.append(
+            {
+                "task_id": task_id,
+                "lease_id": claim.lease_id,
+                "session": claim.session_id,
+                "expired": claim.expired(now=now),
+                "orphaned": task is None
+                or task.state not in {"active", "ready_for_review"},
+            }
+        )
+
+    events, malformed_count = swarm_events.read_events(repo)
+    payload: dict[str, object] = {
+        "states": states,
+        "quarantined": quarantined,
+        "quarantine_count": len(quarantined),
+        "non_done_tasks": non_done_tasks,
+        "human_questions": human_questions,
+        "leases": leases,
+        "journal": {
+            "total_events": len(events),
+            "malformed_count": malformed_count,
+            "escalation_count": sum(event.get("escalation") is True for event in events),
+            "last_event_timestamp": events[-1].get("ts_utc") if events else None,
+        },
+        "spend": _run_manifest_spend(contract.run_manifest_dir),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(_render_status_text(payload))
+    return 0
+
+
+def _new_cost_bucket() -> dict[str, object]:
+    return {
+        "run_count": 0,
+        "wall_clock_seconds": 0.0,
+        "runs_without_usage": 0,
+        "_input_tokens": 0,
+        "_input_seen": False,
+        "_output_tokens": 0,
+        "_output_seen": False,
+        "_estimated_cost_usd": 0.0,
+        "_cost_seen": False,
+    }
+
+
+def _add_cost_record(bucket: dict[str, object], usage: object) -> None:
+    bucket["run_count"] = int(bucket["run_count"]) + 1
+    if not isinstance(usage, dict):
+        bucket["runs_without_usage"] = int(bucket["runs_without_usage"]) + 1
+        return
+
+    wall_clock = usage.get("wall_clock_seconds")
+    source = usage.get("source")
+    if isinstance(wall_clock, (int, float)) and not isinstance(wall_clock, bool):
+        bucket["wall_clock_seconds"] = float(bucket["wall_clock_seconds"]) + float(wall_clock)
+    if not isinstance(source, str) or source == "unavailable":
+        bucket["runs_without_usage"] = int(bucket["runs_without_usage"]) + 1
+
+    input_tokens = usage.get("input_tokens")
+    if isinstance(input_tokens, int) and not isinstance(input_tokens, bool):
+        bucket["_input_tokens"] = int(bucket["_input_tokens"]) + input_tokens
+        bucket["_input_seen"] = True
+    output_tokens = usage.get("output_tokens")
+    if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+        bucket["_output_tokens"] = int(bucket["_output_tokens"]) + output_tokens
+        bucket["_output_seen"] = True
+    estimated_cost = usage.get("estimated_cost_usd")
+    if isinstance(estimated_cost, (int, float)) and not isinstance(estimated_cost, bool):
+        bucket["_estimated_cost_usd"] = float(bucket["_estimated_cost_usd"]) + float(estimated_cost)
+        bucket["_cost_seen"] = True
+
+
+def _finalize_cost_bucket(bucket: dict[str, object]) -> dict[str, object]:
+    result: dict[str, object] = {
+        "run_count": int(bucket["run_count"]),
+        "wall_clock_seconds": round(float(bucket["wall_clock_seconds"]), 6),
+        "runs_without_usage": int(bucket["runs_without_usage"]),
+    }
+    if bucket["_input_seen"]:
+        result["input_tokens"] = int(bucket["_input_tokens"])
+    if bucket["_output_seen"]:
+        result["output_tokens"] = int(bucket["_output_tokens"])
+    if bucket["_cost_seen"]:
+        result["estimated_cost_usd"] = round(float(bucket["_estimated_cost_usd"]), 4)
+    return result
+
+
+def _costs_payload(run_manifest_dir: Path) -> dict[str, object]:
+    total = _new_cost_bucket()
+    dimensions: dict[str, dict[str, dict[str, object]]] = {
+        "by_task_id": {},
+        "by_workstream": {},
+        "by_model": {},
+    }
+    if run_manifest_dir.exists():
+        for path in sorted(run_manifest_dir.glob("*.json")):
+            try:
+                manifest = json.loads(_read_text(path))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(manifest, dict) or manifest.get("schema_version") not in {
+                SWARM_RUN_MANIFEST_SCHEMA_VERSION,
+                SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1,
+            }:
+                continue
+            task = manifest.get("task") if isinstance(manifest.get("task"), dict) else {}
+            executor = (
+                manifest.get("executor") if isinstance(manifest.get("executor"), dict) else {}
+            )
+            keys = {
+                "by_task_id": task.get("task_id"),
+                "by_workstream": task.get("workstream"),
+                "by_model": executor.get("model"),
+            }
+            usage = manifest.get("usage")
+            _add_cost_record(total, usage)
+            for dimension, raw_key in keys.items():
+                key = raw_key if isinstance(raw_key, str) and raw_key else "unknown"
+                bucket = dimensions[dimension].setdefault(key, _new_cost_bucket())
+                _add_cost_record(bucket, usage)
+
+    return {
+        dimension: {
+            key: _finalize_cost_bucket(bucket)
+            for key, bucket in sorted(buckets.items())
+        }
+        for dimension, buckets in dimensions.items()
+    } | {"total": _finalize_cost_bucket(total)}
+
+
+def _render_costs_text(payload: dict[str, object]) -> str:
+    lines = [
+        "Swarm costs",
+        "dimension        group                 runs   wall_s       input      output     cost_usd  missing",
+    ]
+    for dimension in ("by_task_id", "by_workstream", "by_model"):
+        buckets = payload.get(dimension)
+        if not isinstance(buckets, dict):
+            continue
+        for key, bucket in buckets.items():
+            if not isinstance(bucket, dict):
+                continue
+            lines.append(
+                f"{dimension.removeprefix('by_'):<16} {str(key):<21} "
+                f"{int(bucket.get('run_count', 0)):>5} "
+                f"{float(bucket.get('wall_clock_seconds', 0.0)):>9.3f} "
+                f"{str(bucket.get('input_tokens', '-')):>11} "
+                f"{str(bucket.get('output_tokens', '-')):>11} "
+                f"{str(bucket.get('estimated_cost_usd', '-')):>12} "
+                f"{int(bucket.get('runs_without_usage', 0)):>8}"
+            )
+    total = payload.get("total") if isinstance(payload.get("total"), dict) else {}
+    lines.append(
+        f"{'total':<16} {'all':<21} "
+        f"{int(total.get('run_count', 0)):>5} "
+        f"{float(total.get('wall_clock_seconds', 0.0)):>9.3f} "
+        f"{str(total.get('input_tokens', '-')):>11} "
+        f"{str(total.get('output_tokens', '-')):>11} "
+        f"{str(total.get('estimated_cost_usd', '-')):>12} "
+        f"{int(total.get('runs_without_usage', 0)):>8}"
+    )
+    return "\n".join(lines)
+
+
+def cmd_costs(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    try:
+        run_manifest_dir = load_framework_contract(repo).run_manifest_dir
+    except (OSError, SystemExit):
+        run_manifest_dir = repo / "reports" / "status" / "swarm_runs"
+    payload = _costs_payload(run_manifest_dir)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(_render_costs_text(payload))
+    return 0
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     repo = _repo_root()
     contract = load_framework_contract(repo)
@@ -1859,6 +2756,255 @@ def cmd_plan(args: argparse.Namespace) -> int:
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
+
+
+@contextlib.contextmanager
+def _runtime_repo_context(repo: Path, *, event_repo: Path):
+    global _REPO_ROOT_CACHE
+    previous_cache = _REPO_ROOT_CACHE
+    previous_event_root = os.environ.get("SWARM_EVENT_REPO_ROOT")
+    _REPO_ROOT_CACHE = repo
+    os.environ["SWARM_EVENT_REPO_ROOT"] = str(event_repo)
+    try:
+        yield
+    finally:
+        _REPO_ROOT_CACHE = previous_cache
+        if previous_event_root is None:
+            os.environ.pop("SWARM_EVENT_REPO_ROOT", None)
+        else:
+            os.environ["SWARM_EVENT_REPO_ROOT"] = previous_event_root
+
+
+def _worktree_records(repo: Path) -> list[dict[str, str]]:
+    cp = _run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo,
+        capture=True,
+        check=True,
+    )
+    records: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in [*(cp.stdout or "").splitlines(), ""]:
+        if not line.strip():
+            if current:
+                records.append(current)
+                current = {}
+            continue
+        key, _, value = line.partition(" ")
+        current[key] = value.strip()
+    return records
+
+
+def _task_branch_contexts(repo: Path) -> dict[str, dict[str, object]]:
+    contexts: dict[str, dict[str, object]] = {}
+    for record in _worktree_records(repo):
+        branch_ref = record.get("branch", "")
+        branch = branch_ref.removeprefix("refs/heads/")
+        task_id = _parse_task_id_from_branch(branch)
+        worktree_raw = record.get("worktree")
+        if task_id is None or not worktree_raw:
+            continue
+        worktree = Path(worktree_raw).resolve()
+        try:
+            contract = load_framework_contract(worktree)
+            tasks, quarantined = load_tasks_quarantined(contract)
+            task = _resolve_runtime_task(tasks, quarantined, task_id)
+        except (OSError, SystemExit, ValueError):
+            continue
+        manifest_paths = _matching_task_jsons(contract.run_manifest_dir, task_id)
+        matching = _matching_v2_run_manifest_data(manifest_paths, task_id)
+        manifest_path: Path | None = None
+        manifest: dict[str, object] = {}
+        if matching:
+            manifest_path, manifest = matching[-1]
+        review_paths = _matching_task_jsons(contract.judge_review_dir, task_id)
+        contexts[task_id] = {
+            "task_id": task_id,
+            "branch": branch,
+            "worktree": worktree,
+            "contract": contract,
+            "task": task,
+            "manifest_path": manifest_path,
+            "manifest": manifest,
+            "review_paths": review_paths,
+        }
+    return contexts
+
+
+def _ready_for_review_contexts(repo: Path) -> dict[str, dict[str, object]]:
+    return {
+        task_id: context
+        for task_id, context in _task_branch_contexts(repo).items()
+        if isinstance(context.get("task"), Task)
+        and context["task"].state == "ready_for_review"
+        and isinstance(context.get("manifest_path"), Path)
+    }
+
+
+def _projection_paths_for_filename(filename: str) -> list[str]:
+    return [f".orchestrator/{state}/{filename}" for state in DEFAULT_ALLOWED_STATES]
+
+
+def _persist_projection_changes(
+    *,
+    repo: Path,
+    remote: str,
+    base_branch: str,
+    filenames: Iterable[str],
+    message: str,
+    strict: bool,
+    push: bool = True,
+) -> bool:
+    owned_paths = sorted(
+        {
+            path
+            for filename in filenames
+            for path in _projection_paths_for_filename(filename)
+        }
+    )
+    owned_paths = [
+        path
+        for path in owned_paths
+        if (repo / path).exists()
+        or _run(
+            ["git", "ls-files", "--error-unmatch", "--", path],
+            cwd=repo,
+            capture=True,
+            check=False,
+        ).returncode
+        == 0
+    ]
+    if not owned_paths:
+        return False
+    staged_before_cp = _run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        capture=True,
+        check=True,
+    )
+    staged_before = {
+        line.strip() for line in (staged_before_cp.stdout or "").splitlines() if line.strip()
+    }
+    unexpected = sorted(staged_before - set(owned_paths))
+    if unexpected:
+        raise SystemExit(
+            "supervisor_refused_preexisting_staged_changes:" + ",".join(unexpected)
+        )
+    _run(["git", "add", "-A", "--", *owned_paths], cwd=repo, check=True)
+    staged_after = _run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        capture=True,
+        check=True,
+    )
+    if not (staged_after.stdout or "").strip():
+        return False
+    _git_commit(cwd=repo, message=message, strict=strict)
+    if push:
+        _git_push(
+            cwd=repo,
+            remote=remote,
+            ref=base_branch,
+            set_upstream=False,
+            strict=strict,
+        )
+    return True
+
+
+def _apply_projection_sweep(repo: Path) -> tuple[list[tuple[Path, Path]], list[str]]:
+    moves, problems = sweep_tasks.plan_sweep(repo)
+    if moves:
+        sweep_tasks._apply_moves(repo, moves)
+    return moves, problems
+
+
+def _claim_for_dispatch(
+    *,
+    repo: Path,
+    remote: str,
+    task: Task,
+    ttl_seconds: int = swarm_claims.DEFAULT_LEASE_TTL_SECONDS,
+) -> swarm_claims.ClaimResult:
+    branch = f"{task.task_id}_{_slug_from_task_path(task.path, task.task_id)}"
+    return swarm_claims.claim_task(
+        repo,
+        remote,
+        task.task_id,
+        session_id=_ACTOR_SESSION_ID,
+        branch=branch,
+        ttl_seconds=ttl_seconds,
+        journal=lambda event: _record_swarm_event(repo, event),
+    )
+
+
+def _supervisor_run_namespace(args: argparse.Namespace, task_id: str, repair_context: str | None = None) -> argparse.Namespace:
+    return argparse.Namespace(
+        task_id=task_id,
+        remote=args.remote,
+        base_branch=args.base_branch,
+        executor_backend=getattr(args, "executor_backend", "codex"),
+        codex_model=getattr(args, "codex_model", None),
+        codex_sandbox=getattr(args, "codex_sandbox", "workspace-write"),
+        unattended=bool(getattr(args, "unattended", False)),
+        skip_executor=False,
+        record_session=False,
+        force_deps=False,
+        max_worker_seconds=int(getattr(args, "max_worker_seconds", 0)),
+        repair_context=repair_context,
+        create_pr=False,
+        final_state="ready_for_review",
+        supervisor_managed=True,
+    )
+
+
+def _run_task_in_process(
+    *,
+    event_repo: Path,
+    worktree: Path,
+    args: argparse.Namespace,
+    task_id: str,
+    repair_context: str | None = None,
+) -> tuple[int, str]:
+    output = io.StringIO()
+    with (
+        _runtime_repo_context(worktree, event_repo=event_repo),
+        contextlib.redirect_stdout(output),
+    ):
+        result = cmd_run_task(
+            _supervisor_run_namespace(args, task_id, repair_context=repair_context)
+        )
+    return result, output.getvalue()
+
+
+def _usage_records(repo: Path) -> tuple[float | None, int]:
+    manifests_by_run: dict[str, dict[str, object]] = {}
+    roots = [repo]
+    roots.extend(
+        Path(record["worktree"])
+        for record in _worktree_records(repo)
+        if record.get("worktree") and Path(record["worktree"]).resolve() != repo.resolve()
+    )
+    for root in roots:
+        try:
+            contract = load_framework_contract(root)
+        except (OSError, SystemExit):
+            continue
+        if not contract.run_manifest_dir.exists():
+            continue
+        for path in sorted(contract.run_manifest_dir.glob("*.json")):
+            try:
+                payload = json.loads(_read_text(path))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict) and isinstance(payload.get("run_id"), str):
+                manifests_by_run[payload["run_id"]] = payload
+    values: list[float] = []
+    for payload in manifests_by_run.values():
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        value = usage.get("estimated_cost_usd")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            values.append(float(value))
+    return (sum(values), len(values)) if values else (None, 0)
 
 
 def cmd_tick(args: argparse.Namespace) -> int:
@@ -1894,6 +3040,15 @@ def cmd_tick(args: argparse.Namespace) -> int:
     }
 
     if args.dry_run or not selected:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "tick_completed",
+                "selected": len(summary["selected"]),
+                "skipped": len(summary["skipped"]),
+                "quarantined": len(quarantined),
+            },
+        )
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
 
@@ -1903,10 +3058,54 @@ def cmd_tick(args: argparse.Namespace) -> int:
     started: list[dict[str, str]] = []
     if args.runner == "tmux":
         _tmux_ensure_session(args.tmux_session, repo)
+        _tmux("set-environment", "-g", "SWARM_ACTOR_SESSION", _ACTOR_SESSION_ID)
         if args.unattended:
             _tmux("set-environment", "-g", "SWARM_UNATTENDED_I_UNDERSTAND", "1")
 
+    claimed: list[tuple[Task, swarm_claims.ClaimResult]] = []
     for task in selected:
+        result = _claim_for_dispatch(
+            repo=repo,
+            remote=args.remote,
+            task=task,
+            ttl_seconds=contract.claim_lease_ttl_seconds,
+        )
+        if not result.ok:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "claim_lost",
+                    "task_id": task.task_id,
+                    "reason": result.reason,
+                },
+            )
+            summary["skipped"].append(
+                {"task_id": task.task_id, "reason": "claim_lost"}
+            )
+            continue
+        claimed.append((task, result))
+
+    for task, _ in claimed:
+        _update_task_status_and_notes(
+            task_path=task.path,
+            new_state="active",
+            note_line=f"Claimed by swarm session {_ACTOR_SESSION_ID}.",
+        )
+        claimed_task = load_task(task.path, contract)
+        _move_task_to_state_projection(repo, claimed_task)
+    if claimed:
+        _persist_projection_changes(
+            repo=repo,
+            remote=args.remote,
+            base_branch=args.base_branch,
+            filenames=[task.path.name for task, _ in claimed],
+            message="swarm: project claimed tasks active",
+            strict=bool(args.unattended),
+        )
+        tasks, _ = load_tasks_quarantined(contract)
+
+    for selected_task, claim in claimed:
+        task = tasks[selected_task.task_id]
         try:
             worktree_path, branch = ensure_worktree(
                 repo=repo,
@@ -1915,6 +3114,28 @@ def cmd_tick(args: argparse.Namespace) -> int:
                 base_ref=args.base_branch,
             )
         except WorktreeCollisionError as exc:
+            if claim.sha is not None:
+                swarm_claims.release_claim(
+                    repo,
+                    args.remote,
+                    task.task_id,
+                    expected_sha=claim.sha,
+                    reason="worktree_collision",
+                    journal=lambda event: _record_swarm_event(repo, event),
+                )
+            _update_task_status_and_notes(
+                task_path=task.path,
+                new_state="backlog",
+                note_line="Dispatch cancelled after worktree collision; claim released.",
+            )
+            _persist_projection_changes(
+                repo=repo,
+                remote=args.remote,
+                base_branch=args.base_branch,
+                filenames=[task.path.name],
+                message=f"{task.task_id}: reopen after dispatch collision",
+                strict=bool(args.unattended),
+            )
             summary["skipped"].append(
                 {
                     "task_id": task.task_id,
@@ -1941,6 +3162,8 @@ def cmd_tick(args: argparse.Namespace) -> int:
             args.remote,
             "--base-branch",
             args.base_branch,
+            "--executor-backend",
+            getattr(args, "executor_backend", "codex"),
             "--codex-sandbox",
             args.codex_sandbox,
             "--final-state",
@@ -1963,11 +3186,1909 @@ def cmd_tick(args: argparse.Namespace) -> int:
                 command=command,
             )
         else:
-            _run(command, cwd=worktree_path, check=False)
+            env = dict(os.environ)
+            env["SWARM_ACTOR_SESSION"] = _ACTOR_SESSION_ID
+            env["SWARM_EVENT_REPO_ROOT"] = str(repo)
+            _run(command, cwd=worktree_path, check=False, env=env)
 
     summary["started"] = started
+    _record_swarm_event(
+        repo,
+        {
+            "event": "tick_completed",
+            "selected": len(summary["selected"]),
+            "skipped": len(summary["skipped"]),
+            "quarantined": len(quarantined),
+        },
+    )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
+
+
+def _merge_journal_records(repo: Path, task_id: str) -> tuple[dict | None, dict | None]:
+    """Latest (merge_started, merge_verified) journal records for a task."""
+    events, _ = swarm_events.read_events(repo)
+    started: dict | None = None
+    verified: dict | None = None
+    for event in events:
+        if event.get("task_id") != task_id:
+            continue
+        if event.get("event") == "merge_started":
+            started = event
+            verified = None
+        elif event.get("event") == "merge_verified":
+            verified = event
+    return started, verified
+
+
+def _merge_inflight_task_ids(repo: Path) -> set[str]:
+    events, _ = swarm_events.read_events(repo)
+    state: dict[str, bool] = {}
+    terminal_events = {
+        "task_done",
+        "merge_reverted",
+        "merge_refused_operator_surface",
+        "merge_refused_stale_lease",
+        "merge_refused_non_ff",
+    }
+    for event in events:
+        task_id = event.get("task_id")
+        if not isinstance(task_id, str):
+            continue
+        if event.get("event") == "merge_started":
+            state[task_id] = True
+        elif event.get("event") in terminal_events:
+            state[task_id] = False
+    return {task_id for task_id, active in state.items() if active}
+
+
+def _step_sync(args: argparse.Namespace) -> dict[str, object]:
+    repo = _repo_root()
+    _run(["git", "fetch", args.remote], cwd=repo, check=True)
+    ahead = _local_base_ahead_count(
+        repo=repo,
+        remote=args.remote,
+        base_branch=args.base_branch,
+    )
+    inflight = sorted(_merge_inflight_task_ids(repo))
+    if ahead > 0 and inflight:
+        return {
+            "synced": False,
+            "recovery": "merge_inflight_local_ahead",
+            "ahead": ahead,
+            "tasks": inflight,
+            "base_sha": _git_head_sha(repo),
+        }
+    _supervisor_sync_to_remote_base(
+        repo=repo,
+        remote=args.remote,
+        base_branch=args.base_branch,
+    )
+    return {"synced": True, "ahead": 0, "base_sha": _git_head_sha(repo)}
+
+
+def _move_task_to_state_projection(repo: Path, task: Task) -> Path:
+    destination = repo / ".orchestrator" / task.state / task.path.name
+    if task.path.resolve() == destination.resolve():
+        return task.path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    cp = _run(
+        ["git", "mv", str(task.path), str(destination)],
+        cwd=repo,
+        capture=True,
+        check=False,
+    )
+    if cp.returncode != 0:
+        task.path.rename(destination)
+    return destination
+
+
+def _block_base_task(
+    *,
+    repo: Path,
+    contract: FrameworkContract,
+    args: argparse.Namespace,
+    task_id: str,
+    note: str,
+    message: str,
+) -> None:
+    tasks, quarantined = load_tasks_quarantined(contract)
+    task = _resolve_runtime_task(tasks, quarantined, task_id)
+    filename = task.path.name
+    _update_task_status_and_notes(
+        task_path=task.path,
+        new_state="blocked",
+        note_line=note,
+    )
+    blocked_task = load_task(task.path, contract)
+    _move_task_to_state_projection(repo, blocked_task)
+    _persist_projection_changes(
+        repo=repo,
+        remote=args.remote,
+        base_branch=args.base_branch,
+        filenames=[filename],
+        message=message,
+        strict=bool(args.unattended),
+    )
+
+
+def _step_reap(args: argparse.Namespace) -> dict[str, object]:
+    """Reap expired leases STATE-AWARE (§4.1): only genuinely orphaned ACTIVE
+    work is reopened; a blocked task keeps its @human hold and an approved
+    task keeps its approval — their expired claims are released with the
+    state preserved. Reopen is written BEFORE the release so a crash between
+    the two converges on the next cycle (backlog + expired claim → release
+    only)."""
+    repo = _repo_root()
+    contract = load_framework_contract(repo)
+    tasks, _ = load_tasks_quarantined(contract)
+    claims = swarm_claims.read_claims(repo, args.remote)
+    expired = {
+        action.task_id: action
+        for action in swarm_claims.reap_expired(repo, args.remote, fetch=False)
+    }
+    reopened: list[str] = []
+    stale_done: list[str] = []
+    released: list[str] = []
+    preserved: list[dict[str, str]] = []
+    candidates: list[str] = []
+    filenames: list[str] = []
+
+    def _release(task_id: str, sha: str, lease_id: object, reason: str) -> bool:
+        result = swarm_claims.release_claim(
+            repo,
+            args.remote,
+            task_id,
+            expected_sha=sha,
+            reason=reason,
+            journal=lambda event: _record_swarm_event(repo, event),
+        )
+        if not result.ok:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "reap_release_failed",
+                    "task_id": task_id,
+                    "lease_id": lease_id,
+                    "reason": result.reason,
+                },
+                escalation=True,
+            )
+            return False
+        released.append(task_id)
+        return True
+
+    for task_id, claim in sorted(claims.items()):
+        task = tasks.get(task_id)
+        action = expired.get(task_id)
+
+        if task is not None and task.state == "done":
+            _record_swarm_event(
+                repo,
+                {"event": "orphan_stale_claim", "task_id": task_id, "lease_id": claim.lease_id},
+            )
+            _release(task_id, claim.sha, claim.lease_id, "done_task_stale_claim")
+            stale_done.append(task_id)
+            continue
+
+        if action is None:
+            continue
+
+        if task is None or task.state == "backlog":
+            # nothing to reopen (missing task, or a prior crash already
+            # reopened it) — the expired ref is the only cleanup left
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "orphan_claim_released",
+                    "task_id": task_id,
+                    "lease_id": action.lease_id,
+                    "task_state": task.state if task is not None else None,
+                },
+            )
+            _release(task_id, action.sha, action.lease_id, action.reason)
+            continue
+
+        if task.state != "active":
+            # blocked keeps its @human hold; ready_for_review keeps its
+            # approval; integration_ready keeps its interface state — the
+            # lease is released, the scientific state is NEVER conflated
+            # with orphanhood (§4.1).
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "orphan_claim_released",
+                    "task_id": task_id,
+                    "lease_id": action.lease_id,
+                    "task_state": task.state,
+                },
+            )
+            _release(task_id, action.sha, action.lease_id, action.reason)
+            preserved.append({"task_id": task_id, "state": task.state})
+            continue
+
+        # active + expired lease = orphaned work: reopen FIRST, release second
+        _record_swarm_event(
+            repo,
+            {
+                "event": "task_orphaned",
+                "task_id": task_id,
+                "lease_id": action.lease_id,
+                "cause": action.reason,
+            },
+        )
+        filenames.append(task.path.name)
+        _update_task_status_and_notes(
+            task_path=task.path,
+            new_state="backlog",
+            note_line=(
+                f"orphaned: lease expired (lease {action.lease_id}); "
+                "reopened by supervisor"
+            ),
+        )
+        reopened_task = load_task(task.path, contract)
+        _move_task_to_state_projection(repo, reopened_task)
+        # durably persist the reopen BEFORE releasing the ref: a kill between
+        # the two leaves backlog+expired-claim, which the next cycle releases
+        _persist_projection_changes(
+            repo=repo,
+            remote=args.remote,
+            base_branch=args.base_branch,
+            filenames=[task.path.name],
+            message=f"{task_id}: reopen orphaned",
+            strict=bool(args.unattended),
+        )
+        reopened.append(task_id)
+        _release(task_id, action.sha, action.lease_id, action.reason)
+
+    # plan precedence: file active + no ref → orphaned claim, reap it —
+    # but only when no worktree evidence suggests a live manual run
+    worktree_parent = (
+        Path(args.worktree_parent).expanduser().resolve()
+        if getattr(args, "worktree_parent", None)
+        else repo.parent
+    )
+    for task_id, task in sorted(tasks.items()):
+        if task.state != "active" or task_id in claims:
+            continue
+        worktree_path = worktree_parent / f"wt-{task_id}"
+        if worktree_path.exists():
+            _record_swarm_event(
+                repo,
+                {"event": "orphaned_candidate", "task_id": task_id, "worktree": str(worktree_path)},
+                escalation=True,
+            )
+            candidates.append(task_id)
+            continue
+        _record_swarm_event(
+            repo,
+            {"event": "task_orphaned", "task_id": task_id, "cause": "active_without_claim"},
+        )
+        filenames.append(task.path.name)
+        _update_task_status_and_notes(
+            task_path=task.path,
+            new_state="backlog",
+            note_line="orphaned: active with no live claim; reopened by supervisor",
+        )
+        reopened_task = load_task(task.path, contract)
+        _move_task_to_state_projection(repo, reopened_task)
+        reopened.append(task_id)
+
+    if filenames:
+        _persist_projection_changes(
+            repo=repo,
+            remote=args.remote,
+            base_branch=args.base_branch,
+            filenames=filenames,
+            message="swarm: reopen orphaned tasks",
+            strict=bool(args.unattended),
+        )
+    return {
+        "expired": sorted(expired),
+        "reopened": reopened,
+        "stale_done": stale_done,
+        "released": released,
+        "preserved": preserved,
+        "candidates": candidates,
+    }
+
+def _step_tick(args: argparse.Namespace) -> dict[str, object]:
+    repo = _repo_root()
+    contract = load_framework_contract(repo)
+    tasks, quarantined = load_tasks_quarantined(contract)
+    ready_review_ids = set(_ready_for_review_contexts(repo))
+    ready_review_ids.update(
+        task_id for task_id, task in tasks.items() if task.state == "ready_for_review"
+    )
+    ready_review_count = len(ready_review_ids)
+    if ready_review_count >= contract.wip_max_ready_for_review:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "review_backpressure",
+                "ready_for_review": ready_review_count,
+                "cap": contract.wip_max_ready_for_review,
+            },
+        )
+        return {
+            "selected": [],
+            "started": [],
+            "skipped": [],
+            "backpressure": True,
+            "ready_for_review": ready_review_count,
+        }
+
+    spend, _ = _usage_records(repo)
+    if (
+        spend is not None
+        and contract.budget_max_program_usd is not None
+        and spend > contract.budget_max_program_usd
+    ):
+        return {
+            "selected": [],
+            "started": [],
+            "skipped": [],
+            "budget_blocked": True,
+            "spend_usd": spend,
+            "max_program_usd": contract.budget_max_program_usd,
+        }
+
+    claimed_ids = claimed_task_ids(repo, args.remote, args.base_branch)
+    ready = ready_backlog_tasks(tasks, claimed_ids, contract)
+    max_active = (
+        contract.wip_max_active
+        if contract.wip_max_active is not None
+        else max(0, int(args.max_workers))
+    )
+    active_count = sum(task.state == "active" for task in tasks.values())
+    capacity = min(
+        max(0, int(args.max_workers)),
+        max(0, max_active - active_count),
+    )
+    selected = choose_tasks_heuristic(ready, capacity)
+    summary: dict[str, object] = {
+        "ready": [task.task_id for task in ready],
+        "selected": [task.task_id for task in selected],
+        "started": [],
+        "skipped": [],
+        "quarantined": quarantined,
+        "active": active_count,
+        "max_active": max_active,
+    }
+    if not selected:
+        return summary
+
+    claimed: list[tuple[Task, swarm_claims.ClaimResult]] = []
+    for task in selected:
+        result = _claim_for_dispatch(
+            repo=repo,
+            remote=args.remote,
+            task=task,
+            ttl_seconds=contract.claim_lease_ttl_seconds,
+        )
+        if not result.ok:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "claim_lost",
+                    "task_id": task.task_id,
+                    "reason": result.reason,
+                },
+            )
+            summary["skipped"].append(
+                {"task_id": task.task_id, "reason": "claim_lost"}
+            )
+            continue
+        claimed.append((task, result))
+
+    for task, _ in claimed:
+        _update_task_status_and_notes(
+            task_path=task.path,
+            new_state="active",
+            note_line=f"Claimed by supervisor session {_ACTOR_SESSION_ID}.",
+        )
+        claimed_task = load_task(task.path, contract)
+        _move_task_to_state_projection(repo, claimed_task)
+    if claimed:
+        _persist_projection_changes(
+            repo=repo,
+            remote=args.remote,
+            base_branch=args.base_branch,
+            filenames=[task.path.name for task, _ in claimed],
+            message="swarm: project claimed tasks active",
+            strict=bool(args.unattended),
+        )
+        tasks, _ = load_tasks_quarantined(contract)
+
+    worktree_parent = (
+        Path(args.worktree_parent).expanduser().resolve()
+        if getattr(args, "worktree_parent", None)
+        else repo.parent
+    )
+    worktree_parent.mkdir(parents=True, exist_ok=True)
+    for selected_task, claim in claimed:
+        task = tasks[selected_task.task_id]
+        try:
+            worktree, branch = ensure_worktree(
+                repo=repo,
+                task=task,
+                worktree_parent=worktree_parent,
+                base_ref=args.base_branch,
+            )
+        except WorktreeCollisionError as exc:
+            if claim.sha is not None:
+                swarm_claims.release_claim(
+                    repo,
+                    args.remote,
+                    task.task_id,
+                    expected_sha=claim.sha,
+                    reason="worktree_collision",
+                    journal=lambda event: _record_swarm_event(repo, event),
+                )
+            _update_task_status_and_notes(
+                task_path=task.path,
+                new_state="backlog",
+                note_line="Dispatch cancelled after worktree collision; claim released.",
+            )
+            _persist_projection_changes(
+                repo=repo,
+                remote=args.remote,
+                base_branch=args.base_branch,
+                filenames=[task.path.name],
+                message=f"{task.task_id}: reopen after dispatch collision",
+                strict=bool(args.unattended),
+            )
+            summary["skipped"].append(
+                {
+                    "task_id": task.task_id,
+                    "reason": "worktree_collision",
+                    "worktree": str(exc.worktree_path),
+                }
+            )
+            continue
+
+        result, output = _run_task_in_process(
+            event_repo=repo,
+            worktree=worktree,
+            args=args,
+            task_id=task.task_id,
+        )
+        summary["started"].append(
+            {
+                "task_id": task.task_id,
+                "branch": branch,
+                "worktree": str(worktree),
+                "returncode": result,
+                "output": output.strip(),
+            }
+        )
+    _record_swarm_event(
+        repo,
+        {
+            "event": "tick_completed",
+            "selected": len(selected),
+            "started": len(summary["started"]),
+            "skipped": len(summary["skipped"]),
+            "quarantined": len(quarantined),
+        },
+    )
+    return summary
+
+
+def _step_judge(
+    args: argparse.Namespace,
+    *,
+    candidate_ids: set[str] | None = None,
+) -> dict[str, object]:
+    repo = _repo_root()
+    contexts = _ready_for_review_contexts(repo)
+    if candidate_ids is not None:
+        contexts = {
+            task_id: context
+            for task_id, context in contexts.items()
+            if task_id in candidate_ids
+        }
+    judged: list[dict[str, object]] = []
+    deferred: list[dict[str, object]] = []
+    now = dt.datetime.now(tz=dt.timezone.utc)
+
+    # Shepherded claims stay alive through review + merge: the supervisor
+    # renews the leases it holds for ready_for_review work so the merge
+    # queue's live-claim fencing path remains the common case.
+    claims = swarm_claims.read_claims(_repo_root(), args.remote, fetch=False)
+    for task_id in sorted(contexts):
+        claim = claims.get(task_id)
+        if claim is not None and claim.session_id == _ACTOR_SESSION_ID:
+            try:
+                _renew_runtime_claim(repo=_repo_root(), remote=args.remote, task_id=task_id)
+            except SystemExit as exc:
+                _record_swarm_event(
+                    _repo_root(),
+                    {"event": "shepherd_renewal_failed", "task_id": task_id, "reason": str(exc)},
+                    escalation=True,
+                )
+
+    for task_id, context in sorted(contexts.items()):
+        contract = context["contract"]
+        manifest = context["manifest"]
+        assert isinstance(contract, FrameworkContract)
+        assert isinstance(manifest, dict)
+        generated_at = _parse_utc_iso(manifest.get("generated_at_utc"))
+        if generated_at is not None:
+            age = (now - generated_at).total_seconds()
+            if age < contract.review_min_separation_seconds:
+                remaining = max(
+                    1,
+                    int(contract.review_min_separation_seconds - age + 0.999),
+                )
+                event = {
+                    "event": "review_deferred",
+                    "task_id": task_id,
+                    "remaining_seconds": remaining,
+                }
+                _record_swarm_event(repo, event)
+                deferred.append(
+                    {"task_id": task_id, "remaining_seconds": remaining}
+                )
+                continue
+
+        worktree = context["worktree"]
+        assert isinstance(worktree, Path)
+        judge_session = f"judge-{uuid.uuid4().hex}"
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "judge-task",
+            "--task-id",
+            task_id,
+            "--remote",
+            args.remote,
+            "--base-branch",
+            args.base_branch,
+            "--approve-only",
+        ]
+        if args.unattended:
+            command.append("--unattended")
+        env = dict(os.environ)
+        env["SWARM_ACTOR_SESSION"] = judge_session
+        env["SWARM_REPO_ROOT"] = str(worktree)
+        env["SWARM_EVENT_REPO_ROOT"] = str(repo)
+        cp = _run(
+            command,
+            cwd=worktree,
+            capture=True,
+            check=False,
+            env=env,
+            timeout_seconds=max(30, contract.gate_timeout_seconds * 2),
+        )
+        judged.append(
+            {
+                "task_id": task_id,
+                "returncode": cp.returncode,
+                "judge_session": judge_session,
+                "output_tail": (cp.stdout or "")[-2000:],
+            }
+        )
+        if cp.returncode != 0:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "judge_failed",
+                    "task_id": task_id,
+                    "returncode": cp.returncode,
+                },
+                escalation=True,
+            )
+    return {"judged": judged, "deferred": deferred}
+
+
+def _latest_approving_review(
+    context: dict[str, object],
+) -> tuple[Path, dict[str, object]] | None:
+    task_id = context.get("task_id")
+    contract = context.get("contract")
+    if not isinstance(task_id, str) or not isinstance(contract, FrameworkContract):
+        return None
+    reviews = context.get("review_paths")
+    if not isinstance(reviews, list):
+        return None
+    for path in reversed(reviews):
+        if not isinstance(path, Path):
+            continue
+        if not _is_valid_review_log(path, task_id, contract.scientific_review_role):
+            continue
+        try:
+            payload = json.loads(_read_text(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return path, payload
+    return None
+
+
+def _release_current_claim(
+    *,
+    repo: Path,
+    args: argparse.Namespace,
+    task_id: str,
+    reason: str,
+) -> bool:
+    claim = swarm_claims.read_claims(repo, args.remote).get(task_id)
+    if claim is None:
+        return True
+    result = swarm_claims.release_claim(
+        repo,
+        args.remote,
+        task_id,
+        expected_sha=claim.sha,
+        reason=reason,
+        journal=lambda event: _record_swarm_event(repo, event),
+    )
+    if not result.ok:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "claim_release_failed",
+                "task_id": task_id,
+                "reason": result.reason,
+            },
+            escalation=True,
+        )
+    return result.ok
+
+
+def _step_merge(args: argparse.Namespace) -> dict[str, object]:
+    repo = _repo_root()
+    contract = load_framework_contract(repo)
+    base_tasks, _ = load_tasks_quarantined(contract)
+    inflight = _merge_inflight_task_ids(repo)
+    contexts = _task_branch_contexts(repo)
+    merged: list[str] = []
+    refused: list[dict[str, str]] = []
+    reverted: list[str] = []
+
+    for task_id, context in sorted(contexts.items()):
+        approval = _latest_approving_review(context)
+        if approval is None:
+            continue
+        base_task = base_tasks.get(task_id)
+        if base_task is None or base_task.state == "blocked":
+            continue
+        if base_task.state == "done":
+            if task_id in inflight:
+                started_event, verified_event = _merge_journal_records(repo, task_id)
+                if verified_event is None:
+                    # a crash raced the durable verification record: never
+                    # push an unverified base — revert to the RECORDED
+                    # pre-merge sha and block (Codex F4b).
+                    recorded_pre = (started_event or {}).get("pre_merge_sha")
+                    if isinstance(recorded_pre, str) and recorded_pre:
+                        _run(["git", "reset", "--hard", recorded_pre], cwd=repo, check=True)
+                    _record_swarm_event(
+                        repo,
+                        {
+                            "event": "merge_reverted",
+                            "task_id": task_id,
+                            "cause": "done_without_merge_verified",
+                            "pre_merge_sha": recorded_pre,
+                        },
+                        escalation=True,
+                    )
+                    _block_base_task(
+                        repo=repo,
+                        contract=contract,
+                        args=args,
+                        task_id=task_id,
+                        note="@human Merge recovery: done recorded without a durable verification record; base reverted.",
+                        message=f"{task_id}: block unverified merge recovery",
+                    )
+                    reverted.append(task_id)
+                    base_tasks, _ = load_tasks_quarantined(contract)
+                    continue
+                _git_push(
+                    cwd=repo,
+                    remote=args.remote,
+                    ref=args.base_branch,
+                    set_upstream=False,
+                    strict=True,
+                )
+                _record_swarm_event(
+                    repo,
+                    {"event": "task_done", "task_id": task_id, "recovered": True},
+                )
+                _release_current_claim(
+                    repo=repo,
+                    args=args,
+                    task_id=task_id,
+                    reason="task_done_recovery",
+                )
+                merged.append(task_id)
+            continue
+
+        # Claude adversary #1: a crash BETWEEN ff-merge and verification
+        # leaves the branch already merged while the task is still
+        # ready_for_review. Detect it (branch tip is an ancestor of base
+        # HEAD but differs from it or the journal shows an unverified
+        # merge_started) and verify-or-revert from the RECORDED pre-merge
+        # sha — never recompute it from the already-moved HEAD.
+        branch_name = context.get("branch")
+        if isinstance(branch_name, str):
+            branch_tip_cp = _run(
+                ["git", "rev-parse", "--verify", "--quiet", branch_name],
+                cwd=repo,
+                capture=True,
+                check=False,
+            )
+            branch_tip = branch_tip_cp.stdout.strip() if branch_tip_cp.returncode == 0 else None
+            head_sha = _git_head_sha(repo)
+            if (
+                branch_tip
+                and head_sha
+                and task_id in inflight
+                and _run(
+                    ["git", "merge-base", "--is-ancestor", branch_tip, head_sha],
+                    cwd=repo,
+                    capture=True,
+                    check=False,
+                ).returncode
+                == 0
+            ):
+                started_event, verified_event = _merge_journal_records(repo, task_id)
+                recorded_pre = (started_event or {}).get("pre_merge_sha")
+                if verified_event is None and isinstance(recorded_pre, str) and recorded_pre:
+                    quality_cp = _run(
+                        [sys.executable, "scripts/quality_gates.py"],
+                        cwd=repo,
+                        capture=True,
+                        check=False,
+                        timeout_seconds=max(30, contract.gate_timeout_seconds * 2),
+                    )
+                    if quality_cp.returncode != 0:
+                        _run(["git", "reset", "--hard", recorded_pre], cwd=repo, check=True)
+                        _record_swarm_event(
+                            repo,
+                            {
+                                "event": "merge_reverted",
+                                "task_id": task_id,
+                                "cause": "crash_recovery_verification_failed",
+                                "pre_merge_sha": recorded_pre,
+                            },
+                            escalation=True,
+                        )
+                        _block_base_task(
+                            repo=repo,
+                            contract=contract,
+                            args=args,
+                            task_id=task_id,
+                            note="@human Merge recovery: post-merge verification failed after a crash; base reverted to the recorded pre-merge sha.",
+                            message=f"{task_id}: block reverted crash merge",
+                        )
+                        reverted.append(task_id)
+                        base_tasks, _ = load_tasks_quarantined(contract)
+                        continue
+                    swarm_events.append_event(
+                        repo,
+                        {
+                            "event": "merge_verified",
+                            "task_id": task_id,
+                            "pre_merge_sha": recorded_pre,
+                            "post_merge_sha": head_sha,
+                            "recovered": True,
+                        },
+                        actor_session=_ACTOR_SESSION_ID,
+                    )
+                    # fall through: the normal path's ff-merge is now a no-op
+                    # and promotion proceeds under the verified record
+
+        manifest_path = context.get("manifest_path")
+        manifest = context.get("manifest")
+        branch = context.get("branch")
+        branch_task = context.get("task")
+        review_path, review = approval
+        review_task = review.get("task") if isinstance(review.get("task"), dict) else {}
+        manifest_rel = manifest_path.relative_to(context["worktree"]).as_posix()
+        if review_task.get("run_manifest_path") != manifest_rel:
+            continue
+        if (
+            not isinstance(manifest_path, Path)
+            or not isinstance(manifest, dict)
+            or not isinstance(branch, str)
+            or not isinstance(branch_task, Task)
+            or not _is_valid_run_manifest(manifest_path, task_id)
+        ):
+            continue
+        review_rel = review_path.relative_to(context["worktree"]).as_posix()
+        review_in_tip = _run(
+            ["git", "cat-file", "-e", f"{branch}:{review_rel}"],
+            cwd=repo,
+            capture=True,
+            check=False,
+        ).returncode == 0
+        if not review_in_tip:
+            continue
+
+        # Lease fencing binds to the claim COMMIT CHAIN, not the recyclable
+        # lease number: the manifest's claim sha must be ancestor-or-equal of
+        # the live claim tip (renewals advance the same chain; a reap+reclaim
+        # is a NEW ROOT and can never pass). A manifest without a claim block
+        # is claimless manual work — M0 semantics apply, the review/ownership/
+        # integrity checks still gate it. A claim-stamped manifest whose claim
+        # vanished needs a journaled orderly release after the run.
+        claims = swarm_claims.read_claims(repo, args.remote)
+        claim = claims.get(task_id)
+        claim_block = manifest.get("claim") if isinstance(manifest.get("claim"), dict) else {}
+        manifest_claim_sha = claim_block.get("sha")
+        fencing_failure: str | None = None
+        if isinstance(manifest_claim_sha, str) and manifest_claim_sha:
+            if claim is not None:
+                same_chain = (
+                    _run(
+                        ["git", "merge-base", "--is-ancestor", manifest_claim_sha, claim.sha],
+                        cwd=repo,
+                        capture=True,
+                        check=False,
+                    ).returncode
+                    == 0
+                )
+                if not same_chain:
+                    fencing_failure = "stale_lease_chain"
+            else:
+                events, _ = swarm_events.read_events(repo)
+                release_binds = False
+                later_epoch = False
+                seen_release = False
+                for event in events:
+                    if event.get("task_id") != task_id:
+                        continue
+                    name = event.get("event")
+                    if name in {"claim_released", "orphan_claim_released"}:
+                        released_sha = event.get("sha")
+                        if isinstance(released_sha, str) and (
+                            released_sha == manifest_claim_sha
+                            or _run(
+                                ["git", "merge-base", "--is-ancestor", manifest_claim_sha, released_sha],
+                                cwd=repo,
+                                capture=True,
+                                check=False,
+                            ).returncode
+                            == 0
+                        ):
+                            release_binds = True
+                            seen_release = True
+                            later_epoch = False
+                    elif name == "claim_created" and seen_release:
+                        later_epoch = True
+                if not release_binds:
+                    fencing_failure = "missing_claim_without_release_record"
+                elif later_epoch:
+                    fencing_failure = "newer_claim_epoch_after_release"
+        if fencing_failure is not None:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "merge_refused_stale_lease",
+                    "task_id": task_id,
+                    "reason": fencing_failure,
+                    "manifest_claim_sha": manifest_claim_sha,
+                    "current_claim_sha": claim.sha if claim is not None else None,
+                },
+                escalation=True,
+            )
+            _block_base_task(
+                repo=repo,
+                contract=contract,
+                args=args,
+                task_id=task_id,
+                note=f"@human Merge refused: claim fencing failed ({fencing_failure}).",
+                message=f"{task_id}: block stale lease merge",
+            )
+            refused.append({"task_id": task_id, "reason": fencing_failure})
+            base_tasks, _ = load_tasks_quarantined(contract)
+            continue
+
+        diff_cp = _run(
+            ["git", "diff", "--name-only", f"{args.base_branch}..{branch}"],
+            cwd=repo,
+            capture=True,
+            check=True,
+        )
+        changed_paths = [
+            line.strip() for line in (diff_cp.stdout or "").splitlines() if line.strip()
+        ]
+        protected = sorted(
+            path
+            for path in changed_paths
+            if any(
+                _path_matches_prefix(path, prefix)
+                for prefix in contract.operator_owned_shared_surfaces
+            )
+        )
+        if protected and branch_task.role != "Operator":
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "merge_refused_operator_surface",
+                    "task_id": task_id,
+                    "paths": protected,
+                    "role": branch_task.role,
+                },
+                escalation=True,
+            )
+            _block_base_task(
+                repo=repo,
+                contract=contract,
+                args=args,
+                task_id=task_id,
+                note=(
+                    "@human Merge refused: non-Operator task touched Operator-owned "
+                    f"surfaces: {', '.join(protected)}"
+                ),
+                message=f"{task_id}: block operator surface merge",
+            )
+            refused.append({"task_id": task_id, "reason": "operator_surface"})
+            base_tasks, _ = load_tasks_quarantined(contract)
+            continue
+
+        # F6: the merge queue owns a CLEAN base; anything else is skipped
+        # loudly rather than gambled with reset --hard later.
+        status_cp = _run(
+            ["git", "status", "--porcelain", "-uall"], cwd=repo, capture=True, check=True
+        )
+        event_paths = _runtime_event_paths(repo)
+        dirty = [
+            line
+            for line in (status_cp.stdout or "").splitlines()
+            if line.strip()
+            and line[3:].strip() not in event_paths
+            # machine-local attestations are operator state, never merge content
+            and not line[3:].strip().startswith(".swarm/")
+        ]
+        if dirty:
+            _record_swarm_event(
+                repo,
+                {"event": "merge_skipped_dirty_base", "task_id": task_id, "dirty": dirty[:10]},
+                escalation=True,
+            )
+            refused.append({"task_id": task_id, "reason": "dirty_base"})
+            continue
+
+        # F2 (merge side): the approval binds to CONTENT and TOPOLOGY —
+        # the manifest bytes must hash to what the Judge reviewed, and the
+        # branch tip must be exactly the review commit atop the reviewed sha
+        # (no post-approval commits of any kind).
+        branch_tip_sha = _run(
+            ["git", "rev-parse", branch], cwd=repo, capture=True, check=True
+        ).stdout.strip()
+        # every byte the binding trusts comes from the COMMITTED tip, never
+        # the mutable worktree
+        review_rel2 = review_path.relative_to(context["worktree"]).as_posix()
+        committed_review_cp = _run(
+            ["git", "show", f"{branch}:{review_rel2}"], cwd=repo, capture=True, check=False
+        )
+        committed_manifest_cp = _run(
+            ["git", "show", f"{branch}:{manifest_rel}"], cwd=repo, capture=True, check=False
+        )
+        if committed_review_cp.returncode != 0 or committed_manifest_cp.returncode != 0:
+            continue
+        try:
+            review = json.loads(committed_review_cp.stdout)
+            manifest = json.loads(committed_manifest_cp.stdout)
+        except json.JSONDecodeError:
+            continue
+        reviewed_sha = review.get("reviewed_branch_sha")
+        review_manifest_sha = review.get("manifest_sha256")
+        actual_manifest_sha = hashlib.sha256(
+            committed_manifest_cp.stdout.encode("utf-8")
+        ).hexdigest()
+        tip_parent = _run(
+            ["git", "rev-parse", f"{branch}^"], cwd=repo, capture=True, check=False
+        ).stdout.strip()
+        binding_failure: str | None = None
+        committed_review_sha256 = hashlib.sha256(
+            committed_review_cp.stdout.encode("utf-8")
+        ).hexdigest()
+        events_all, _ = swarm_events.read_events(repo)
+        journal_backed = any(
+            event.get("event") == "review_recorded"
+            and event.get("task_id") == task_id
+            and event.get("review_sha256") == committed_review_sha256
+            for event in events_all
+        )
+        if not isinstance(review_manifest_sha, str) or review_manifest_sha != actual_manifest_sha:
+            binding_failure = "manifest_content_changed_after_review"
+        elif not isinstance(reviewed_sha, str) or reviewed_sha != tip_parent:
+            binding_failure = "post_review_commits_present"
+        elif not journal_backed:
+            # the base journal is outside the executor sandbox: a review
+            # without a matching journal record was not written by any judge
+            # this control plane ran
+            binding_failure = "review_not_journal_backed"
+        if binding_failure is not None:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "merge_refused_review_binding",
+                    "task_id": task_id,
+                    "reason": binding_failure,
+                    "reviewed_branch_sha": reviewed_sha,
+                    "branch_tip_parent": tip_parent,
+                },
+                escalation=True,
+            )
+            _block_base_task(
+                repo=repo,
+                contract=contract,
+                args=args,
+                task_id=task_id,
+                note=f"@human Merge refused: review binding failed ({binding_failure}).",
+                message=f"{task_id}: block review binding merge",
+            )
+            refused.append({"task_id": task_id, "reason": binding_failure})
+            base_tasks, _ = load_tasks_quarantined(contract)
+            continue
+
+        # re-run the tamper-evident checks against the branch state: a forged
+        # approving review earns nothing these checks would not grant. Actor
+        # separation was enforced at judge time by a distinct session; here
+        # we verify CONTENT: pinned frontmatter, log binding, sha ancestry,
+        # and strict path discipline split around the review commit (the
+        # pre-review range must pass ownership WITH reviews disallowed; the
+        # review commit itself may touch only the review log + task file).
+        worktree_path = Path(context.get("worktree"))
+        recheck_failures: list[str] = []
+
+        frontmatter_block = manifest.get("frontmatter") if isinstance(manifest.get("frontmatter"), dict) else {}
+        pinned_sha = frontmatter_block.get("pinned_sha256")
+        try:
+            current_text, _ = _task_frontmatter_snapshot(branch_task.path)
+            current_fm_sha = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+        except ValueError:
+            current_fm_sha = None
+        if not isinstance(pinned_sha, str) or current_fm_sha != pinned_sha:
+            recheck_failures.append("post_run_frontmatter_tamper")
+
+        commands_block2 = manifest.get("commands") if isinstance(manifest.get("commands"), dict) else {}
+        log_rel = commands_block2.get("executor_log_path")
+        log_sha = commands_block2.get("executor_log_sha256")
+        if manifest.get("provenance_class") == "executor_run":
+            if not isinstance(log_rel, str) or not isinstance(log_sha, str):
+                recheck_failures.append("executor_log_binding_missing")
+            else:
+                log_path = worktree_path / log_rel
+                if not log_path.is_file() or hashlib.sha256(log_path.read_bytes()).hexdigest() != log_sha:
+                    recheck_failures.append("executor_log_binding_failed")
+
+        base_ref = _resolve_base_ref_for_diff(cwd=worktree_path, base_branch=args.base_branch, remote=args.remote)
+        task_file_rel = branch_task.path.relative_to(worktree_path).as_posix()
+        if base_ref is None:
+            recheck_failures.append("merge_recheck_base_unresolved")
+        else:
+            range_cp = _run(
+                ["git", "diff", "--name-only", f"{base_ref}...{tip_parent}"],
+                cwd=worktree_path,
+                capture=True,
+                check=False,
+            )
+            for changed in [line.strip() for line in (range_cp.stdout or "").splitlines() if line.strip()]:
+                ok, reason = _path_is_allowed(
+                    path=changed,
+                    allowed_paths=branch_task.allowed_paths,
+                    disallowed_paths=branch_task.disallowed_paths,
+                    task_file_path=task_file_rel,
+                    task_id=task_id,
+                )
+                if not ok:
+                    recheck_failures.append(f"ownership_violation:{changed}:{reason}")
+            tip_cp = _run(
+                ["git", "show", "--name-only", "--pretty=format:", branch],
+                cwd=worktree_path,
+                capture=True,
+                check=False,
+            )
+            review_prefix = f"reports/status/reviews/{task_id}_"
+            for tip_path in [line.strip() for line in (tip_cp.stdout or "").splitlines() if line.strip()]:
+                if tip_path == task_file_rel or tip_path.startswith(review_prefix):
+                    continue
+                if tip_path in _task_projection_paths(task_file_rel):
+                    continue
+                recheck_failures.append(f"review_commit_touched:{tip_path}")
+        if recheck_failures:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "merge_refused_integrity_recheck",
+                    "task_id": task_id,
+                    "failures": recheck_failures[:10],
+                },
+                escalation=True,
+            )
+            _block_base_task(
+                repo=repo,
+                contract=contract,
+                args=args,
+                task_id=task_id,
+                note="@human Merge refused: judge-checklist recheck failed at merge time.",
+                message=f"{task_id}: block integrity recheck merge",
+            )
+            refused.append({"task_id": task_id, "reason": "integrity_recheck"})
+            base_tasks, _ = load_tasks_quarantined(contract)
+            continue
+
+        # F5: cross-supervisor safety — the local base must equal the remote
+        # tip before we move it (the CAS push below enforces it again).
+        if _git_remote_exists(repo, args.remote):
+            _run(["git", "fetch", args.remote, args.base_branch], cwd=repo, check=False)
+            remote_tip = _run(
+                ["git", "rev-parse", f"{args.remote}/{args.base_branch}"],
+                cwd=repo,
+                capture=True,
+                check=False,
+            ).stdout.strip()
+            local_tip = _git_head_sha(repo)
+            if remote_tip and local_tip and remote_tip != local_tip:
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "merge_skipped_base_divergence",
+                        "task_id": task_id,
+                        "local": local_tip,
+                        "remote": remote_tip,
+                    },
+                    escalation=True,
+                )
+                refused.append({"task_id": task_id, "reason": "base_divergence"})
+                continue
+
+        pre_merge_sha = _git_head_sha(repo)
+        if pre_merge_sha is None:
+            raise SystemExit("merge_precondition_missing_base_sha")
+        # F9: the durable intent record FAILS CLOSED — no record, no merge.
+        swarm_events.append_event(
+            repo,
+            {
+                "event": "merge_started",
+                "task_id": task_id,
+                "branch": branch,
+                "pre_merge_sha": pre_merge_sha,
+            },
+            actor_session=_ACTOR_SESSION_ID,
+        )
+        merge_cp = _run(
+            ["git", "merge", "--ff-only", branch],
+            cwd=repo,
+            capture=True,
+            check=False,
+        )
+        if merge_cp.returncode != 0:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "merge_refused_non_ff",
+                    "task_id": task_id,
+                    "branch": branch,
+                },
+                escalation=True,
+            )
+            _block_base_task(
+                repo=repo,
+                contract=contract,
+                args=args,
+                task_id=task_id,
+                note="@human Merge refused: task branch is not fast-forwardable.",
+                message=f"{task_id}: block non-ff merge",
+            )
+            refused.append({"task_id": task_id, "reason": "non_ff"})
+            base_tasks, _ = load_tasks_quarantined(contract)
+            continue
+
+        post_merge_sha = _git_head_sha(repo)
+
+        merged_contract = load_framework_contract(repo)
+        merged_tasks, merged_quarantined = load_tasks_quarantined(merged_contract)
+        merged_task = _resolve_runtime_task(merged_tasks, merged_quarantined, task_id)
+        filename = merged_task.path.name
+        _move_task_to_state_projection(repo, merged_task)
+
+        quality_cp = _run(
+            [sys.executable, "scripts/quality_gates.py"],
+            cwd=repo,
+            capture=True,
+            check=False,
+            timeout_seconds=max(30, contract.gate_timeout_seconds * 2),
+        )
+        commands = manifest.get("commands") if isinstance(manifest.get("commands"), dict) else {}
+        pinned_gates = [
+            gate for gate in commands.get("gates", []) if isinstance(gate, str)
+        ]
+        pinned_ok, pinned_outputs = _run_gates(
+            repo,
+            pinned_gates,
+            interpreter_allowlist=contract.gate_interpreter_allowlist,
+            timeout_seconds=contract.gate_timeout_seconds,
+        )
+        if quality_cp.returncode != 0 or not pinned_ok:
+            # F6: the reset target is the sha THIS step recorded, and the tip
+            # must still be the merge this step created — anything else means
+            # concurrent movement and demands a human, not a reset.
+            current_head = _git_head_sha(repo)
+            if current_head != post_merge_sha:
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "merge_revert_refused_concurrent_movement",
+                        "task_id": task_id,
+                        "expected": post_merge_sha,
+                        "actual": current_head,
+                    },
+                    escalation=True,
+                )
+                refused.append({"task_id": task_id, "reason": "concurrent_base_movement"})
+                continue
+            _run(["git", "reset", "--hard", pre_merge_sha], cwd=repo, check=True)
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "merge_reverted",
+                    "task_id": task_id,
+                    "branch": branch,
+                    "pre_merge_sha": pre_merge_sha,
+                    "quality_returncode": quality_cp.returncode,
+                    "quality_output_tail": (quality_cp.stdout or "")[-2000:],
+                    "pinned_gates": pinned_outputs,
+                },
+                escalation=True,
+            )
+            _block_base_task(
+                repo=repo,
+                contract=contract,
+                args=args,
+                task_id=task_id,
+                note="@human Merge reverted: post-merge verification failed.",
+                message=f"{task_id}: block reverted merge",
+            )
+            reverted.append(task_id)
+            base_tasks, _ = load_tasks_quarantined(contract)
+            continue
+
+        # F9: verification passed — record it durably (fail closed) BEFORE
+        # any promotion; crash recovery keys off this record.
+        swarm_events.append_event(
+            repo,
+            {
+                "event": "merge_verified",
+                "task_id": task_id,
+                "pre_merge_sha": pre_merge_sha,
+                "post_merge_sha": post_merge_sha,
+            },
+            actor_session=_ACTOR_SESSION_ID,
+        )
+
+        merged_tasks, merged_quarantined = load_tasks_quarantined(merged_contract)
+        merged_task = _resolve_runtime_task(merged_tasks, merged_quarantined, task_id)
+        _update_task_status_and_notes(
+            task_path=merged_task.path,
+            new_state="done",
+            note_line=(
+                "Supervisor merge queue passed quality_gates.py and the pinned "
+                "task gates; claim released."
+            ),
+        )
+        done_task = load_task(merged_task.path, merged_contract)
+        _move_task_to_state_projection(repo, done_task)
+        _persist_projection_changes(
+            repo=repo,
+            remote=args.remote,
+            base_branch=args.base_branch,
+            filenames=[filename],
+            message=f"{task_id}: done",
+            strict=True,
+            push=False,
+        )
+        # F5: base advance is a CAS against the sha we verified from — a
+        # concurrent supervisor's push loses the race loudly, never silently.
+        if _git_remote_exists(repo, args.remote):
+            cas_cp = _run(
+                [
+                    "git",
+                    "push",
+                    args.remote,
+                    f"{args.base_branch}:{args.base_branch}",
+                    f"--force-with-lease={args.base_branch}:{pre_merge_sha}",
+                ],
+                cwd=repo,
+                capture=True,
+                check=False,
+            )
+            if cas_cp.returncode != 0:
+                done_tip = _git_head_sha(repo)
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "merge_cas_push_lost",
+                        "task_id": task_id,
+                        "expected_tip": done_tip,
+                    },
+                    escalation=True,
+                )
+                if _git_head_sha(repo) == done_tip:
+                    _run(["git", "reset", "--hard", pre_merge_sha], cwd=repo, check=True)
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "merge_reverted",
+                        "task_id": task_id,
+                        "cause": "base_cas_push_lost",
+                        "pre_merge_sha": pre_merge_sha,
+                        "push_output": (cas_cp.stderr or cas_cp.stdout or "")[-500:],
+                    },
+                    escalation=True,
+                )
+                refused.append({"task_id": task_id, "reason": "base_cas_push_lost"})
+                base_tasks, _ = load_tasks_quarantined(contract)
+                continue
+        _record_swarm_event(
+            repo,
+            {
+                "event": "task_done",
+                "task_id": task_id,
+                "branch": branch,
+                "pre_merge_sha": pre_merge_sha,
+                "base_sha": _git_head_sha(repo),
+            },
+        )
+        _release_current_claim(
+            repo=repo,
+            args=args,
+            task_id=task_id,
+            reason="task_done",
+        )
+        merged.append(task_id)
+        base_tasks, _ = load_tasks_quarantined(contract)
+
+    return {"merged": merged, "refused": refused, "reverted": reverted}
+
+
+def _latest_manifest_time(contract: FrameworkContract, task_id: str) -> dt.datetime | None:
+    latest: dt.datetime | None = None
+    for _, payload in _matching_v2_run_manifest_data(
+        _matching_task_jsons(contract.run_manifest_dir, task_id),
+        task_id,
+    ):
+        stamp = _parse_utc_iso(payload.get("generated_at_utc"))
+        if stamp is not None and (latest is None or stamp > latest):
+            latest = stamp
+    return latest
+
+
+def _step_sweep(args: argparse.Namespace) -> dict[str, object]:
+    repo = _repo_root()
+    contract = load_framework_contract(repo)
+    moves, problems = _apply_projection_sweep(repo)
+    filenames = {source.name for source, _ in moves}
+    tasks, quarantined = load_tasks_quarantined(contract)
+    claims = swarm_claims.read_claims(repo, args.remote)
+    events, _ = swarm_events.read_events(repo)
+    reconciled: list[str] = []
+    orphaned_candidates: list[str] = []
+
+    for task_id, claim in sorted(claims.items()):
+        task = tasks.get(task_id)
+        if task is None or task.state != "backlog":
+            continue
+        filenames.add(task.path.name)
+        _update_task_status_and_notes(
+            task_path=task.path,
+            new_state="active",
+            note_line=(
+                f"Claim ref lease {claim.lease_id} is authoritative; reconciled stale "
+                "backlog projection."
+            ),
+        )
+        reconciled_task = load_task(task.path, contract)
+        _move_task_to_state_projection(repo, reconciled_task)
+        reconciled.append(task_id)
+        _record_swarm_event(
+            repo,
+            {
+                "event": "claim_projection_reconciled",
+                "task_id": task_id,
+                "lease_id": claim.lease_id,
+            },
+        )
+
+    tasks, _ = load_tasks_quarantined(contract)
+    for task_id, task in sorted(tasks.items()):
+        if task.state != "active" or task_id in claims:
+            continue
+        claim_times = [
+            _parse_utc_iso(event.get("ts_utc"))
+            for event in events
+            if event.get("task_id") == task_id
+            and event.get("event") in {"claim_created", "lease_renewed", "claim_released"}
+        ]
+        last_claim = max((stamp for stamp in claim_times if stamp is not None), default=None)
+        manifest_time = _latest_manifest_time(contract, task_id)
+        if last_claim is not None and manifest_time is not None and manifest_time > last_claim:
+            continue
+        orphaned_candidates.append(task_id)
+        _record_swarm_event(
+            repo,
+            {
+                "event": "orphaned_candidate",
+                "task_id": task_id,
+                "last_claim_at_utc": (
+                    last_claim.isoformat().replace("+00:00", "Z")
+                    if last_claim is not None
+                    else None
+                ),
+            },
+            escalation=True,
+        )
+
+    second_moves, second_problems = _apply_projection_sweep(repo)
+    filenames.update(source.name for source, _ in second_moves)
+    problems.extend(second_problems)
+    if filenames:
+        _persist_projection_changes(
+            repo=repo,
+            remote=args.remote,
+            base_branch=args.base_branch,
+            filenames=sorted(filenames),
+            message="swarm: reconcile lifecycle projections",
+            strict=bool(args.unattended),
+        )
+    for problem in problems:
+        _record_swarm_event(
+            repo,
+            {"event": "sweep_problem", "problem": problem},
+            escalation=True,
+        )
+    return {
+        "moves": len(moves) + len(second_moves),
+        "problems": problems,
+        "reconciled": reconciled,
+        "orphaned_candidates": orphaned_candidates,
+        "quarantined": len(quarantined),
+    }
+
+
+def _worktree_dirty_paths(worktree: Path) -> list[str]:
+    cp = _run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree,
+        capture=True,
+        check=True,
+    )
+    ignored = _runtime_event_paths(worktree)
+    dirty: list[str] = []
+    for line in (cp.stdout or "").splitlines():
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path in ignored:
+            continue
+        dirty.append(line)
+    return dirty
+
+
+def _step_clean(args: argparse.Namespace) -> dict[str, object]:
+    repo = _repo_root()
+    contract = load_framework_contract(repo)
+    tasks, _ = load_tasks_quarantined(contract)
+    done_ids = {task_id for task_id, task in tasks.items() if task.state == "done"}
+    removed_worktrees: list[str] = []
+    deleted_branches: list[str] = []
+    dirty_worktrees: list[str] = []
+    stale_branches: list[str] = []
+
+    for record in _worktree_records(repo):
+        branch = record.get("branch", "").removeprefix("refs/heads/")
+        task_id = _parse_task_id_from_branch(branch)
+        worktree_raw = record.get("worktree")
+        if task_id not in done_ids or not worktree_raw:
+            continue
+        worktree = Path(worktree_raw)
+        dirty = _worktree_dirty_paths(worktree)
+        if dirty:
+            dirty_worktrees.append(task_id)
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "worktree_dirty",
+                    "task_id": task_id,
+                    "worktree": str(worktree),
+                    "paths": dirty[:20],
+                },
+                escalation=True,
+            )
+            continue
+        cp = _run(
+            ["git", "worktree", "remove", str(worktree)],
+            cwd=repo,
+            capture=True,
+            check=False,
+        )
+        if cp.returncode == 0:
+            removed_worktrees.append(task_id)
+
+    branches_cp = _run(
+        ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        cwd=repo,
+        capture=True,
+        check=True,
+    )
+    for branch in sorted(
+        line.strip() for line in (branches_cp.stdout or "").splitlines() if line.strip()
+    ):
+        task_id = _parse_task_id_from_branch(branch)
+        if task_id not in done_ids:
+            continue
+        merged = _run(
+            ["git", "merge-base", "--is-ancestor", branch, args.base_branch],
+            cwd=repo,
+            capture=True,
+            check=False,
+        ).returncode == 0
+        if not merged:
+            stale_branches.append(branch)
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "stale_task_branch",
+                    "task_id": task_id,
+                    "branch": branch,
+                },
+            )
+            continue
+        cp = _run(
+            ["git", "branch", "-d", branch],
+            cwd=repo,
+            capture=True,
+            check=False,
+        )
+        if cp.returncode == 0:
+            deleted_branches.append(branch)
+    _run(["git", "worktree", "prune"], cwd=repo, check=True)
+    return {
+        "removed_worktrees": removed_worktrees,
+        "deleted_branches": deleted_branches,
+        "dirty_worktrees": dirty_worktrees,
+        "stale_branches": stale_branches,
+    }
+
+
+def _repair_context_from_manifest(manifest: dict[str, object]) -> str:
+    result = manifest.get("result") if isinstance(manifest.get("result"), dict) else {}
+    gates = manifest.get("gates") if isinstance(manifest.get("gates"), list) else []
+    diagnostics: list[dict[str, object]] = []
+    for gate in gates:
+        if not isinstance(gate, dict):
+            continue
+        if gate.get("returncode") in {0, None} and not gate.get("timed_out") and not gate.get("constraint_violation"):
+            continue
+        diagnostics.append(
+            {
+                "command": gate.get("command"),
+                "returncode": gate.get("returncode"),
+                "timed_out": gate.get("timed_out"),
+                "constraint_violation": gate.get("constraint_violation"),
+                "output_head": str(gate.get("output_head", ""))[:700],
+                "output_tail": str(gate.get("output_tail", ""))[-700:],
+            }
+        )
+    payload = {
+        "blocked_reasons": [
+            reason for reason in result.get("blocked_reasons", []) if isinstance(reason, str)
+        ],
+        "gate_diagnostics": diagnostics,
+    }
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)[:2048]
+
+
+def _step_repair(
+    args: argparse.Namespace,
+    *,
+    candidate_ids: set[str] | None = None,
+) -> dict[str, object]:
+    repo = _repo_root()
+    contexts = _task_branch_contexts(repo)
+    events, _ = swarm_events.read_events(repo)
+    repaired: list[dict[str, object]] = []
+    exhausted: list[str] = []
+    integrity_blocks: list[str] = []
+    already_exhausted = {
+        event.get("task_id")
+        for event in events
+        if event.get("event") == "repair_exhausted"
+    }
+
+    for task_id, context in sorted(contexts.items()):
+        if candidate_ids is not None and task_id not in candidate_ids:
+            continue
+        task = context.get("task")
+        manifest = context.get("manifest")
+        contract = context.get("contract")
+        worktree = context.get("worktree")
+        if (
+            not isinstance(task, Task)
+            or task.state not in {"active", "blocked"}
+            or not isinstance(manifest, dict)
+            or not isinstance(contract, FrameworkContract)
+            or not isinstance(worktree, Path)
+        ):
+            continue
+        result_block = manifest.get("result") if isinstance(manifest.get("result"), dict) else {}
+        reasons = [
+            reason for reason in result_block.get("blocked_reasons", []) if isinstance(reason, str)
+        ]
+        integrity = "frontmatter_tampered" in reasons or any(
+            "ownership" in reason for reason in reasons
+        )
+        if integrity:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "integrity_block",
+                    "task_id": task_id,
+                    "blocked_reasons": reasons,
+                },
+                escalation=True,
+            )
+            integrity_blocks.append(task_id)
+            continue
+        if not set(reasons).intersection({"executor_failed", "executor_timeout", "gates_failed"}):
+            continue
+
+        event_attempts = sum(
+            event.get("event") == "run_finished" and event.get("task_id") == task_id
+            for event in events
+        )
+        manifest_attempts = len(
+            _matching_v2_run_manifest_data(
+                _matching_task_jsons(contract.run_manifest_dir, task_id),
+                task_id,
+            )
+        )
+        attempts = max(event_attempts, manifest_attempts)
+        if attempts >= contract.repair_max_attempts:
+            if task_id not in already_exhausted:
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "repair_exhausted",
+                        "task_id": task_id,
+                        "attempts": attempts,
+                        "max_attempts": contract.repair_max_attempts,
+                    },
+                    escalation=True,
+                )
+            exhausted.append(task_id)
+            continue
+
+        repair_context = _repair_context_from_manifest(manifest)
+        _update_task_status_and_notes(
+            task_path=task.path,
+            new_state="active",
+            note_line=(
+                f"Supervisor repair attempt {attempts + 1}/{contract.repair_max_attempts}; "
+                "failure context injected."
+            ),
+        )
+        returncode, output = _run_task_in_process(
+            event_repo=repo,
+            worktree=worktree,
+            args=args,
+            task_id=task_id,
+            repair_context=repair_context,
+        )
+        repaired.append(
+            {
+                "task_id": task_id,
+                "returncode": returncode,
+                "repair_context": repair_context,
+                "output": output.strip(),
+            }
+        )
+        if returncode != 0 and attempts + 1 >= contract.repair_max_attempts:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "repair_exhausted",
+                    "task_id": task_id,
+                    "attempts": attempts + 1,
+                    "max_attempts": contract.repair_max_attempts,
+                },
+                escalation=True,
+            )
+            exhausted.append(task_id)
+    return {
+        "repaired": repaired,
+        "exhausted": exhausted,
+        "integrity_blocks": integrity_blocks,
+    }
+
+
+def _step_plan(args: argparse.Namespace) -> dict[str, object]:
+    repo = _repo_root()
+    _record_swarm_event(repo, {"event": "plan_step_noop"})
+    return {"status": "noop", "reason": "planner_runtime_arrives_in_m2"}
+
+
+def _step_escalate(args: argparse.Namespace) -> dict[str, object]:
+    repo = _repo_root()
+    contract = load_framework_contract(repo)
+    tasks, quarantined = load_tasks_quarantined(contract)
+    counts = {
+        state: sum(task.state == state for task in tasks.values())
+        for state in DEFAULT_ALLOWED_STATES
+    }
+    now = dt.datetime.now(tz=dt.timezone.utc)
+    claims = swarm_claims.read_claims(repo, args.remote)
+    live = sum(not claim.expired(now=now) for claim in claims.values())
+    expired = len(claims) - live
+    spend, usage_records = _usage_records(repo)
+    snapshot = {
+        "event": "status_snapshot",
+        "state_counts": counts,
+        "claims": {"live": live, "expired": expired},
+        "ready_for_review": len(_ready_for_review_contexts(repo)),
+        "quarantined": len(quarantined),
+        "spend_usd": spend,
+        "usage_records": usage_records,
+    }
+    _record_swarm_event(repo, snapshot)
+    return {key: value for key, value in snapshot.items() if key != "event"}
+
+
+def _step_account(args: argparse.Namespace) -> dict[str, object]:
+    repo = _repo_root()
+    contract = load_framework_contract(repo)
+    spend, usage_records = _usage_records(repo)
+    if spend is None or contract.budget_max_program_usd is None:
+        reason = "usage_unavailable" if spend is None else "budget_unconfigured"
+        budget_set_but_unverifiable = (
+            spend is None and contract.budget_max_program_usd is not None
+        )
+        _record_swarm_event(
+            repo,
+            {
+                "event": "budget_unverifiable" if budget_set_but_unverifiable else "account_no_data",
+                "reason": reason,
+                "spend_usd": spend,
+                "usage_records": usage_records,
+            },
+            escalation=budget_set_but_unverifiable,
+        )
+        return {
+            "status": "no_data",
+            "reason": reason,
+            "spend_usd": spend,
+            "usage_records": usage_records,
+        }
+    exceeded = spend > contract.budget_max_program_usd
+    event = {
+        "event": "budget_exceeded" if exceeded else "account_snapshot",
+        "spend_usd": spend,
+        "max_program_usd": contract.budget_max_program_usd,
+        "usage_records": usage_records,
+    }
+    _record_swarm_event(repo, event, escalation=exceeded)
+    return {
+        "status": "exceeded" if exceeded else "within_budget",
+        "spend_usd": spend,
+        "max_program_usd": contract.budget_max_program_usd,
+        "usage_records": usage_records,
+    }
+
+
+def _supervise_cycle(args: argparse.Namespace) -> dict[str, object]:
+    repo = _repo_root()
+    summary: dict[str, object] = {
+        "cycle_started_at_utc": _utc_now_iso(),
+        "actor_session": _ACTOR_SESSION_ID,
+    }
+
+    def run_step(name: str, func, *func_args, **func_kwargs) -> dict[str, object]:
+        result = func(*func_args, **func_kwargs)
+        summary[name.lower()] = result
+        _record_swarm_event(
+            repo,
+            {
+                "event": "supervisor_step_completed",
+                "step": name,
+                "summary": result,
+            },
+        )
+        return result
+
+    run_step("SYNC", _step_sync, args)
+    run_step("REAP", _step_reap, args)
+    judge_candidates = set(_ready_for_review_contexts(repo))
+    repair_candidates = {
+        task_id
+        for task_id, context in _task_branch_contexts(repo).items()
+        if isinstance(context.get("task"), Task)
+        and context["task"].state in {"active", "blocked"}
+        and isinstance(context.get("manifest"), dict)
+        and isinstance(context["manifest"].get("result"), dict)
+        and context["manifest"]["result"].get("status") == "blocked"
+    }
+    run_step("TICK", _step_tick, args)
+    run_step("JUDGE", _step_judge, args, candidate_ids=judge_candidates)
+    run_step("MERGE", _step_merge, args)
+    run_step("SWEEP", _step_sweep, args)
+    run_step("CLEAN", _step_clean, args)
+    run_step("REPAIR", _step_repair, args, candidate_ids=repair_candidates)
+    run_step("PLAN", _step_plan, args)
+    run_step("ESCALATE", _step_escalate, args)
+    run_step("ACCOUNT", _step_account, args)
+    summary["cycle_finished_at_utc"] = _utc_now_iso()
+    return summary
+
+
+def _attempt_supervise_iteration(
+    args: argparse.Namespace,
+    *,
+    interval_seconds: int,
+    consecutive_failures: int,
+    repo: Path,
+) -> tuple[int, int]:
+    try:
+        _supervise_cycle(args)
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        consecutive_failures += 1
+        backoff_seconds = _handle_loop_failure(
+            exc,
+            interval_seconds=interval_seconds,
+            consecutive_failures=consecutive_failures,
+            repo=repo,
+        )
+        return consecutive_failures, backoff_seconds
+    return 0, 0
+
+
+def cmd_supervise(args: argparse.Namespace) -> int:
+    repo = _repo_root()
+    if args.runner != "local":
+        raise SystemExit("supervise_runner_must_be_local")
+    if args.unattended:
+        _require_unattended_ack()
+    else:
+        # inherently unattended-class entrypoint (§9.4): containment is not
+        # optional even without the flag
+        _require_containment(_repo_root())
+    _preflight_strict_sync_requirements(
+        cwd=repo,
+        remote=args.remote,
+        unattended=bool(args.unattended),
+        create_pr=False,
+    )
+    if args.once:
+        summary = _supervise_cycle(args)
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+
+    interval_seconds = max(5, int(args.interval_seconds))
+    print(f"swarm_supervisor_started interval={interval_seconds}s repo={repo}")
+    consecutive_failures = 0
+    while True:
+        try:
+            consecutive_failures, backoff_seconds = _attempt_supervise_iteration(
+                args,
+                interval_seconds=interval_seconds,
+                consecutive_failures=consecutive_failures,
+                repo=repo,
+            )
+            remaining = interval_seconds + backoff_seconds
+            while remaining > 0:
+                sleep_seconds = min(5, remaining)
+                time.sleep(sleep_seconds)
+                remaining -= sleep_seconds
+        except KeyboardInterrupt:
+            print("swarm_supervisor_stopped")
+            return 0
 
 
 def _loop_iteration(args: argparse.Namespace) -> int:
@@ -1976,12 +5097,30 @@ def _loop_iteration(args: argparse.Namespace) -> int:
     return cmd_tick(args)
 
 
-def _handle_loop_failure(exc: BaseException, *, interval_seconds: int, consecutive_failures: int) -> int:
+def _handle_loop_failure(
+    exc: BaseException,
+    *,
+    interval_seconds: int,
+    consecutive_failures: int,
+    repo: Path | None = None,
+) -> int:
     print(
         f"[loop] escalation iteration_failed kind={type(exc).__name__} detail={exc}",
         file=sys.stderr,
     )
-    return min(3600, interval_seconds * (2 ** max(0, consecutive_failures - 1)))
+    backoff_seconds = min(3600, interval_seconds * (2 ** max(0, consecutive_failures - 1)))
+    if repo is not None:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "loop_iteration_failed",
+                "kind": type(exc).__name__,
+                "detail": str(exc),
+                "backoff_seconds": backoff_seconds,
+            },
+            escalation=True,
+        )
+    return backoff_seconds
 
 
 def _attempt_loop_iteration(
@@ -1989,6 +5128,7 @@ def _attempt_loop_iteration(
     *,
     interval_seconds: int,
     consecutive_failures: int,
+    repo: Path | None = None,
 ) -> tuple[int, int]:
     try:
         _loop_iteration(args)
@@ -2000,6 +5140,7 @@ def _attempt_loop_iteration(
             exc,
             interval_seconds=interval_seconds,
             consecutive_failures=consecutive_failures,
+            repo=repo,
         )
         return consecutive_failures, backoff_seconds
     return 0, 0
@@ -2010,6 +5151,10 @@ def cmd_loop(args: argparse.Namespace) -> int:
 
     if args.unattended:
         _require_unattended_ack()
+    else:
+        # inherently unattended-class entrypoint (§9.4): containment is not
+        # optional even without the flag
+        _require_containment(_repo_root())
 
     _preflight_strict_sync_requirements(
         cwd=repo,
@@ -2028,6 +5173,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 args,
                 interval_seconds=interval_seconds,
                 consecutive_failures=consecutive_failures,
+                repo=repo,
             )
             remaining = interval_seconds + backoff_seconds
             while remaining > 0:
@@ -2044,6 +5190,10 @@ def cmd_tmux_start(args: argparse.Namespace) -> int:
 
     if args.unattended:
         _require_unattended_ack()
+    else:
+        # inherently unattended-class entrypoint (§9.4): containment is not
+        # optional even without the flag
+        _require_containment(_repo_root())
 
     _preflight_strict_sync_requirements(
         cwd=repo,
@@ -2113,6 +5263,99 @@ def _resolve_runtime_task(tasks: dict[str, Task], quarantined: list[dict[str, st
     raise SystemExit(f"unknown_task_id:{task_id}")
 
 
+import threading
+
+
+@contextlib.contextmanager
+def _lease_heartbeat(*, repo: Path, remote: str, task_id: str):
+    """§4.1 session model: workers heartbeat below 50% of the lease TTL even
+    while blocked on the executor. Renewal failures are journaled, never
+    raised from the timer thread (the post-run renewal fails loudly)."""
+    claims = swarm_claims.read_claims(repo, remote, fetch=False)
+    claim = claims.get(task_id)
+    if claim is None or claim.session_id != _ACTOR_SESSION_ID:
+        yield
+        return
+    ttl = claim.payload.get("lease_ttl_seconds")
+    if isinstance(ttl, int) and ttl > 0:
+        interval = max(1, min(int(ttl) // 3, int(ttl * 0.45)) or 1)
+    else:
+        interval = 1200
+    stop = threading.Event()
+
+    def _beat() -> None:
+        current_sha = claim.sha
+        while not stop.wait(interval):
+            try:
+                renewed = swarm_claims.renew_lease(
+                    repo,
+                    remote,
+                    task_id,
+                    expected_sha=current_sha,
+                    session_id=_ACTOR_SESSION_ID,
+                    journal=lambda event: _record_swarm_event(repo, event),
+                )
+                if renewed.ok and renewed.sha:
+                    current_sha = renewed.sha
+                else:
+                    _record_swarm_event(
+                        repo,
+                        {
+                            "event": "heartbeat_failed",
+                            "task_id": task_id,
+                            "reason": renewed.reason,
+                        },
+                        escalation=True,
+                    )
+                    return
+            except Exception as exc:
+                _record_swarm_event(
+                    repo,
+                    {"event": "heartbeat_failed", "task_id": task_id, "reason": str(exc)},
+                    escalation=True,
+                )
+                return
+
+    thread = threading.Thread(target=_beat, name=f"lease-heartbeat-{task_id}", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+
+
+def _renew_runtime_claim(
+    *,
+    repo: Path,
+    remote: str,
+    task_id: str,
+) -> dict[str, object] | None:
+    claims = swarm_claims.read_claims(repo, remote)
+    claim = claims.get(task_id)
+    if claim is None:
+        return None
+    if claim.session_id != _ACTOR_SESSION_ID:
+        raise SystemExit(
+            f"claim_session_mismatch:{task_id}:{claim.session_id}:{_ACTOR_SESSION_ID}"
+        )
+    renewed = swarm_claims.renew_lease(
+        repo,
+        remote,
+        task_id,
+        expected_sha=claim.sha,
+        session_id=_ACTOR_SESSION_ID,
+        journal=lambda event: _record_swarm_event(repo, event),
+    )
+    if not renewed.ok or renewed.sha is None or renewed.lease_id is None:
+        raise SystemExit(f"claim_heartbeat_failed:{task_id}:{renewed.reason}")
+    return {
+        "lease_id": renewed.lease_id,
+        "sha": renewed.sha,
+        "transport": renewed.transport,
+    }
+
+
 def cmd_run_task(args: argparse.Namespace) -> int:
     repo = _repo_root()
     contract = load_framework_contract(repo)
@@ -2122,6 +5365,14 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         _require_unattended_ack()
 
     task = _resolve_runtime_task(tasks, quarantined, args.task_id)
+
+    if args.codex_sandbox == "danger-full-access" and not (
+        getattr(args, "i_accept_full_access", False) and task.allow_network
+    ):
+        raise SystemExit(
+            "full_access_requires_double_opt_in:"
+            "--i-accept-full-access AND task allow_network: true (§9.4)"
+        )
 
     if task.role not in set(contract.task_execution_roles):
         raise SystemExit(f"task_not_runtime_executable:{task.task_id}:{task.role}")
@@ -2147,6 +5398,11 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         create_pr=bool(args.create_pr),
     )
     strict_sync = bool(args.unattended or args.create_pr)
+    claim_stamp = _renew_runtime_claim(
+        repo=repo,
+        remote=args.remote,
+        task_id=task.task_id,
+    )
 
     state_before = task.state
     if task.state == "backlog":
@@ -2165,12 +5421,25 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             strict=strict_sync,
         )
 
+    _record_swarm_event(
+        repo,
+        {
+            "event": "run_started",
+            "task_id": task.task_id,
+            "state_before": state_before,
+        },
+    )
+
     blocked_reasons: list[str] = []
     executor_command: list[str] = []
     executor_returncode: int | None = None
     executor_error: str | None = None
     executor_log_relpath: str | None = None
     executor_log_sha256: str | None = None
+    executor_wall_clock_seconds: float | None = None
+    executor_usage: dict[str, object] | None = None
+    executor_session_relpath: str | None = None
+    executor_backend = getattr(args, "executor_backend", "codex")
 
     if task.allow_network and task.workstream not in set(contract.network_workstreams):
         blocked_reasons.append("network_policy_violation")
@@ -2188,28 +5457,42 @@ def cmd_run_task(args: argparse.Namespace) -> int:
 
     if not args.skip_executor and not blocked_reasons:
         executor_output: object = None
+        executor_started: float | None = None
         try:
             prompt_path = _executor_prompt_path(task, contract)
             prompt = load_prompt(
                 prompt_path,
                 _build_prompt_context(task, repo, args.repair_context),
             )
-            executor_command = _codex_exec_cmd(
-                prompt=prompt,
-                model=args.codex_model,
-                sandbox=args.codex_sandbox,
-                unattended=args.unattended,
-                allow_network=task.allow_network,
-                workdir=repo,
-            )
-            cp = _invoke_executor(
-                command=executor_command,
-                cwd=repo,
-                timeout_seconds=int(args.max_worker_seconds) if args.max_worker_seconds else None,
-            )
-            executor_returncode = cp.returncode
-            executor_output = cp.stdout
-            if cp.returncode != 0:
+            if executor_backend == "codex":
+                executor_command = _codex_exec_cmd(
+                    prompt=prompt,
+                    model=args.codex_model,
+                    sandbox=args.codex_sandbox,
+                    unattended=args.unattended,
+                    allow_network=task.allow_network,
+                    workdir=repo,
+                )
+            else:
+                executor_command = ["mock", _mock_transcript_relpath(task.task_id)]
+            executor_started = time.perf_counter()
+            execution_values = dict(vars(args))
+            execution_values["_executor_command"] = executor_command
+            execution_args = argparse.Namespace(**execution_values)
+            with _lease_heartbeat(repo=repo, remote=args.remote, task_id=task.task_id):
+                outcome = _execute_task(
+                    backend=executor_backend,
+                    task=task,
+                    prompt=prompt,
+                    args=execution_args,
+                    repo=repo,
+                    timeout_seconds=int(args.max_worker_seconds) if args.max_worker_seconds else None,
+                )
+            executor_returncode = outcome.returncode
+            executor_output = outcome.stdout
+            executor_wall_clock_seconds = outcome.wall_clock_seconds
+            executor_usage = outcome.usage
+            if outcome.returncode != 0:
                 blocked_reasons.append("executor_failed")
         except subprocess.TimeoutExpired as exc:
             executor_output = exc.stdout
@@ -2223,13 +5506,45 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             executor_error = str(exc)
             blocked_reasons.append("executor_unavailable")
         finally:
+            if executor_started is not None and executor_wall_clock_seconds is None:
+                executor_wall_clock_seconds = max(0.0, time.perf_counter() - executor_started)
+            if executor_wall_clock_seconds is not None:
+                executor_usage = _usage_with_cost_estimate(
+                    repo=repo,
+                    model=args.codex_model,
+                    wall_clock_seconds=executor_wall_clock_seconds,
+                    captured_usage=executor_usage,
+                )
             executor_log_relpath, executor_log_sha256 = _write_executor_log(
                 repo=repo,
                 run_id=run_id,
                 output=executor_output,
             )
+            if bool(getattr(args, "record_session", False)) and executor_wall_clock_seconds is not None:
+                assert executor_usage is not None
+                executor_session_relpath = _write_executor_session(
+                    repo=repo,
+                    run_id=run_id,
+                    backend=executor_backend,
+                    argv=executor_command,
+                    returncode=executor_returncode,
+                    wall_clock_seconds=executor_usage["wall_clock_seconds"],
+                    stdout=executor_output,
+                    usage=executor_usage,
+                )
     elif args.skip_executor:
         executor_error = "executor_skipped"
+
+    if not args.skip_executor and claim_stamp is not None:
+        try:
+            claim_stamp = _renew_runtime_claim(
+                repo=repo,
+                remote=args.remote,
+                task_id=task.task_id,
+            )
+        except SystemExit as exc:
+            executor_error = str(exc)
+            blocked_reasons.append("claim_heartbeat_failed")
 
     try:
         task_text_after_executor = _read_text(task.path)
@@ -2328,7 +5643,10 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     blocked_reasons = _dedupe_preserve(blocked_reasons)
     if blocked_reasons:
         state_after = "blocked"
-    elif task_state_after_executor in {"active", "integration_ready", "ready_for_review"}:
+    elif (
+        task_state_after_executor in {"active", "integration_ready", "ready_for_review"}
+        and not bool(getattr(args, "supervisor_managed", False))
+    ):
         # Respect the task state the worker left behind. The runtime should not
         # silently promote an active task to ready_for_review just because the
         # default final_state is reviewable.
@@ -2338,6 +5656,15 @@ def cmd_run_task(args: argparse.Namespace) -> int:
 
     run_manifest_path = _next_json_artifact_path(contract.run_manifest_dir, task.task_id, run_timestamp)
     run_manifest_relpath = run_manifest_path.relative_to(repo).as_posix()
+
+    commands_block: dict[str, object] = {
+        "executor": executor_command,
+        "executor_log_path": executor_log_relpath,
+        "executor_log_sha256": executor_log_sha256,
+        "gates": list(task.gates),
+    }
+    if executor_session_relpath is not None:
+        commands_block["session_path"] = executor_session_relpath
 
     run_manifest = {
         "schema_version": SWARM_RUN_MANIFEST_SCHEMA_VERSION,
@@ -2369,20 +5696,29 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         "executor": {
             "role": task.role,
             "runner": "local_swarm",
-            "tool": "codex" if not args.skip_executor else "manual",
+            "tool": executor_backend if not args.skip_executor else "manual",
             "model": args.codex_model,
             "sandbox": args.codex_sandbox,
             "allow_network": task.allow_network,
+            "full_access_opt_in": bool(
+                args.codex_sandbox == "danger-full-access"
+                and getattr(args, "i_accept_full_access", False)
+            ),
+            "effective_network": {
+                "declared_allow_network": task.allow_network,
+                "sandbox": args.codex_sandbox,
+                "backend": getattr(args, "executor_backend", "codex"),
+                "enforcement": (
+                    "mock_backend"
+                    if getattr(args, "executor_backend", "codex") == "mock"
+                    else "codex_sandbox"
+                ),
+            },
             "repair_context": args.repair_context,
             "returncode": executor_returncode,
             "error": executor_error,
         },
-        "commands": {
-            "executor": executor_command,
-            "executor_log_path": executor_log_relpath,
-            "executor_log_sha256": executor_log_sha256,
-            "gates": list(task.gates),
-        },
+        "commands": commands_block,
         "frontmatter": {
             "pinned_sha256": pinned_frontmatter_sha256,
             "tampered": frontmatter_tampered,
@@ -2414,7 +5750,22 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         }
     if quarantined:
         run_manifest["quarantined_tasks"] = quarantined
+    if claim_stamp is not None:
+        run_manifest["claim"] = claim_stamp
+    if executor_usage is not None:
+        run_manifest["usage"] = executor_usage
     _write_json(run_manifest_path, run_manifest)
+    _record_swarm_event(
+        repo,
+        {
+            "event": "run_finished",
+            "task_id": task.task_id,
+            "status": run_manifest["result"]["status"],
+            "blocked_reasons": blocked_reasons,
+            "run_manifest": run_manifest_relpath,
+            "provenance_class": run_manifest["provenance_class"],
+        },
+    )
 
     if state_after == "integration_ready":
         note = (
@@ -2452,12 +5803,25 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         ).strip()
 
     _update_task_status_and_notes(task_path=task.path, new_state=state_after, note_line=note)
+    if state_after == "blocked" and "@human" in note:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "human_question",
+                "task_id": task.task_id,
+                "blocked_reasons": blocked_reasons,
+                "note": note,
+            },
+            escalation=True,
+        )
 
     if _git_has_changes(repo):
         task_file_rel = task.path.relative_to(repo).as_posix()
         control_plane_paths = {task_file_rel, run_manifest_relpath}
         if executor_log_relpath is not None:
             control_plane_paths.add(executor_log_relpath)
+        if executor_session_relpath is not None:
+            control_plane_paths.add(executor_session_relpath)
 
         final_path_sources, _ = _collect_changed_paths_with_sources(repo=repo, base_ref=base_ref)
         for violating_path in sorted(set(uncommitted_violations)):
@@ -2624,7 +5988,23 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
     review_bundle_failures.extend(integrity_failures)
 
     approved = gate_ok and outputs_ok and not manifest_failures and not review_bundle_failures
-    state_after = "done" if approved else args.on_fail
+    promote_directly = bool(getattr(args, "promote_directly", False))
+    approve_only = not promote_directly
+    if promote_directly:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "judge_promote_directly",
+                "task_id": task.task_id,
+                "note": "manual override: done promoted without the merge queue's post-merge verification",
+            },
+            escalation=True,
+        )
+    intended_state_after = "done" if approved else args.on_fail
+    actual_state_after = (
+        "ready_for_review" if approved and approve_only else intended_state_after
+    )
+    outcome = "approve" if approved else ("block" if args.on_fail == "blocked" else "revise")
 
     review_log_path = _next_json_artifact_path(contract.judge_review_dir, task.task_id, _utc_timestamp_compact())
     review_log_relpath = review_log_path.relative_to(repo).as_posix()
@@ -2644,10 +6024,18 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
         else f"{note_prefix} Judge returned task with failures: {', '.join(check_failures)}."
     ).strip()
 
+    reviewed_branch_sha = _git_head_sha(repo)
+    reviewed_manifest_sha256 = (
+        hashlib.sha256(selected_run_manifest.read_bytes()).hexdigest()
+        if selected_run_manifest is not None and selected_run_manifest.is_file()
+        else None
+    )
     review_log = {
         "schema_version": JUDGE_REVIEW_LOG_SCHEMA_VERSION,
         "review_id": f"{task.task_id}_{_utc_timestamp_compact()}",
         "generated_at_utc": _utc_now_iso(),
+        "reviewed_branch_sha": reviewed_branch_sha,
+        "manifest_sha256": reviewed_manifest_sha256,
         "reviewer": {
             "role": contract.scientific_review_role,
             "session_id": _ACTOR_SESSION_ID,
@@ -2659,7 +6047,7 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
             "task_path": task.path.relative_to(repo).as_posix(),
             "role": task.role,
             "state_before": task.state,
-            "state_after": state_after,
+            "state_after": intended_state_after,
             "run_manifest_path": run_manifest_relpath,
         },
         "checks": {
@@ -2670,18 +6058,45 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
             "failures": check_failures,
         },
         "decision": {
-            "outcome": "approve" if approved else ("block" if args.on_fail == "blocked" else "revise"),
+            "outcome": outcome,
             "note": decision_note,
         },
     }
     _write_json(review_log_path, review_log)
+    review_event = {
+        "task_id": task.task_id,
+        "outcome": outcome,
+        "failures": check_failures,
+        "review_log": review_log_relpath,
+        # the journal (outside the executor sandbox) anchors this review's
+        # exact content — the merge queue refuses reviews without it
+        "review_sha256": hashlib.sha256(review_log_path.read_bytes()).hexdigest(),
+    }
+    _record_swarm_event(
+        repo,
+        {"event": "review_recorded", **review_event},
+    )
+    if not approved and args.on_fail == "blocked":
+        _record_swarm_event(
+            repo,
+            {"event": "judge_block", **review_event},
+            escalation=True,
+        )
 
     task_note = (
-        f"Judge approved; review log: {review_log_relpath}"
+        (
+            f"Judge approved pending supervisor merge; review log: {review_log_relpath}"
+            if approve_only
+            else f"Judge approved; review log: {review_log_relpath}"
+        )
         if approved
         else f"@human Judge returned task; review log: {review_log_relpath}; failures: {', '.join(check_failures)}"
     )
-    _update_task_status_and_notes(task_path=task.path, new_state=state_after, note_line=task_note)
+    _update_task_status_and_notes(
+        task_path=task.path,
+        new_state=actual_state_after,
+        note_line=task_note,
+    )
 
     if _git_has_changes(repo):
         # The Judge commits only its own control-plane artifacts; anything else
@@ -2691,7 +6106,7 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
             _run(["git", "add", "--", judge_path], cwd=repo, check=True)
         _git_commit(
             cwd=repo,
-            message=f"{task.task_id}: {state_after}",
+            message=f"{task.task_id}: {'approved_pending_merge' if approved and approve_only else actual_state_after}",
             strict=strict_sync,
             paths=judge_paths,
         )
@@ -2708,7 +6123,11 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
             {
                 "task_id": task.task_id,
                 "state_before": task.state,
-                "state_after": state_after,
+                "state_after": (
+                    "approved_pending_merge"
+                    if approved and approve_only
+                    else actual_state_after
+                ),
                 "review_log": review_log_relpath,
                 "approved": approved,
             },
@@ -2723,6 +6142,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="swarm.py")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
+    status = subparsers.add_parser("status", help="Render task, lease, journal, and spend status")
+    status.add_argument("--remote", default="origin")
+    status.add_argument("--no-fetch", action="store_true")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(func=cmd_status)
+
+    costs = subparsers.add_parser("costs", help="Aggregate executor usage and estimated spend")
+    costs.add_argument("--json", action="store_true")
+    costs.set_defaults(func=cmd_costs)
+
     plan = subparsers.add_parser("plan", help="Print done/claimed/ready task status as JSON")
     plan.add_argument("--remote", default="origin")
     plan.add_argument("--base-branch", default="main")
@@ -2736,14 +6165,38 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--worktree-parent", default=None)
     tick.add_argument("--remote", default="origin")
     tick.add_argument("--base-branch", default="main")
+    tick.add_argument("--executor-backend", choices=["codex", "mock"], default="codex")
     tick.add_argument("--codex-model", default=None)
     tick.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
+    tick.add_argument("--i-accept-full-access", action="store_true", dest="i_accept_full_access")
     tick.add_argument("--unattended", action="store_true")
     tick.add_argument("--max-worker-seconds", type=int, default=0)
     tick.add_argument("--create-pr", action="store_true")
     tick.add_argument("--final-state", choices=["integration_ready", "ready_for_review"], default="ready_for_review")
     tick.add_argument("--dry-run", action="store_true")
     tick.set_defaults(func=cmd_tick)
+
+    supervise = subparsers.add_parser(
+        "supervise",
+        help="Run the crash-only Operator supervisor state machine",
+    )
+    supervise.add_argument("--once", action="store_true")
+    supervise.add_argument("--interval-seconds", type=int, default=300)
+    supervise.add_argument("--runner", choices=["local"], default="local")
+    supervise.add_argument("--max-workers", type=int, default=1)
+    supervise.add_argument("--worktree-parent", default=None)
+    supervise.add_argument("--remote", default="origin")
+    supervise.add_argument("--base-branch", default="main")
+    supervise.add_argument("--executor-backend", choices=["codex", "mock"], default="codex")
+    supervise.add_argument("--codex-model", default=None)
+    supervise.add_argument(
+        "--codex-sandbox",
+        choices=["read-only", "workspace-write", "danger-full-access"],
+        default="workspace-write",
+    )
+    supervise.add_argument("--unattended", action="store_true")
+    supervise.add_argument("--max-worker-seconds", type=int, default=0)
+    supervise.set_defaults(func=cmd_supervise)
 
     loop = subparsers.add_parser("loop", help="Run tick repeatedly")
     loop.add_argument("--interval-seconds", type=int, default=300)
@@ -2756,6 +6209,7 @@ def build_parser() -> argparse.ArgumentParser:
     loop.add_argument("--base-branch", default="main")
     loop.add_argument("--codex-model", default=None)
     loop.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
+    loop.add_argument("--i-accept-full-access", action="store_true", dest="i_accept_full_access")
     loop.add_argument("--unattended", action="store_true")
     loop.add_argument("--max-worker-seconds", type=int, default=0)
     loop.add_argument("--create-pr", action="store_true")
@@ -2774,6 +6228,7 @@ def build_parser() -> argparse.ArgumentParser:
     tmux_start.add_argument("--base-branch", default="main")
     tmux_start.add_argument("--codex-model", default=None)
     tmux_start.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
+    tmux_start.add_argument("--i-accept-full-access", action="store_true", dest="i_accept_full_access")
     tmux_start.add_argument("--unattended", action="store_true")
     tmux_start.add_argument("--max-worker-seconds", type=int, default=0)
     tmux_start.add_argument("--create-pr", action="store_true")
@@ -2784,10 +6239,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_task.add_argument("--task-id", required=True)
     run_task.add_argument("--remote", default="origin")
     run_task.add_argument("--base-branch", default="main")
+    run_task.add_argument("--executor-backend", choices=["codex", "mock"], default="codex")
     run_task.add_argument("--codex-model", default=None)
     run_task.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
+    run_task.add_argument("--i-accept-full-access", action="store_true", dest="i_accept_full_access")
     run_task.add_argument("--unattended", action="store_true")
     run_task.add_argument("--skip-executor", action="store_true")
+    run_task.add_argument("--record-session", action="store_true")
     run_task.add_argument("--force-deps", action="store_true")
     run_task.add_argument("--max-worker-seconds", type=int, default=0)
     run_task.add_argument("--repair-context", default=None)
@@ -2802,7 +6260,27 @@ def build_parser() -> argparse.ArgumentParser:
     judge_task.add_argument("--unattended", action="store_true")
     judge_task.add_argument("--on-fail", choices=["active", "blocked"], default="blocked")
     judge_task.add_argument("--note", default="")
+    judge_task.add_argument("--approve-only", action="store_true", help="(default behavior; retained for compatibility)")
+    judge_task.add_argument("--promote-directly", action="store_true", dest="promote_directly", help="Manual override: promote done without the merge queue (loudly journaled)")
     judge_task.set_defaults(func=cmd_judge_task)
+
+    attest = subparsers.add_parser("attest-containment", help="Record the machine-local containment attestation required for unattended runs")
+    attest.add_argument("--attested-by", required=True)
+    attest.add_argument("--note", default="")
+    attest.add_argument(
+        "--waive-credential-class",
+        action="append",
+        dest="waive_credential_class",
+        default=[],
+        help="Explicitly waive one credential class the scan may find (e.g. a scoped deploy key); recorded in the attested marker",
+    )
+    attest.set_defaults(func=cmd_attest_containment)
+
+    ack = subparsers.add_parser("ack-vendor-policy", help="Record the one-time vendor-policy compatibility acknowledgment for unattended use")
+    ack.add_argument("--vendor", required=True)
+    ack.add_argument("--note", required=True)
+    ack.add_argument("--acked-by", required=True)
+    ack.set_defaults(func=cmd_ack_vendor_policy)
 
     return parser
 

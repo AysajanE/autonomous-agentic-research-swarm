@@ -326,6 +326,11 @@ def init_git_fixture_repo(root: Path) -> None:
     subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.name", "swarm-bot"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "swarm-bot@example.invalid"], cwd=root, check=True)
+    # background maintenance detaches and keeps writing .git after tests end,
+    # racing TemporaryDirectory teardown on fast runners
+    subprocess.run(["git", "config", "gc.auto", "0"], cwd=root, check=True)
+    subprocess.run(["git", "config", "gc.autoDetach", "false"], cwd=root, check=True)
+    subprocess.run(["git", "config", "maintenance.auto", "false"], cwd=root, check=True)
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-m", "initial fixture"], cwd=root, check=True, capture_output=True, text=True)
 
@@ -455,6 +460,7 @@ def write_run_manifest(
     git_sha: str | None = None,
     actor_session_id: str = "fixture-worker-session",
     generated_at_utc: str = "2026-03-29T00:00:00Z",
+    usage: dict[str, object] | None = None,
 ) -> Path:
     task_disk_path = root / task_path
     pinned_frontmatter_sha = "0" * 64
@@ -563,6 +569,8 @@ def write_run_manifest(
             "tampered_keys": [],
         }
         payload["ownership"]["uncommitted_violations"] = []
+        if usage is not None:
+            payload["usage"] = copy.deepcopy(usage)
     return write_json(root, rel, payload)
 
 
@@ -580,6 +588,8 @@ def write_review_log(
     schema_version: str = JUDGE_REVIEW_LOG_SCHEMA_VERSION,
     reviewer_session_id: str = "fixture-judge-session",
     generated_at_utc: str = "2026-03-29T01:00:00Z",
+    manifest_sha256: str | None = None,
+    reviewed_branch_sha: str | None = None,
 ) -> Path:
     rel = f"reports/status/reviews/{task_id}_20260329T010000Z.json"
     reviewer: dict[str, Any] = {"role": reviewer_role}
@@ -590,6 +600,8 @@ def write_review_log(
         "schema_version": schema_version,
         "review_id": f"{task_id}_20260329T010000Z",
         "generated_at_utc": generated_at_utc,
+        "manifest_sha256": manifest_sha256,
+        "reviewed_branch_sha": reviewed_branch_sha,
         "reviewer": reviewer,
         "task": {
             "task_id": task_id,
@@ -645,3 +657,38 @@ def register_historical_exemption(root: Path, *, section: str, rel_path: str, ex
         entry.update(extra)
     entries.append(entry)
     return write_json(root, "contracts/historical_exemptions.json", payload)
+
+
+def attest_containment_fixture(root: Path) -> None:
+    """Write the machine-local containment marker + vendor ack an unattended
+    fixture needs (pair with a patched clean HOME so the credential scan is
+    hermetic)."""
+    write_json(
+        root,
+        ".swarm/containment.json",
+        {
+            "schema_version": "research_swarm.containment_marker.v1",
+            "contained": True,
+            "attested_by": "fixture",
+            "attested_at_utc": "2026-07-10T00:00:00Z",
+            "note": "test fixture",
+            "credential_scan_waiver": [
+                "aws_credentials",
+                "ssh_private_key",
+                "gcloud_adc",
+                "netrc",
+                "docker_auth",
+            ],
+        },
+    )
+    write_json(
+        root,
+        ".swarm/vendor_policy_ack.json",
+        {
+            "schema_version": "research_swarm.vendor_policy_ack.v1",
+            "vendor": "codex",
+            "policy_note": "fixture ack",
+            "acked_by": "fixture",
+            "acked_at_utc": "2026-07-10T00:00:00Z",
+        },
+    )

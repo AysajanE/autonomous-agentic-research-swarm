@@ -1238,6 +1238,20 @@ def _validate_swarm_run_manifest(path: Path, contract: FrameworkContract) -> lis
         if provenance_class not in {"executor_run", "manual_operator", "backfill"}:
             failures.append(f"{path}:invalid_provenance_class:{provenance_class}")
 
+    if "claim" in payload:
+        claim = payload.get("claim")
+        failures.extend(
+            f"{path}:{failure}"
+            for failure in _validate_required_keys(claim, {"lease_id", "sha"}, "claim")
+        )
+        if isinstance(claim, dict):
+            lease_id = claim.get("lease_id")
+            if not isinstance(lease_id, int) or isinstance(lease_id, bool):
+                failures.append(f"{path}:claim:invalid_lease_id")
+            sha = claim.get("sha")
+            if not isinstance(sha, str) or not sha.strip():
+                failures.append(f"{path}:claim:invalid_sha")
+
     task = payload.get("task")
     failures.extend(
         f"{path}:{failure}"
@@ -1267,6 +1281,20 @@ def _validate_swarm_run_manifest(path: Path, contract: FrameworkContract) -> lis
     if isinstance(executor, dict):
         if executor.get("role") not in set(contract.task_execution_roles):
             failures.append(f"{path}:invalid_executor_role:{executor.get('role')}")
+
+    if "usage" in payload:
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            failures.append(f"{path}:usage:not_object")
+        else:
+            wall_clock_seconds = usage.get("wall_clock_seconds")
+            if not isinstance(wall_clock_seconds, (int, float)) or isinstance(
+                wall_clock_seconds, bool
+            ):
+                failures.append(f"{path}:usage:invalid_wall_clock_seconds")
+            source = usage.get("source")
+            if not isinstance(source, str):
+                failures.append(f"{path}:usage:invalid_source")
 
     commands = payload.get("commands")
     command_keys = {"executor", "gates"}
@@ -1969,6 +1997,35 @@ def gate_projection_drift() -> GateResult:
         {"source": source.as_posix(), "target": target.as_posix()}
         for source, target in moves
     ]
+    # §4.1: the drift gate also covers claim-ref⇔task-file drift (offline —
+    # local refs only; liveness enforcement stays with the runtime).
+    claim_problems: list[str] = []
+    refs_cp = subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname)", "refs/swarm/claims/"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if refs_cp.returncode == 0:
+        try:
+            contract = load_framework_contract()
+            tasks, _ = _collect_tasks(contract)
+        except Exception:
+            tasks = {}
+        for line in (refs_cp.stdout or "").splitlines():
+            ref = line.strip()
+            if not ref:
+                continue
+            task_id = ref.removeprefix("refs/swarm/claims/")
+            task = tasks.get(task_id)
+            if task is None:
+                claim_problems.append(f"claim_ref_without_task:{task_id}")
+            elif task.state == "done":
+                claim_problems.append(f"claim_ref_on_done_task:{task_id}")
+            elif task.state == "backlog":
+                claim_problems.append(f"claim_ref_with_backlog_state:{task_id}")
+    problems = list(problems) + claim_problems
+
     return GateResult(
         ok=not moves and not problems,
         details={"moves": serialized_moves, "problems": problems},
@@ -2323,6 +2380,31 @@ def gate_review_bundle_integrity() -> GateResult:
     return GateResult(ok=len(failures) == 0, details={"failures": failures})
 
 
+NETWORK_COMMAND_TOKENS = ("curl", "wget", "http://", "https://")
+
+
+def gate_network_strings() -> GateResult:
+    """§9.4 (M1): gate-command strings in non-network workstreams must not
+    reference network tools or URLs — deterministic gates stay offline."""
+    try:
+        contract = load_framework_contract()
+    except ValueError as exc:
+        return GateResult(ok=False, details={"failures": [str(exc)]})
+
+    tasks, parse_failures = _collect_tasks(contract)
+    failures: list[str] = list(parse_failures)
+    network_workstreams = set(contract.network_workstreams)
+    for task in tasks.values():
+        if task.workstream in network_workstreams:
+            continue
+        for gate in task.gates:
+            lowered = gate.lower()
+            hits = sorted(token for token in NETWORK_COMMAND_TOKENS if token in lowered)
+            if hits:
+                failures.append(f"{task.path}:network_string_in_gate:{','.join(hits)}:{gate}")
+    return GateResult(ok=len(failures) == 0, details={"failures": failures})
+
+
 def _collect_gate_results() -> dict[str, GateResult]:
     return {
         "framework_contract": gate_framework_contract(),
@@ -2344,6 +2426,7 @@ def _collect_gate_results() -> dict[str, GateResult]:
         "validation_report_content_binding": gate_validation_report_content_binding(),
         "projection_drift": gate_projection_drift(),
         "historical_exemptions": gate_historical_exemptions(),
+        "network_strings": gate_network_strings(),
     }
 
 
