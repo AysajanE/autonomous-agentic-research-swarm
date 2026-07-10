@@ -585,27 +585,158 @@ def _invoke_planner(
             )
 
     if backend == "claude":
+        argv = _claude_planner_argv(repo)
+        prompt = _render_planner_prompt(mode=mode, context=context)
+        started = time.perf_counter()
+        planner_env = {**_gate_environment(), **_planner_passthrough_env()}
         try:
-            framework = json.loads(_read_text(repo / "contracts" / "framework.json"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError("planner_backend_unavailable") from exc
-        executors = framework.get("executors") if isinstance(framework, dict) else None
-        config = executors.get("planner") if isinstance(executors, dict) else None
-        if not isinstance(config, dict) or config.get("backend") != "claude":
-            raise RuntimeError("planner_backend_unavailable")
-        executable = config.get("command", "claude")
-        model = config.get("model")
-        profile = config.get("profile")
-        if not isinstance(executable, str) or not executable.strip() or not isinstance(model, str) or not model.strip():
-            raise RuntimeError("planner_backend_unavailable")
-        argv = [executable.strip(), "--model", model.strip()]
-        if isinstance(profile, str) and profile.strip():
-            argv.extend(["--profile", profile.strip()])
-        # M2 Batch B validates configuration and construction only. The real
-        # read-only Claude wrapper is intentionally supplied by the owner batch.
-        raise RuntimeError(f"planner_backend_unavailable:{shlex.join(argv)}")
+            cp = subprocess.run(
+                argv,
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+                env=planner_env,
+                timeout=int(getattr(args, "planner_timeout_seconds", 0) or 900),
+                input=prompt,
+            )
+        except subprocess.TimeoutExpired:
+            return PlannerOutcome(returncode=1, stdout="planner_timeout", proposals=[])
+        wall_clock = round(time.perf_counter() - started, 3)
+        stdout = (cp.stdout or "") + (("\n" + cp.stderr) if cp.stderr else "")
+        if cp.returncode != 0:
+            return PlannerOutcome(
+                returncode=cp.returncode,
+                stdout=f"planner_cli_failed({wall_clock}s):{stdout[-2000:]}",
+                proposals=[],
+            )
+        proposals = _extract_planner_proposals(cp.stdout or "")
+        if proposals is None:
+            return PlannerOutcome(
+                returncode=1,
+                stdout=f"planner_output_unparseable({wall_clock}s):{stdout[-2000:]}",
+                proposals=[],
+            )
+        return PlannerOutcome(returncode=0, stdout=stdout[-4000:], proposals=proposals)
 
     raise ValueError(f"unsupported_planner_backend:{backend}")
+
+
+def _claude_planner_argv(repo: Path) -> list[str]:
+    """Read-only Claude planner profile (§4.3): headless print mode with the
+    toolset restricted to Read/Glob/Grep — the model can inspect the repo but
+    every write happens through the kernel's bounded proposal application."""
+    try:
+        framework = json.loads(_read_text(repo / "contracts" / "framework.json"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("planner_backend_unavailable") from exc
+    executors = framework.get("executors") if isinstance(framework, dict) else None
+    config = executors.get("planner") if isinstance(executors, dict) else None
+    if not isinstance(config, dict) or config.get("backend") != "claude":
+        raise RuntimeError("planner_backend_unavailable")
+    executable = config.get("command", "claude")
+    model = config.get("model")
+    if (
+        not isinstance(executable, str)
+        or not executable.strip()
+        or not isinstance(model, str)
+        or not model.strip()
+    ):
+        raise RuntimeError("planner_backend_unavailable")
+    if _which_or_none(executable.strip()) is None:
+        raise RuntimeError(f"planner_backend_unavailable:missing_cli:{executable.strip()}")
+    return [
+        executable.strip(),
+        "-p",
+        "--model",
+        model.strip(),
+        "--allowedTools",
+        "Read Glob Grep",
+        "--output-format",
+        "text",
+    ]
+
+
+def _planner_passthrough_env() -> dict[str, str]:
+    """The Claude CLI needs its auth/config channels and a HOME; nothing else
+    from the caller's environment leaks into the planner."""
+    passthrough: dict[str, str] = {}
+    for key in (
+        "HOME",
+        "USER",
+        "LOGNAME",  # keychain-backed CLI auth resolves the user from these
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "XDG_CONFIG_HOME",
+    ):
+        value = os.environ.get(key)
+        if value:
+            passthrough[key] = value
+    return passthrough
+
+
+def _render_planner_prompt(*, mode: str, context: dict[str, object]) -> str:
+    lines = [
+        "You are the PLANNER of a repo-native research swarm (read-only profile).",
+        "You may inspect the repository with your tools, but you MUST NOT edit",
+        "anything: every change you want happens exclusively through the",
+        "proposals JSON you emit, which the kernel lint-checks and applies to",
+        ".orchestrator/backlog/ and workstreams.md only.",
+        "",
+        f"MODE: {mode}",
+        "",
+        "The T035 rule: no task may combine discovery and construction — if",
+        "reconnaissance shows unclear ground truth, propose a decomposition,",
+        "never a bigger task. Every task you propose must satisfy the v2 task",
+        "schema (see .orchestrator/templates/task_v2.md) and the task-lint",
+        "gate. Blocking with a precise question outperforms guessing.",
+        "",
+        "v2 schema essentials the lint enforces:",
+        "- task_schema: research_swarm.task.v2 (required marker)",
+        "- task_kind ∈ etl|analysis|validation|writing|lit_review|model|proof|bridge|ops|integrity_audit|repair",
+        "- complexity_tier ∈ S|M|L; L requires checkpoint_contract: progress_file",
+        "  (S/M may omit checkpoint_contract; it defaults to none)",
+        "- recon_required: true for M/L; an explicit false REQUIRES a non-empty",
+        "  recon_waiver: <reason> frontmatter field",
+        "- budgets with max_wall_clock (4h/90m forms), max_tokens, max_cost_usd",
+        "  (inline {a: b} or an indented block both parse)",
+        "- success_criteria: list of {id, statement, verification}; unique ids",
+        "- inputs: list of {manifest|path, sha256}; validation tasks need a",
+        "  comparison_basis: true input disjoint from constructed_by's inputs",
+        "- gates must not end in a quote character; no curl/wget/http outside",
+        "  network workstreams",
+        "",
+        "CONTEXT:",
+        json.dumps(context, indent=2, sort_keys=True, default=str),
+        "",
+        "Reply with your reasoning, then END your reply with exactly one",
+        "fenced JSON block:",
+        "```json",
+        '{"proposals": [{"action": "create_task", "path": ".orchestrator/backlog/T###_slug.md", "content": "..."}',
+        '            | {"action": "update_workstreams", "content": "..."}',
+        '            | {"action": "split_task", "task_id": "T###", "into": [{"path": "...", "content": "..."}]}',
+        '            | {"action": "triage_confirm", "task_id": "T###", "note": "..."}]}',
+        "```",
+    ]
+    return "\n".join(lines)
+
+
+def _extract_planner_proposals(stdout: str) -> list[dict[str, object]] | None:
+    """Parse the LAST fenced json block; malformed output proposes nothing."""
+    blocks = re.findall(r"```json\s*(.*?)```", stdout, flags=re.DOTALL)
+    if not blocks:
+        return None
+    try:
+        payload = json.loads(blocks[-1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    proposals = payload.get("proposals")
+    if not isinstance(proposals, list) or not all(
+        isinstance(item, dict) for item in proposals
+    ):
+        return None
+    return [dict(item) for item in proposals]
 
 
 def _executor_output_bytes(output: object) -> bytes:

@@ -197,5 +197,14 @@
       "data/processed_manifest/rebaselines/",
       "data/raw_manifest/rebaselines/"
     ]
+  },
+  "executors": {
+    "planner": {
+      "backend": "claude",
+      "command": "claude",
+      "model": "claude-opus-4-8",
+      "profile": "read-only+backlog-write",
+      "note": "top-tier Claude planner per plan \u00a74.3; read-only toolset enforced at CLI, writes kernel-bounded"
+    }
   }
 }

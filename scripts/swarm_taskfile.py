@@ -68,7 +68,8 @@ TASK_V2_REQUIRED_FRONTMATTER_KEYS = (
     "complexity_tier",
     "success_criteria",
     "budgets",
-    "checkpoint_contract",
+    # checkpoint_contract is required only for L tasks (§4.4); S/M default
+    # to "none" when absent — enforced in the tier rule below
     "recon_required",
     "inputs",
 )
@@ -77,6 +78,7 @@ TASK_BUDGET_KEYS = ("max_wall_clock", "max_tokens", "max_cost_usd")
 TASK_INPUT_REFERENCE_KEYS = ("path", "manifest")
 
 _NESTED_MAPPING_LIST_KEYS = {"success_criteria", "inputs"}
+_NESTED_MAPPING_BLOCK_KEYS = {"budgets", "triage"}
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _DURATION_RE = re.compile(r"^(?P<value>(?:\d+(?:\.\d*)?|\.\d+))(?P<unit>[hms])$", re.IGNORECASE)
 _TOKEN_COUNT_RE = re.compile(r"^(?P<value>(?:\d+(?:\.\d*)?|\.\d+))(?P<unit>[kmb]?)$", re.IGNORECASE)
@@ -201,10 +203,26 @@ def parse_task_frontmatter(text: str) -> dict[str, object] | None:
     data: dict[str, object] = {}
     current_list_key: str | None = None
     current_mapping: dict[str, object] | None = None
+    current_mapping_block: str | None = None
     for raw_line in lines[1:end_idx]:
         line = raw_line.split("#", 1)[0].rstrip()
         if line.strip() == "":
             continue
+
+        # block-style nested mapping (budgets:/triage: with indented fields —
+        # the §4.4 snippet's own notation)
+        if current_mapping_block is not None:
+            block_field = re.match(r"^\s+([A-Za-z_][A-Za-z0-9_]*):\s*(.*)\s*$", line)
+            if block_field is not None and line.startswith((" ", "\t")):
+                target = data.get(current_mapping_block)
+                if isinstance(target, dict):
+                    target[block_field.group(1)] = _parse_nested_mapping_scalar(
+                        current_mapping_block,
+                        block_field.group(1),
+                        block_field.group(2),
+                    )
+                continue
+            current_mapping_block = None
 
         list_match = re.match(r"^\s*-\s+(.*)\s*$", line)
         if current_list_key is not None and list_match is not None:
@@ -257,6 +275,11 @@ def parse_task_frontmatter(text: str) -> dict[str, object] | None:
         rest = rest.strip()
 
         if rest == "":
+            if has_schema_marker and key in _NESTED_MAPPING_BLOCK_KEYS:
+                data[key] = {}
+                current_mapping_block = key
+                current_list_key = None
+                continue
             data[key] = []
             current_list_key = key
             continue
@@ -556,7 +579,10 @@ def lint_task_files(
                 fields.complexity_tier,
             )
 
-        if fields.checkpoint_contract not in CHECKPOINT_CONTRACT_VALUES:
+        effective_checkpoint = fields.checkpoint_contract
+        if effective_checkpoint is None and fields.complexity_tier in {"S", "M"}:
+            effective_checkpoint = "none"
+        if effective_checkpoint not in CHECKPOINT_CONTRACT_VALUES:
             _diagnostic(
                 diagnostics,
                 task,
@@ -565,7 +591,7 @@ def lint_task_files(
                 list(CHECKPOINT_CONTRACT_VALUES),
                 fields.checkpoint_contract,
             )
-        elif fields.complexity_tier == "L" and fields.checkpoint_contract != "progress_file":
+        elif fields.complexity_tier == "L" and effective_checkpoint != "progress_file":
             _diagnostic(
                 diagnostics,
                 task,

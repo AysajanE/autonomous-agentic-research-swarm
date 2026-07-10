@@ -798,19 +798,72 @@ class M2PlannerTests(unittest.TestCase):
             framework["executors"] = {
                 "planner": {
                     "backend": "claude",
-                    "command": "claude",
+                    # a nonexistent binary: the seam must refuse BEFORE any
+                    # process launch — tests never touch a real CLI
+                    "command": "claude-nonexistent-fixture",
                     "model": "fixture-top-tier",
                     "profile": "read-only+backlog-write",
                 }
             }
             write_json(root, "contracts/framework.json", framework)
-            with self.assertRaisesRegex(RuntimeError, "^planner_backend_unavailable:"):
+            with self.assertRaisesRegex(
+                RuntimeError, "^planner_backend_unavailable:missing_cli:"
+            ):
                 swarm._invoke_planner(
                     mode="launch",
                     context={"trigger_id": "launch"},
                     repo=root,
                     args=_planner_args(backend="claude"),
                 )
+
+    def test_claude_planner_argv_and_proposal_extraction(self) -> None:
+        # M2-C: the read-only profile is encoded in the argv itself
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            framework = json.loads((root / "contracts/framework.json").read_text())
+            framework["executors"] = {
+                "planner": {
+                    "backend": "claude",
+                    "command": "python",  # exists everywhere; never invoked here
+                    "model": "fixture-top-tier",
+                }
+            }
+            write_json(root, "contracts/framework.json", framework)
+            argv = swarm._claude_planner_argv(root)
+            self.assertEqual(argv[1], "-p")
+            self.assertIn("--allowedTools", argv)
+            self.assertEqual(argv[argv.index("--allowedTools") + 1], "Read Glob Grep")
+            self.assertIn("fixture-top-tier", argv)
+
+        good = 'reasoning...\n```json\n{"proposals": [{"action": "triage_confirm", "task_id": "T001", "note": "ok"}]}\n```\n'
+        parsed = swarm._extract_planner_proposals(good)
+        self.assertEqual(parsed, [{"action": "triage_confirm", "task_id": "T001", "note": "ok"}])
+        # the LAST block wins
+        two = good + '```json\n{"proposals": []}\n```'
+        self.assertEqual(swarm._extract_planner_proposals(two), [])
+        # malformed → None (planner_output_unparseable upstream)
+        self.assertIsNone(swarm._extract_planner_proposals("no blocks here"))
+        self.assertIsNone(swarm._extract_planner_proposals("```json\n{broken\n```"))
+        self.assertIsNone(swarm._extract_planner_proposals('```json\n{"proposals": "not-a-list"}\n```'))
+
+    def test_planner_env_passthrough_is_minimal(self) -> None:
+        from unittest import mock as umock
+        import os as _os
+
+        with umock.patch.dict(
+            _os.environ,
+            {
+                "ANTHROPIC_API_KEY": "fixture-key",
+                "AWS_SECRET_ACCESS_KEY": "must-not-leak",
+                "GITHUB_TOKEN": "must-not-leak",
+            },
+            clear=False,
+        ):
+            env = swarm._planner_passthrough_env()
+        self.assertEqual(env.get("ANTHROPIC_API_KEY"), "fixture-key")
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
+        self.assertNotIn("GITHUB_TOKEN", env)
 
 
 if __name__ == "__main__":
