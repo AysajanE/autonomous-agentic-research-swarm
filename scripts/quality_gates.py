@@ -65,6 +65,7 @@ REFEREE_GOLD_KEY_SCHEMA_VERSION = "research_swarm.referee_gold_key.v1"
 REFEREE_VERDICTS = {"supported", "not_supported", "cannot_verify"}
 REFEREE_REPORT_DIR = Path("reports/status/referee_reports")
 REFEREE_CALIBRATION_REPORT = Path("reports/status/referee_calibration.json")
+REFEREE_WAIVER_EMITTER = "swarm.py referee-waiver"
 REFEREE_RUBRIC_TASK_KINDS = {
     "etl": "etl",
     "analysis": "analysis",
@@ -110,6 +111,8 @@ DEFAULT_OPERATOR_OWNED_SHARED_SURFACES = (
     "reports/status/swarm_runs/",
     "reports/status/referee_reports/",
     "reports/status/referee_calibration.json",
+    "reports/status/referee_calibration_runs/",
+    "reports/status/events/",
 )
 FORBIDDEN_INTEGRATION_READY_OUTPUT_PREFIXES = (
     "data/raw/",
@@ -2635,6 +2638,28 @@ def _referee_claim_bound(claim: dict[str, object], task: Task, manuscript_text: 
     )
 
 
+def _referee_quote_challenge(
+    *,
+    raw: bytes,
+    seed: str,
+    task_id: str,
+    claim_id: str,
+    path: str,
+) -> tuple[int, str]:
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    if not lines:
+        lines = [""]
+    selector = hashlib.sha256(
+        f"{seed}\0{task_id}\0{claim_id}\0{path}\0quoted-span".encode("utf-8")
+    ).digest()
+    index = int.from_bytes(selector[:8], "big") % len(lines)
+    return index + 1, lines[index]
+
+
+def _public_referee_sample(item: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in item.items() if key != "expected_quoted_span"}
+
+
 def _kernel_referee_sample(task: Task) -> tuple[list[dict[str, object]], int]:
     try:
         seed = Path("contracts/rubrics/sampling_seed.txt").read_text(encoding="utf-8").strip()
@@ -2661,14 +2686,24 @@ def _kernel_referee_sample(task: Task) -> tuple[list[dict[str, object]], int]:
             if not isinstance(artifact, dict) or not isinstance(artifact.get("path"), str) or not isinstance(artifact.get("sha256"), str):
                 continue
             artifact_path = Path(artifact["path"])
-            disk_sha = _sha256_and_bytes(artifact_path)[0] if artifact_path.is_file() else ""
+            raw = artifact_path.read_bytes() if artifact_path.is_file() else b""
+            disk_sha = hashlib.sha256(raw).hexdigest() if artifact_path.is_file() else ""
             ledger_sha = artifact["sha256"].lower()
+            challenge_line, expected_quoted_span = _referee_quote_challenge(
+                raw=raw,
+                seed=seed,
+                task_id=task.task_id,
+                claim_id=claim["claim_id"],
+                path=artifact["path"],
+            )
             item: dict[str, object] = {
                 "claim_id": claim["claim_id"],
                 "path": artifact["path"],
                 "sha256": disk_sha,
                 "ledger_sha256": ledger_sha,
                 "tampered": disk_sha != ledger_sha,
+                "challenge_line": challenge_line,
+                "expected_quoted_span": expected_quoted_span,
             }
             score = hashlib.sha256(
                 f"{seed}\0{task.task_id}\0{item['claim_id']}\0{item['path']}".encode("utf-8")
@@ -2708,31 +2743,31 @@ def _referee_owner_waiver(
     task_id: str,
     run_manifest_sha256: str,
 ) -> dict[str, object] | None:
-    try:
-        framework = json.loads(Path("contracts/framework.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    policy = framework.get("referee_panel") if isinstance(framework, dict) else None
-    waiver = policy.get("owner_waiver") if isinstance(policy, dict) else None
-    if not isinstance(waiver, dict) or set(waiver) != {"human_id", "reason"}:
-        return None
-    if not all(isinstance(waiver.get(key), str) and str(waiver[key]).strip() for key in waiver):
-        return None
-    waiver_sha = hashlib.sha256(
-        json.dumps(waiver, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
     events, _ = _read_swarm_events(Path.cwd())
-    if not any(
-        event.get("event") == "referee_owner_waiver"
-        and event.get("task_id") == task_id
-        and event.get("run_manifest_sha256") == run_manifest_sha256
-        and event.get("human_id") == waiver["human_id"]
-        and event.get("reason") == waiver["reason"]
-        and event.get("waiver_sha256") == waiver_sha
-        for event in events
-    ):
-        return None
-    return {**waiver, "waiver_sha256": waiver_sha}
+    for event in reversed(events):
+        if not (
+            event.get("event") == "referee_owner_waiver"
+            and event.get("emitted_by") == REFEREE_WAIVER_EMITTER
+            and event.get("actor") == "HumanOwner"
+            and isinstance(event.get("control_plane_branch"), str)
+            and bool(str(event.get("control_plane_branch")).strip())
+            and event.get("task_id") == task_id
+            and event.get("run_manifest_sha256") == run_manifest_sha256
+        ):
+            continue
+        human_id = event.get("human_id")
+        reason = event.get("reason")
+        if not isinstance(human_id, str) or not human_id.strip():
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            continue
+        waiver = {"human_id": human_id, "reason": reason}
+        waiver_sha = hashlib.sha256(
+            json.dumps(waiver, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if event.get("waiver_sha256") == waiver_sha:
+            return {**waiver, "waiver_sha256": waiver_sha}
+    return None
 
 
 def gate_referee_report_validity() -> GateResult:
@@ -2809,7 +2844,8 @@ def gate_referee_report_validity() -> GateResult:
 
         sampled, scoped_claim_count = _kernel_referee_sample(task)
         reported_sample = report.get("sampled_artifacts")
-        if reported_sample != sampled:
+        public_sample = [_public_referee_sample(item) for item in sampled]
+        if reported_sample != public_sample:
             failures.append(f"{prefix}:kernel_sample_mismatch")
         if scoped_claim_count and not sampled:
             failures.append(f"{prefix}:referee_sample_empty_for_claims")
@@ -2817,18 +2853,26 @@ def gate_referee_report_validity() -> GateResult:
             if item.get("tampered") is True:
                 failures.append(f"{prefix}:referee_sampled_artifact_tampered:{item.get('path')}")
         opened = report.get("opened_artifacts")
-        opened_pairs = {
-            (item.get("path"), str(item.get("sha256", "")).lower())
+        opened_by_path = {
+            item.get("path"): item
             for item in opened
-            if isinstance(item, dict)
-        } if isinstance(opened, list) else set()
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        } if isinstance(opened, list) else {}
         missing_opened = [
             item["path"]
             for item in sampled
-            if (item["path"], item["sha256"]) not in opened_pairs
+            if item["path"] not in opened_by_path
         ]
         if missing_opened:
             failures.append(f"{prefix}:referee_did_not_open_sampled:{','.join(missing_opened)}")
+        for item in sampled:
+            opened_item = opened_by_path.get(item["path"])
+            if not isinstance(opened_item, dict):
+                continue
+            if opened_item.get("sha256") != item["sha256"]:
+                failures.append(f"{prefix}:referee_opened_artifact_disk_sha_mismatch:{item['path']}")
+            if opened_item.get("quoted_span") != item.get("expected_quoted_span"):
+                failures.append(f"{prefix}:referee_opened_artifact_quote_mismatch:{item['path']}")
 
         frontmatter = _parse_task_frontmatter(_read_text(task.path)) or {}
         expected_ids: dict[str, tuple[str, str]] = {}
@@ -2919,14 +2963,47 @@ def gate_referee_report_validity() -> GateResult:
         if task is None or task.state != "done" or not _referee_manuscript_surface(task):
             continue
         non_authoring = families - panel_authors.get((task_id, manifest_rel, manifest_sha), set())
-        if len(non_authoring) < 2 and _referee_owner_waiver(
+        waiver = _referee_owner_waiver(
             task_id=task_id,
             run_manifest_sha256=manifest_sha,
-        ) is None:
+        )
+        required_votes = 1 if waiver is not None else 2
+        if len(non_authoring) < required_votes:
             failures.append(
-                f"{task_id}:{manifest_rel}:referee_manuscript_panel_family_quorum:{len(non_authoring)}<2"
+                f"{task_id}:{manifest_rel}:referee_manuscript_panel_family_quorum:"
+                f"{len(non_authoring)}<{required_votes}"
             )
     return GateResult(ok=not failures, details={"count": len(report_paths), "failures": failures})
+
+
+def _referee_release_verdict_severity(
+    report: dict[str, object],
+    verdict: dict[str, object],
+) -> str | None:
+    if isinstance(verdict.get("success_criterion_id"), str):
+        return "major"
+    check_id = verdict.get("check_id")
+    if not isinstance(check_id, str):
+        return None
+    if check_id.startswith("ASSERTION-"):
+        return "major"
+    rubric_files = report.get("rubric_files")
+    if not isinstance(rubric_files, list):
+        return None
+    for raw in rubric_files:
+        if not isinstance(raw, str) or not raw.startswith("contracts/rubrics/"):
+            continue
+        rubric, error = _load_json_file(Path(raw))
+        if error is not None or not isinstance(rubric, dict):
+            continue
+        checks = rubric.get("checks")
+        if not isinstance(checks, list):
+            continue
+        for check in checks:
+            if isinstance(check, dict) and check.get("id") == check_id:
+                severity = check.get("severity")
+                return str(severity) if severity in {"major", "minor"} else None
+    return None
 
 
 def gate_referee_release_evidence() -> GateResult:
@@ -2990,14 +3067,12 @@ def gate_referee_release_evidence() -> GateResult:
             task_id=task.task_id,
             run_manifest_sha256=manifest_sha,
         )
-        if len(non_authoring) < 2 and waiver is None:
-            failures.append(
-                f"{task.task_id}:referee_release_panel_quorum:{len(non_authoring)}<2"
-            )
         identifier_sets: dict[str, set[str]] = {}
         report_artifacts: list[dict[str, object]] = []
+        valid_calibrated_non_authoring: set[str] = set()
         for family, (path, report) in sorted(non_authoring.items()):
-            if report.get("valid") is not True or not _referee_report_journaled(report):
+            report_valid = report.get("valid") is True and _referee_report_journaled(report)
+            if not report_valid:
                 failures.append(f"{task.task_id}:referee_release_report_invalid:{family}")
             calibration_failures = (
                 calibration_report_failures(
@@ -3010,6 +3085,8 @@ def gate_referee_release_evidence() -> GateResult:
             )
             if calibration_failures:
                 failures.append(f"{task.task_id}:referee_release_uncalibrated:{family}")
+            if report_valid and not calibration_failures:
+                valid_calibrated_non_authoring.add(family)
             verdicts = report.get("verdicts") if isinstance(report.get("verdicts"), list) else []
             identifiers = {
                 str(item.get("success_criterion_id", item.get("check_id")))
@@ -3022,6 +3099,42 @@ def gate_referee_release_evidence() -> GateResult:
             report_artifacts.append(
                 {"path": path.as_posix(), "sha256": report_sha, "bytes": report_bytes, "family": family}
             )
+        required_quorum = 1 if waiver is not None else 2
+        if len(valid_calibrated_non_authoring) < required_quorum:
+            failures.append(
+                f"{task.task_id}:referee_release_panel_quorum:"
+                f"{len(valid_calibrated_non_authoring)}<{required_quorum}"
+            )
+        # Release checks every report bound to the current manuscript run,
+        # including non-voting author-family comments. A waiver changes only
+        # family quorum; it never changes substantive verdict semantics.
+        for path, report in reports:
+            family = report.get("referee_family")
+            verdicts = report.get("verdicts") if isinstance(report.get("verdicts"), list) else []
+            for item in verdicts:
+                if not isinstance(item, dict):
+                    continue
+                verdict = item.get("verdict")
+                identifier = item.get("success_criterion_id", item.get("check_id", "unknown"))
+                if verdict == "cannot_verify":
+                    failures.append(
+                        f"{task.task_id}:referee_release_cannot_verify:{family}:{identifier}"
+                    )
+                if (
+                    verdict == "not_supported"
+                    and _referee_release_verdict_severity(report, item) == "major"
+                ):
+                    failures.append(
+                        f"{task.task_id}:referee_release_not_supported:{family}:{identifier}"
+                    )
+                if (
+                    verdict == "not_supported"
+                    and isinstance(item.get("check_id"), str)
+                    and item["check_id"].startswith("ASSERTION-")
+                ):
+                    failures.append(
+                        f"{task.task_id}:referee_release_unregistered_assertion:{family}:{identifier}"
+                    )
         if identifier_sets:
             union = set().union(*identifier_sets.values())
             for family, identifiers in identifier_sets.items():
@@ -3038,7 +3151,7 @@ def gate_referee_release_evidence() -> GateResult:
                 "run_manifest_path": manifest_path.as_posix(),
                 "run_manifest_sha256": manifest_sha,
                 "authoring_family": authoring_family,
-                "non_authoring_families": sorted(non_authoring),
+                "non_authoring_families": sorted(valid_calibrated_non_authoring),
                 "reports": report_artifacts,
                 "owner_waiver": waiver,
             }

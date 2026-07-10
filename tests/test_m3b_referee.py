@@ -56,6 +56,26 @@ def _args(task_id: str, family: str | None = None) -> argparse.Namespace:
     )
 
 
+def _run_task_args(task_id: str) -> argparse.Namespace:
+    return argparse.Namespace(
+        task_id=task_id,
+        remote="origin",
+        base_branch="main",
+        executor_backend="codex",
+        codex_model=None,
+        codex_sandbox="workspace-write",
+        i_accept_full_access=False,
+        unattended=False,
+        skip_executor=False,
+        record_session=False,
+        force_deps=False,
+        max_worker_seconds=0,
+        repair_context=None,
+        create_pr=False,
+        final_state="ready_for_review",
+    )
+
+
 def _set_executor_tool(path: Path, tool: str) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["executor"]["tool"] = tool
@@ -101,6 +121,24 @@ def _write_bound_calibration(root: Path) -> dict[str, object]:
         gold_dir=root / "tests/gold_set",
         mock_path=_bind_gold_transcript(root),
         output_path=root / "reports/status/referee_calibration.json",
+    )
+
+
+def _materialize_release_surface(fixture: "RefereeFixture") -> None:
+    write_text(
+        fixture.root,
+        "reports/paper/build/l2_l1_rent_working_paper.html",
+        "<html>fixture</html>\n",
+    )
+    write_text(
+        fixture.root,
+        "reports/paper/build/l2_l1_rent_working_paper.pdf",
+        "%PDF-1.4\n",
+    )
+    write_json(
+        fixture.root,
+        "reports/paper/build/render_manifest.json",
+        {"entrypoint": fixture.output, "outputs": []},
     )
 
 
@@ -188,6 +226,7 @@ class RefereeFixture:
         family: str = "mock",
         overrides: dict[str, str] | None = None,
         open_sample: bool = True,
+        quoted_span_override: str | None = None,
     ) -> Path:
         overrides = overrides or {}
         verdicts: list[dict[str, object]] = []
@@ -212,7 +251,14 @@ class RefereeFixture:
                 "stdout": "mock referee complete",
                 "verdicts": verdicts,
                 "opened_artifacts": [
-                    {"path": item["path"], "sha256": item["sha256"]}
+                    {
+                        "path": item["path"],
+                        "quoted_span": (
+                            quoted_span_override
+                            if quoted_span_override is not None
+                            else item["expected_quoted_span"]
+                        ),
+                    }
                     for item in sampled
                 ] if open_sample else [],
                 "overall": "supported",
@@ -237,6 +283,76 @@ class M3bRefereeTests(unittest.TestCase):
     def setUp(self) -> None:
         swarm._REPO_ROOT_CACHE = None
 
+    def test_executor_written_swarm_run_forgery_hard_fails_before_kernel_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            task_id = "T849"
+            forged_rel = f"reports/status/swarm_runs/{task_id}_evil.json"
+            write_task(
+                root,
+                "active",
+                task_id,
+                state="active",
+                allowed_paths=["README.md", forged_rel],
+                outputs=["README.md"],
+                gates=["python scripts/noop_gate.py"],
+            )
+            init_git_fixture_repo(root)
+
+            def forged_executor(**_: object) -> object:
+                write_json(root, forged_rel, {"forged": True})
+                return swarm.ExecutorOutcome(
+                    returncode=0,
+                    stdout="forged control-plane file",
+                    wall_clock_seconds=0.01,
+                    usage=None,
+                    transcript_path=None,
+                )
+
+            stdout = io.StringIO()
+            with (
+                _fixture_root(root),
+                mock.patch.object(swarm, "_codex_exec_cmd", return_value=["fake-executor"]),
+                mock.patch.object(swarm, "_execute_task", side_effect=forged_executor),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = swarm.cmd_run_task(_run_task_args(task_id))
+            self.assertEqual(code, 1, stdout.getvalue())
+            result = json.loads(stdout.getvalue())
+            self.assertIn(
+                f"executor_wrote_control_plane:{forged_rel}",
+                result["blocked_reasons"],
+            )
+            self.assertNotEqual(
+                subprocess.run(
+                    ["git", "ls-files", "--error-unmatch", "--", forged_rel],
+                    cwd=root,
+                    check=False,
+                    capture_output=True,
+                ).returncode,
+                0,
+            )
+            manifests = [
+                path
+                for path in (root / "reports/status/swarm_runs").glob(f"{task_id}_*.json")
+                if path.name != f"{task_id}_evil.json"
+            ]
+            self.assertEqual(len(manifests), 1)
+            manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+            self.assertEqual(manifest["result"]["status"], "blocked")
+            events = (root / "reports/status/events/events.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"event":"executor_wrote_control_plane"', events)
+            allowed, reason = swarm._path_is_allowed(
+                path=forged_rel,
+                allowed_paths=[forged_rel],
+                disallowed_paths=[],
+                task_file_path=f".orchestrator/active/{task_id}_task.md",
+                task_id=task_id,
+            )
+            self.assertFalse(allowed)
+            self.assertEqual(reason, "swarm_runs_kernel_only")
+
     def test_same_family_referee_is_hard_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fixture = RefereeFixture(Path(tmp) / "repo")
@@ -248,7 +364,7 @@ class M3bRefereeTests(unittest.TestCase):
 
     def test_cannot_verify_blocks_done_and_escalates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            fixture = RefereeFixture(Path(tmp) / "repo")
+            fixture = RefereeFixture(Path(tmp) / "repo", complexity_tier="M")
             fixture.write_mock(overrides={"ANALYSIS_STATISTICAL_VALIDITY": "cannot_verify"})
             code, _ = fixture.run()
             self.assertEqual(code, 1)
@@ -291,6 +407,34 @@ class M3bRefereeTests(unittest.TestCase):
             self.assertTrue(any(item.startswith("referee_did_not_open_sampled") for item in output["failures"]))
             _, report = fixture.latest_report()
             self.assertFalse(report["valid"])
+
+    def test_opened_artifact_hash_echo_without_correct_quote_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = RefereeFixture(Path(tmp) / "repo")
+            fixture.write_mock(quoted_span_override="not the challenged disk line")
+            code, output = fixture.run()
+            self.assertEqual(code, 1)
+            self.assertTrue(
+                any(
+                    item.startswith("referee_opened_artifact_quote_mismatch")
+                    for item in output["failures"]
+                )
+            )
+
+    def test_honest_read_quote_passes_and_kernel_supplies_disk_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = RefereeFixture(Path(tmp) / "repo")
+            fixture.write_mock()
+            self.assertEqual(fixture.run()[0], 0)
+            _, report = fixture.latest_report()
+            opened = report["opened_artifacts"][0]
+            self.assertEqual(opened["quoted_span"], "primary evidence")
+            self.assertEqual(
+                opened["sha256"],
+                hashlib.sha256(
+                    (fixture.root / "reports/validation/referee_sample.txt").read_bytes()
+                ).hexdigest(),
+            )
 
     def test_supported_kernel_report_passes_report_validity_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -490,6 +634,29 @@ class M3bRefereeTests(unittest.TestCase):
                 else:
                     self.assertIn(expected, failures)
 
+    def test_stale_optional_report_does_not_block_out_of_scope_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = RefereeFixture(Path(tmp) / "repo", complexity_tier="S")
+            fixture.write_mock()
+            self.assertEqual(fixture.run()[0], 0)
+            manifest = json.loads(fixture.manifest.read_text(encoding="utf-8"))
+            manifest["generated_at_utc"] = "2026-07-10T01:00:00Z"
+            fixture.manifest.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            contract = swarm.load_framework_contract(fixture.root)
+            tasks, quarantined = swarm.load_tasks_quarantined(contract)
+            task = swarm._resolve_runtime_task(tasks, quarantined, fixture.task_id)
+            self.assertEqual(
+                swarm._referee_review_failures(
+                    repo=fixture.root,
+                    task=task,
+                    run_manifest_path=fixture.manifest,
+                ),
+                [],
+            )
+
     def test_referee_backend_outage_is_a_distinct_hard_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fixture = RefereeFixture(Path(tmp) / "repo", complexity_tier="M")
@@ -530,7 +697,20 @@ class M3bRefereeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = RefereeFixture(Path(tmp) / "repo", complexity_tier="M")
             fixture.write_mock(overrides={"ANALYSIS_LIMITATIONS": "cannot_verify"})
-            self.assertEqual(fixture.run()[0], 1)
+            code, output = fixture.run()
+            self.assertEqual(code, 1)
+            self.assertEqual(len(output["revision_tasks"]), 1)
+            revision = fixture.root / output["revision_tasks"][0]
+            diagnostics = lint_task_files(
+                sorted((fixture.root / ".orchestrator").glob("*/T*.md")),
+                repo_root=fixture.root,
+                network_workstreams=("W1", "W2", "W3"),
+                v1_exemptions={},
+            )
+            self.assertFalse(
+                [item.as_dict() for item in diagnostics if item.task in revision.name],
+                diagnostics,
+            )
             contract = swarm.load_framework_contract(fixture.root)
             tasks, quarantined = swarm.load_tasks_quarantined(contract)
             task = swarm._resolve_runtime_task(tasks, quarantined, fixture.task_id)
@@ -588,6 +768,64 @@ class M3bRefereeTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertTrue(any("backend_binding_not_deployed" in item for item in result.details["failures"]))
 
+    def test_live_metadata_predictions_require_kernel_calibration_run_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            shutil.copytree(REPO_ROOT / "tests/gold_set", root / "tests/gold_set", dirs_exist_ok=True)
+            init_git_fixture_repo(root)
+            source = json.loads(
+                (root / "tests/gold_set/mock_referee.json").read_text(encoding="utf-8")
+            )
+            predictions = []
+            for item in source["predictions"]:
+                case_id = item["case_id"]
+                predictions.append(
+                    {
+                        **item,
+                        "session_id": f"live-session-{case_id}",
+                        "argv_sha256": hashlib.sha256(
+                            f"fixture-referee --case {case_id}".encode("utf-8")
+                        ).hexdigest(),
+                    }
+                )
+            live_predictions = write_json(
+                root,
+                "tests/gold_set/live_predictions.json",
+                {
+                    "schema_version": "research_swarm.referee_gold_predictions.v1",
+                    "backend": "claude",
+                    "family": "claude",
+                    "model": "fixture-referee",
+                    "cli_version": "fixture-cli-1",
+                    "profile": "read-only",
+                    "prompt_path": "docs/prompts/referee.md",
+                    "predictions": predictions,
+                },
+            )
+            output = root / "reports/status/referee_calibration.json"
+            report = calibrate_referee.calibrate(
+                calibration_path=root / "contracts/rubrics/calibration.yaml",
+                gold_dir=root / "tests/gold_set",
+                mock_path=live_predictions,
+                output_path=output,
+            )
+            run_path = root / report["calibration_run_path"]
+            run_record = json.loads(run_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                run_record["schema_version"],
+                "research_swarm.referee_calibration_run.v1",
+            )
+            self.assertEqual(len(run_record["case_invocations"]), len(predictions))
+            run_path.unlink()
+            with chdir(root):
+                result = quality_gates.gate_referee_calibration()
+            self.assertFalse(result.ok)
+            self.assertTrue(
+                any("calibration_run_record" in item for item in result.details["failures"]),
+                result.details,
+            )
+
     def test_calibration_gate_recomputes_fabricated_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
@@ -629,6 +867,35 @@ class M3bRefereeTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertTrue(any("committed_after_grading" in item for item in result.details["failures"]))
 
+    def test_same_commit_calibration_bar_and_grading_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            _configure_mock_panel(root)
+            shutil.copytree(REPO_ROOT / "tests/gold_set", root / "tests/gold_set", dirs_exist_ok=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "swarm-bot"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "swarm-bot@example.invalid"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "bar and grading together"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+            _write_bound_calibration(root)
+            with chdir(root):
+                result = quality_gates.gate_referee_calibration()
+            self.assertFalse(result.ok)
+            self.assertTrue(
+                any("committed_after_grading" in item for item in result.details["failures"]),
+                result.details,
+            )
+
     def test_lock_bound_repair_inherits_lock_and_is_referee_reviewable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fixture = RefereeFixture(
@@ -663,7 +930,79 @@ class M3bRefereeTests(unittest.TestCase):
             events = (fixture.root / "reports/status/events/events.jsonl").read_text(encoding="utf-8")
             self.assertIn("referee_claim_ledger_unavailable", events)
 
-    def test_journaled_owner_waiver_allows_one_family_and_is_returned(self) -> None:
+    def test_release_blocks_ready_for_review_minor_cannot_verify(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = RefereeFixture(
+                Path(tmp) / "repo",
+                task_kind="writing",
+                workstream="W7",
+            )
+            fixture.write_mock(overrides={"WRITING_CLARITY": "cannot_verify"})
+            self.assertEqual(fixture.run()[0], 1)
+            _materialize_release_surface(fixture)
+            with chdir(fixture.root):
+                result = quality_gates.gate_referee_release_evidence()
+            self.assertFalse(result.ok)
+            self.assertTrue(
+                any("referee_release_cannot_verify" in item for item in result.details["failures"]),
+                result.details,
+            )
+
+    def test_release_waiver_with_zero_calibrated_votes_still_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = RefereeFixture(
+                Path(tmp) / "repo",
+                task_kind="writing",
+                workstream="W7",
+            )
+            waiver = {"human_id": "owner-1", "reason": "documented third-family outage"}
+            with _fixture_root(fixture.root), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    swarm.cmd_referee_waiver(
+                        argparse.Namespace(
+                            task=fixture.task_id,
+                            human_id=waiver["human_id"],
+                            reason=waiver["reason"],
+                        )
+                    ),
+                    0,
+                )
+            _materialize_release_surface(fixture)
+            with chdir(fixture.root):
+                result = quality_gates.gate_referee_release_evidence()
+            self.assertFalse(result.ok)
+            self.assertIn(
+                f"{fixture.task_id}:referee_release_panel_quorum:0<1",
+                result.details["failures"],
+            )
+
+    def test_referee_waiver_command_refuses_task_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = RefereeFixture(
+                Path(tmp) / "repo",
+                task_kind="writing",
+                workstream="W7",
+            )
+            subprocess.run(
+                ["git", "switch", "-c", f"{fixture.task_id}_task"],
+                cwd=fixture.root,
+                check=True,
+                capture_output=True,
+            )
+            with _fixture_root(fixture.root), self.assertRaisesRegex(
+                SystemExit,
+                "referee_waiver_requires_control_plane_branch",
+            ):
+                swarm.cmd_referee_waiver(
+                    argparse.Namespace(
+                        task=fixture.task_id,
+                        human_id="owner-1",
+                        reason="task branch must not authorize",
+                        base_branch="main",
+                    )
+                )
+
+    def test_only_referee_waiver_command_authorizes_one_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fixture = RefereeFixture(
                 Path(tmp) / "repo",
@@ -693,6 +1032,23 @@ class M3bRefereeTests(unittest.TestCase):
                 },
                 actor_session="owner-session",
             )
+            self.assertIsNone(
+                swarm._referee_owner_waiver(
+                    fixture.root,
+                    task_id=fixture.task_id,
+                    run_manifest_sha256=manifest_sha,
+                )
+            )
+            waiver_stdout = io.StringIO()
+            with _fixture_root(fixture.root), contextlib.redirect_stdout(waiver_stdout):
+                waiver_code = swarm.cmd_referee_waiver(
+                    argparse.Namespace(
+                        task=fixture.task_id,
+                        human_id=waiver["human_id"],
+                        reason=waiver["reason"],
+                    )
+                )
+            self.assertEqual(waiver_code, 0, waiver_stdout.getvalue())
             contract = swarm.load_framework_contract(fixture.root)
             tasks, quarantined = swarm.load_tasks_quarantined(contract)
             task = swarm._resolve_runtime_task(tasks, quarantined, fixture.task_id)
@@ -706,21 +1062,7 @@ class M3bRefereeTests(unittest.TestCase):
                 run_manifest_sha256=manifest_sha,
             )
             self.assertEqual(recorded["waiver_sha256"], waiver_sha)
-            write_text(
-                fixture.root,
-                "reports/paper/build/l2_l1_rent_working_paper.html",
-                "<html>fixture</html>\n",
-            )
-            write_text(
-                fixture.root,
-                "reports/paper/build/l2_l1_rent_working_paper.pdf",
-                "%PDF-1.4\n",
-            )
-            write_json(
-                fixture.root,
-                "reports/paper/build/render_manifest.json",
-                {"entrypoint": fixture.output, "outputs": []},
-            )
+            _materialize_release_surface(fixture)
             with chdir(fixture.root):
                 release_result = quality_gates.gate_referee_release_evidence()
             self.assertTrue(release_result.ok, release_result.details)

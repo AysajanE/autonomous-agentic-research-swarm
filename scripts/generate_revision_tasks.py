@@ -396,7 +396,7 @@ def generate_revision_tasks(
                 continue
             identifier = _finding_identifier(item)
             severity = severities.get(identifier, item.get("severity"))
-            if severity == "major":
+            if item.get("verdict") == "cannot_verify" or severity == "major":
                 findings.append(item)
     findings.sort(key=lambda item: (_finding_identifier(item), str(item.get("verdict"))))
     existing = _existing_fingerprints(repo)
@@ -455,7 +455,7 @@ def generate_revision_tasks(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="generate_revision_tasks.py",
-        description="Generate scoped v2 repair tasks for major blocking referee findings.",
+        description="Generate scoped v2 repair tasks for blocking referee findings.",
     )
     parser.add_argument("--report", required=True, type=Path, help="Path to a referee report JSON file")
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())

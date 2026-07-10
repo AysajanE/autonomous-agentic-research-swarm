@@ -202,7 +202,9 @@
     "reports/status/releases/",
     "reports/status/swarm_runs/",
     "reports/status/referee_reports/",
-    "reports/status/referee_calibration.json"
+    "reports/status/referee_calibration.json",
+    "reports/status/referee_calibration_runs/",
+    "reports/status/events/"
   ],
   "referee_panel": {
     "required_non_authoring_families": 2,

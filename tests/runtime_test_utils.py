@@ -185,6 +185,8 @@ def _default_framework_json(mode: str) -> dict[str, Any]:
             "reports/status/swarm_runs/",
             "reports/status/referee_reports/",
             "reports/status/referee_calibration.json",
+            "reports/status/referee_calibration_runs/",
+            "reports/status/events/",
         ],
         "referee_panel": {
             "required_non_authoring_families": 2,
@@ -484,8 +486,33 @@ def init_git_fixture_repo(root: Path) -> None:
     subprocess.run(["git", "config", "gc.auto", "0"], cwd=root, check=True)
     subprocess.run(["git", "config", "gc.autoDetach", "false"], cwd=root, check=True)
     subprocess.run(["git", "config", "maintenance.auto", "false"], cwd=root, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
-    subprocess.run(["git", "commit", "-m", "initial fixture"], cwd=root, check=True, capture_output=True, text=True)
+    gold_key = root / "tests/gold_set/verdict_key.json"
+    if gold_key.is_file():
+        # Calibration authority requires the bar to be a proper ancestor of
+        # the first grading artifact. Keep that topology real in fixtures.
+        subprocess.run(
+            ["git", "add", "-A", "--", ".", ":(exclude)tests/gold_set/**"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "initial fixture with calibration bar"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(["git", "add", "-A", "--", "tests/gold_set"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "add grading artifacts"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    else:
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-m", "initial fixture"], cwd=root, check=True, capture_output=True, text=True)
 
     origin = Path(f"{root}.origin.git")
     subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True, text=True)

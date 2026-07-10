@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -17,12 +18,18 @@ CALIBRATION_REPORT_SCHEMA_VERSION = "research_swarm.referee_calibration.v1"
 GOLD_KEY_SCHEMA_VERSION = "research_swarm.referee_gold_key.v1"
 MOCK_GOLD_SCHEMA_VERSION = "research_swarm.mock_referee_gold.v1"
 GOLD_PREDICTIONS_SCHEMA_VERSION = "research_swarm.referee_gold_predictions.v1"
+CALIBRATION_RUN_SCHEMA_VERSION = "research_swarm.referee_calibration_run.v1"
+CALIBRATION_RUN_DIR = Path("reports/status/referee_calibration_runs")
 VERDICTS = {"supported", "not_supported", "cannot_verify"}
 REFEREE_PROMPT_PATH = "docs/prompts/referee.md"
 
 
 def _utc_now_iso() -> str:
     return dt.datetime.now(tz=dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _utc_timestamp_precise() -> str:
+    return dt.datetime.now(tz=dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def _read_object(path: Path) -> dict[str, object]:
@@ -168,7 +175,7 @@ def _calibration_bar_history_failures(
         calibration_rel = calibration_path.resolve().relative_to(repo.resolve()).as_posix()
         gold_rel = gold_key_path.resolve().relative_to(repo.resolve()).as_posix()
         dirty = subprocess.run(
-            ["git", "diff", "--quiet", "--", calibration_rel],
+            ["git", "diff", "HEAD", "--quiet", "--", calibration_rel],
             cwd=repo,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -193,7 +200,7 @@ def _calibration_bar_history_failures(
             stderr=subprocess.DEVNULL,
             check=False,
         )
-        if ancestor.returncode != 0:
+        if bar_commit == grading_commit or ancestor.returncode != 0:
             failures.append("calibration_bar_committed_after_grading")
         return failures
 
@@ -285,6 +292,77 @@ def commit_bar(
     }
     with open(journal, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def _calibration_case_invocations(
+    *,
+    transcript: dict[str, object],
+    mock_path: Path,
+    case_ids: list[str],
+) -> list[dict[str, str]]:
+    predictions = transcript.get("predictions")
+    assert isinstance(predictions, list)
+    by_case = {
+        item.get("case_id"): item
+        for item in predictions
+        if isinstance(item, dict) and isinstance(item.get("case_id"), str)
+    }
+    invocations: list[dict[str, str]] = []
+    for case_id in case_ids:
+        prediction = by_case[case_id]
+        if transcript.get("schema_version") == GOLD_PREDICTIONS_SCHEMA_VERSION:
+            session_id = prediction.get("session_id")
+            argv_sha256 = prediction.get("argv_sha256")
+            if not isinstance(session_id, str) or not session_id.strip():
+                raise ValueError(f"calibration_invocation_session_invalid:{case_id}")
+            if not isinstance(argv_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", argv_sha256) is None:
+                raise ValueError(f"calibration_invocation_argv_hash_invalid:{case_id}")
+        else:
+            session_id = f"mock-replay-{case_id}"
+            argv_sha256 = _canonical_sha256(
+                ["mock-referee-replay", mock_path.name, "--case", case_id]
+            )
+        invocations.append(
+            {
+                "case_id": case_id,
+                "session_id": session_id,
+                "argv_sha256": argv_sha256,
+            }
+        )
+    return invocations
+
+
+def _write_calibration_run_record(
+    *,
+    repo: Path,
+    binding: dict[str, object],
+    mock_path: Path,
+    predictions_sha256: str,
+    case_invocations: list[dict[str, str]],
+) -> tuple[str, str]:
+    timestamp = _utc_timestamp_precise()
+    run_path = repo / CALIBRATION_RUN_DIR / f"{timestamp}.json"
+    run_path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = 2
+    while run_path.exists():
+        run_path = repo / CALIBRATION_RUN_DIR / f"{timestamp}_{suffix}.json"
+        suffix += 1
+    payload = {
+        "schema_version": CALIBRATION_RUN_SCHEMA_VERSION,
+        "generated_at_utc": _utc_now_iso(),
+        "emitted_by": "scripts/calibrate_referee.py",
+        "calibration_session_id": (
+            os.environ.get("SWARM_ACTOR_SESSION", "").strip()
+            or f"calibration-{timestamp}"
+        ),
+        "backend_binding": binding,
+        "predictions_path": mock_path.resolve().relative_to(repo.resolve()).as_posix(),
+        "predictions_source_sha256": _sha256(mock_path),
+        "predictions_sha256": predictions_sha256,
+        "case_invocations": case_invocations,
+    }
+    run_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return run_path.relative_to(repo).as_posix(), _sha256(run_path)
 
 
 def calibrate(
@@ -382,17 +460,24 @@ def calibrate(
         }
         for item in scored
     ]
+    binding = _evaluated_binding(repo=repo, transcript=mock)
+    predictions_sha256 = _canonical_sha256(predictions_material)
+    case_invocations = _calibration_case_invocations(
+        transcript=mock,
+        mock_path=mock_path,
+        case_ids=sorted(cases),
+    )
     result: dict[str, object] = {
         "schema_version": CALIBRATION_REPORT_SCHEMA_VERSION,
         "generated_at_utc": _utc_now_iso(),
-        "backend_binding": _evaluated_binding(repo=repo, transcript=mock),
+        "backend_binding": binding,
         "calibration_path": calibration_path.as_posix(),
         "calibration_sha256": _sha256(calibration_path),
         "verdict_key_sha256": _sha256(key_path),
         "gold_set_sha256": gold_set_sha256,
         "artifact_sha256": artifact_hashes,
         "mock_transcript_sha256": _sha256(mock_path),
-        "predictions_sha256": _canonical_sha256(predictions_material),
+        "predictions_sha256": predictions_sha256,
         "case_count": count,
         "wrong_artifact_count": wrong_artifacts,
         "wrong_proof_count": wrong_proofs,
@@ -404,6 +489,15 @@ def calibrate(
         "cases": scored,
     }
     if output_path is not None:
+        run_relpath, run_sha256 = _write_calibration_run_record(
+            repo=repo,
+            binding=binding,
+            mock_path=mock_path,
+            predictions_sha256=predictions_sha256,
+            case_invocations=case_invocations,
+        )
+        result["calibration_run_path"] = run_relpath
+        result["calibration_run_sha256"] = run_sha256
         output_path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, object] = result
         if output_path.is_file():
@@ -443,6 +537,82 @@ def calibrate(
                 }
         output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result
+
+
+def _calibration_run_record_failures(
+    *,
+    repo: Path,
+    report: dict[str, object],
+    case_ids: set[str],
+) -> list[str]:
+    failures: list[str] = []
+    run_rel = report.get("calibration_run_path")
+    run_sha = report.get("calibration_run_sha256")
+    if not isinstance(run_rel, str) or not run_rel.strip():
+        return ["calibration_run_record_missing"]
+    run_path = (repo / run_rel).resolve()
+    expected_parent = (repo / CALIBRATION_RUN_DIR).resolve()
+    try:
+        relative = run_path.relative_to(expected_parent)
+    except ValueError:
+        return ["calibration_run_record_outside_kernel_dir"]
+    if len(relative.parts) != 1 or run_path.suffix != ".json" or not run_path.is_file():
+        return ["calibration_run_record_invalid_path"]
+    if not isinstance(run_sha, str) or _sha256(run_path) != run_sha:
+        failures.append("calibration_run_record_sha256_mismatch")
+    try:
+        record = _read_object(run_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        failures.append(f"calibration_run_record_unreadable:{type(exc).__name__}")
+        return failures
+    if record.get("schema_version") != CALIBRATION_RUN_SCHEMA_VERSION:
+        failures.append("calibration_run_record_schema_invalid")
+    if record.get("emitted_by") != "scripts/calibrate_referee.py":
+        failures.append("calibration_run_record_emitter_invalid")
+    if record.get("backend_binding") != report.get("backend_binding"):
+        failures.append("calibration_run_backend_binding_mismatch")
+    if record.get("predictions_sha256") != report.get("predictions_sha256"):
+        failures.append("calibration_run_predictions_sha256_mismatch")
+    if record.get("predictions_source_sha256") != report.get("mock_transcript_sha256"):
+        failures.append("calibration_run_predictions_source_mismatch")
+    predictions_rel = record.get("predictions_path")
+    if not isinstance(predictions_rel, str):
+        failures.append("calibration_run_predictions_path_invalid")
+    else:
+        predictions_path = (repo / predictions_rel).resolve()
+        try:
+            predictions_path.relative_to(repo)
+        except ValueError:
+            failures.append("calibration_run_predictions_path_outside_repo")
+        else:
+            if (
+                not predictions_path.is_file()
+                or record.get("predictions_source_sha256") != _sha256(predictions_path)
+            ):
+                failures.append("calibration_run_predictions_source_unbound")
+    session = record.get("calibration_session_id")
+    if not isinstance(session, str) or not session.strip():
+        failures.append("calibration_run_session_invalid")
+    raw_invocations = record.get("case_invocations")
+    if not isinstance(raw_invocations, list):
+        failures.append("calibration_run_invocations_invalid")
+        return failures
+    invocations = {
+        item.get("case_id"): item
+        for item in raw_invocations
+        if isinstance(item, dict) and isinstance(item.get("case_id"), str)
+    }
+    if len(invocations) != len(raw_invocations) or set(invocations) != case_ids:
+        failures.append("calibration_run_invocation_case_mismatch")
+        return failures
+    for case_id, invocation in sorted(invocations.items()):
+        case_session = invocation.get("session_id")
+        argv_sha = invocation.get("argv_sha256")
+        if not isinstance(case_session, str) or not case_session.strip():
+            failures.append(f"calibration_run_invocation_session_invalid:{case_id}")
+        if not isinstance(argv_sha, str) or re.fullmatch(r"[0-9a-f]{64}", argv_sha) is None:
+            failures.append(f"calibration_run_invocation_argv_hash_invalid:{case_id}")
+    return failures
 
 
 def calibration_report_failures(
@@ -575,6 +745,13 @@ def calibration_report_failures(
     flip_rate = flips / count if count else 1.0
     if report.get("predictions_sha256") != _canonical_sha256(prediction_material):
         failures.append("predictions_sha256_mismatch")
+    failures.extend(
+        _calibration_run_record_failures(
+            repo=repo,
+            report=report,
+            case_ids=set(gold_cases),
+        )
+    )
     asserted_agreement = report.get("agreement")
     if not isinstance(asserted_agreement, (int, float)) or not math.isclose(
         float(asserted_agreement), agreement, rel_tol=0.0, abs_tol=1e-12
