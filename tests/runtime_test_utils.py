@@ -187,7 +187,13 @@ def _default_framework_json(mode: str) -> dict[str, Any]:
             "reports/status/referee_calibration.json",
             "reports/status/referee_calibration_runs/",
             "reports/status/events/",
+            "reports/status/integrity_audit/",
+            "reports/status/recall_audit/",
         ],
+        "literature_policy": {
+            "recall_uncovered_cluster_threshold": 2,
+            "fixture_test_corpus_acquisition_ids": [],
+        },
         "referee_panel": {
             "required_non_authoring_families": 2,
             "owner_waiver": None,
@@ -209,6 +215,13 @@ def _default_framework_json(mode: str) -> dict[str, Any]:
             ],
         },
         "executors": {
+            "integrity_audit": {
+                "backend": "claude",
+                "family": "claude",
+                "command": "claude",
+                "model": "fixture-auditor",
+                "profile": "scratch-worktree",
+            },
             "planner": {
                 "backend": "claude",
                 "command": "claude",
@@ -278,6 +291,7 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
 
     mkdir(root, "contracts")
     mkdir(root, "contracts/schemas")
+    mkdir(root, "contracts/prompts")
     mkdir(root, "contracts/instances")
     mkdir(root, "contracts/experiments")
     write_text(root, "contracts/README.md", "# contracts\n")
@@ -289,6 +303,8 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
         "contracts/schemas/instance_manifest_v1.json",
         "contracts/schemas/experiment_spec_v1.json",
         "contracts/schemas/experiment_manifest_v1.json",
+        "contracts/schemas/integrity_audit_v1.json",
+        "contracts/schemas/literature_manifest_v1.json",
     ):
         write_text(root, rel, (REPO_ROOT / rel).read_text(encoding="utf-8"))
     write_text(root, "contracts/instances/README.md", "# instance manifests\n")
@@ -309,6 +325,18 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
         },
     )
     write_text(root, "contracts/schemas/claims_v1.yaml", "type: object\n")
+    write_text(
+        root,
+        "contracts/integrity_audit_seed.txt",
+        (REPO_ROOT / "contracts/integrity_audit_seed.txt").read_text(encoding="utf-8"),
+    )
+    for prompt_path in sorted((REPO_ROOT / "contracts/prompts").glob("*")):
+        if prompt_path.is_file():
+            write_text(
+                root,
+                f"contracts/prompts/{prompt_path.name}",
+                prompt_path.read_text(encoding="utf-8"),
+            )
     for rubric_path in sorted((REPO_ROOT / "contracts/rubrics").glob("*")):
         if rubric_path.is_file():
             write_text(
@@ -468,6 +496,8 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     write_text(root, "scripts/swarm.py", "# placeholder\n")
     write_text(root, "scripts/sweep_tasks.py", "# placeholder\n")
     write_text(root, "scripts/quality_gates.py", "# placeholder\n")
+    write_text(root, "scripts/integrity_audit.py", "# placeholder\n")
+    write_text(root, "scripts/literature.py", "# placeholder\n")
     write_text(root, "scripts/refresh_citations.py", "# placeholder\n")
     write_text(root, "scripts/falsify_claims.py", "# placeholder\n")
     write_text(root, "scripts/sweep_harness.py", "# placeholder\n")

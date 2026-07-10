@@ -8,7 +8,8 @@
     "modeling": true,
     "hybrid": true,
     "paper": true,
-    "release": true
+    "release": true,
+    "integrity_audit_required_for_release": true
   },
   "supported_modes": [
     "empirical",
@@ -17,6 +18,10 @@
   ],
   "citation_policy": {
     "staleness_days": 90
+  },
+  "literature_policy": {
+    "recall_uncovered_cluster_threshold": 2,
+    "fixture_test_corpus_acquisition_ids": []
   },
   "complexity_tier_ceilings": {
     "S": {
@@ -92,7 +97,13 @@
       "requires_tools",
       "requires_env",
       "instances",
-      "experiment_spec"
+      "experiment_spec",
+      "search_phase",
+      "search_databases",
+      "search_queries",
+      "inclusion_criteria",
+      "search_family",
+      "recall_audit_of"
     ]
   },
   "task_file_policy": {
@@ -118,13 +129,14 @@
   "network_workstreams": [
     "W1",
     "W2",
-    "W3"
+    "W3",
+    "W-Lit"
   ],
   "prompt_templates": {
-    "planner": "docs/prompts/planner.md",
-    "worker": "docs/prompts/worker.md",
-    "judge": "docs/prompts/judge.md",
-    "operator": "docs/prompts/operator.md"
+    "planner": "contracts/prompts/planner.md",
+    "worker": "contracts/prompts/worker.md",
+    "judge": "contracts/prompts/judge.md",
+    "operator": "contracts/prompts/operator.md"
   },
   "integration_ready_policy": {
     "require_explicit_downstream_allowlist": true,
@@ -204,7 +216,9 @@
     "reports/status/referee_reports/",
     "reports/status/referee_calibration.json",
     "reports/status/referee_calibration_runs/",
-    "reports/status/events/"
+    "reports/status/events/",
+    "reports/status/integrity_audit/",
+    "reports/status/recall_audit/"
   ],
   "referee_panel": {
     "required_non_authoring_families": 2,
@@ -228,6 +242,17 @@
     ]
   },
   "executors": {
+    "integrity_audit": {
+      "backend": "claude",
+      "family": "claude",
+      "command": "claude",
+      "model": "claude-opus-4-8",
+      "profile": "scratch-worktree",
+      "network": "off",
+      "prompt_path": "contracts/prompts/integrity_auditor.md",
+      "commit_push_allowed": false,
+      "output_prefix": "reports/status/integrity_audit/"
+    },
     "planner": {
       "backend": "claude",
       "command": "claude",
@@ -243,7 +268,7 @@
         "model": "claude-opus-4-8",
         "cli_version": "2.1.206 (Claude Code)",
         "profile": "read-only",
-        "prompt_path": "docs/prompts/referee.md",
+        "prompt_path": "contracts/prompts/referee.md",
         "tools": ["Read", "Glob", "Grep"],
         "note": "task-level non-authoring-family referee; manuscript release additionally requires a separately configured third family"
       }

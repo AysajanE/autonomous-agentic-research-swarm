@@ -48,6 +48,16 @@ properties:
         prereg_lock_sha256:
           type: string
           pattern: "^[0-9a-f]{64}$"
+        headline: {type: boolean}
+        manuscript_numeric_literals:
+          type: array
+          items: {type: string, minLength: 1}
+        recomputation_roles:
+          type: object
+          minProperties: 1
+          additionalProperties: {type: string, minLength: 1}
+        citation_key: {type: string, minLength: 1}
+        evidence_span: {type: string, minLength: 1}
 $defs:
   hashed_artifact:
     type: object

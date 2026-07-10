@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "research_swarm.integrity_audit.v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at_utc",
+    "status",
+    "mode",
+    "audited_git_sha",
+    "release_inventory",
+    "executor",
+    "repo_confinement",
+    "sampling",
+    "surface_rebuilds",
+    "inventory_hash_checks",
+    "claim_recomputations",
+    "etl_decision_samples",
+    "experiment_recomputations",
+    "theoretical_rederivations",
+    "seam_audits",
+    "authorized_post_audit_repairs",
+    "failures"
+  ],
+  "properties": {
+    "schema_version": {"const": "research_swarm.integrity_audit.v1"},
+    "generated_at_utc": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["pass", "block"]},
+    "mode": {"enum": ["empirical", "modeling", "hybrid"]},
+    "audit_task_id": {"type": ["string", "null"], "pattern": "^T[0-9]{3,}$"},
+    "audited_git_sha": {"type": "string"},
+    "release_inventory": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "executor": {
+      "type": "object",
+      "required": [
+        "backend",
+        "model",
+        "audit_family",
+        "builder_families",
+        "builder_run_manifest_evidence",
+        "profile",
+        "network",
+        "commit_push_allowed",
+        "scratch_kind"
+      ],
+      "properties": {
+        "backend": {"type": "string", "minLength": 1},
+        "model": {"type": ["string", "null"]},
+        "audit_family": {"type": "string", "minLength": 1},
+        "builder_families": {"type": "array", "minItems": 1, "items": {"type": "string"}, "uniqueItems": true},
+        "builder_run_manifest_evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["run_manifest", "family", "family_source", "artifacts"],
+            "properties": {
+              "run_manifest": {"type": "string", "minLength": 1},
+              "family": {"type": ["string", "null"]},
+              "family_source": {"const": "executor.tool"},
+              "artifacts": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["path", "sha256"],
+                  "properties": {
+                    "path": {"type": "string", "minLength": 1},
+                    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "profile": {"const": "scratch-worktree"},
+        "network": {"const": "off"},
+        "commit_push_allowed": {"const": false},
+        "scratch_kind": {"type": "string", "minLength": 1}
+      }
+    },
+    "repo_confinement": {
+      "type": "object",
+      "required": ["excluded_prefixes", "changed_paths", "passed", "enforcement"],
+      "properties": {
+        "excluded_prefixes": {"type": "array", "items": {"type": "string"}},
+        "changed_paths": {"type": "array", "items": {"type": "string"}},
+        "passed": {"type": "boolean"},
+        "enforcement": {"const": "detect-and-reject"}
+      }
+    },
+    "sampling": {"type": "object"},
+    "surface_rebuilds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["manifest", "command", "returncode", "outputs"],
+        "properties": {
+          "manifest": {"type": "string"},
+          "command": {"type": "string"},
+          "returncode": {"type": "integer"},
+          "outputs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["path", "expected_manifest_sha256", "release_inventory_sha256", "recomputed_sha256", "matches_manifest", "matches_release_inventory"],
+              "properties": {
+                "path": {"type": "string"},
+                "expected_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "release_inventory_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "recomputed_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "matches_manifest": {"type": "boolean"},
+                "matches_release_inventory": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "inventory_hash_checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "release_inventory_sha256", "scratch_sha256", "passed"],
+        "properties": {
+          "path": {"type": "string"},
+          "release_inventory_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "scratch_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "passed": {"type": "boolean"}
+        }
+      }
+    },
+    "claim_recomputations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["claim_id", "headline", "claim_type", "expected_role_values", "recomputed_role_values", "expected_numeric_literals", "recomputed_numeric_literals", "source_artifacts", "passed"],
+        "properties": {
+          "claim_id": {"type": "string"},
+          "headline": {"type": "boolean"},
+          "claim_type": {"type": "string"},
+          "expected_role_values": {"type": "object"},
+          "recomputed_role_values": {"type": "object"},
+          "expected_numeric_literals": {"type": "array"},
+          "recomputed_numeric_literals": {"type": "array"},
+          "source_artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["path", "asserted_sha256", "release_inventory_sha256"],
+              "properties": {
+                "path": {"type": "string"},
+                "asserted_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "release_inventory_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }
+            }
+          },
+          "passed": {"type": "boolean"}
+        }
+      }
+    },
+    "etl_decision_samples": {"type": "array", "minItems": 1},
+    "experiment_recomputations": {"type": "array"},
+    "theoretical_rederivations": {"type": "array"},
+    "seam_audits": {"type": "array"},
+    "authorized_post_audit_repairs": {"type": "array"},
+    "failures": {"type": "array", "items": {"type": "string"}}
+  }
+}

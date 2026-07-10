@@ -1,0 +1,36 @@
+{
+  "schema_version": "research_swarm.prompt_surface.v1",
+  "surface_version": 1,
+  "prompts": {
+    "integrity_auditor": {
+      "path": "contracts/prompts/integrity_auditor.md",
+      "sha256": "2294336c54e463fcba7f1d5d6abd38a039c76ed6aaddf89751a16325cb536b60",
+      "surface_version": 1
+    },
+    "judge": {
+      "path": "contracts/prompts/judge.md",
+      "sha256": "854fdb8b374f644e7cbb77997ed1f53c4458830f87254e020841dd662e12660a",
+      "surface_version": 1
+    },
+    "operator": {
+      "path": "contracts/prompts/operator.md",
+      "sha256": "e96bb1e2d0dd62f670e7068e35788648daeec11dc6037de935c0f501d5e88b8b",
+      "surface_version": 1
+    },
+    "planner": {
+      "path": "contracts/prompts/planner.md",
+      "sha256": "77f3ba14827dfeadfcc2f42ff051a9dfa717e590d69f7ff9b3e1421c0c129037",
+      "surface_version": 1
+    },
+    "referee": {
+      "path": "contracts/prompts/referee.md",
+      "sha256": "055c723e0844e57ead7bb1f6bab450bd3c980a344b2e8dfee9ae4c1ff49ba3b6",
+      "surface_version": 1
+    },
+    "worker": {
+      "path": "contracts/prompts/worker.md",
+      "sha256": "9a70ef6f59d89467cf185c367fd10276ae4f5b44d554703477895f048f7d0389",
+      "surface_version": 1
+    }
+  }
+}

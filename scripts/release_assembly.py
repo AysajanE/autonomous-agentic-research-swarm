@@ -70,6 +70,11 @@ ALL_STAGE4_GATE_NAMES = (
     "referee_report_validity",
     "referee_calibration",
     "referee_release_evidence",
+    "citation_integrity",
+    "literature_corpus",
+    "recall_audit",
+    "prompt_surface",
+    "integrity_audit",
 )
 REQUIRED_RELEASE_GATE_NAMES = ALL_STAGE4_GATE_NAMES
 
@@ -93,6 +98,10 @@ ARTIFACT_SECTION_NAMES = (
     "registry",
     "raw_manifests",
     "processed_manifests",
+    "processed_data",
+    "models",
+    "proofs",
+    "instances",
     "runtime_runs",
     "runtime_reviews",
     "validation",
@@ -104,6 +113,10 @@ COUNT_REQUIRED_FIELDS = (
     "registry",
     "raw_manifests",
     "processed_manifests",
+    "processed_data",
+    "models",
+    "proofs",
+    "instances",
     "runtime_runs",
     "runtime_reviews",
     "validation",
@@ -327,7 +340,11 @@ def _collect_stage4_gate_results(repo_root: Path) -> dict[str, dict[str, Any]]:
     with _pushd(repo_root):
         for gate_name in ALL_STAGE4_GATE_NAMES:
             func = getattr(quality_gates, f"gate_{gate_name}")
-            result = func()
+            result = (
+                func(require_literature_corpus=True)
+                if gate_name == "citation_integrity"
+                else func()
+            )
             results[gate_name] = {
                 "ok": bool(result.ok),
                 "details": _json_safe(result.details),
@@ -401,6 +418,12 @@ def assemble_release_manifest(
         for gate_name in REQUIRED_RELEASE_GATE_NAMES
         if not gate_results.get(gate_name, {}).get("ok", False)
     ]
+    if (
+        contract.features.get("integrity_audit_required_for_release") is True
+        and gate_results.get("integrity_audit", {}).get("details", {}).get("skipped") is True
+    ):
+        required_gate_failures.append("integrity_audit")
+    required_gate_failures = sorted(set(required_gate_failures))
 
     contracts_and_protocol, missing_contracts = _collect_explicit_artifacts(
         repo_root, CONTRACT_AND_PROTOCOL_PATHS
@@ -412,6 +435,10 @@ def assemble_release_manifest(
     processed_manifests = _collect_dir_artifacts(
         repo_root, "data/processed_manifest", suffixes={".json"}
     )
+    processed_data = _collect_dir_artifacts(repo_root, "data/processed")
+    models = _collect_dir_artifacts(repo_root, "reports/models")
+    proofs = _collect_dir_artifacts(repo_root, "reports/proofs")
+    instances = _collect_dir_artifacts(repo_root, "contracts/instances", suffixes={".json"})
     runtime_runs = _collect_dir_artifacts(
         repo_root, "reports/status/swarm_runs", suffixes={".json"}
     )
@@ -486,6 +513,10 @@ def assemble_release_manifest(
         "registry": registry,
         "raw_manifests": raw_manifests,
         "processed_manifests": processed_manifests,
+        "processed_data": processed_data,
+        "models": models,
+        "proofs": proofs,
+        "instances": instances,
         "runtime_runs": runtime_runs,
         "runtime_reviews": runtime_reviews,
         "validation": validation,
@@ -503,6 +534,10 @@ def assemble_release_manifest(
         "registry": len(registry),
         "raw_manifests": len(raw_manifests),
         "processed_manifests": len(processed_manifests),
+        "processed_data": len(processed_data),
+        "models": len(models),
+        "proofs": len(proofs),
+        "instances": len(instances),
         "runtime_runs": len(runtime_runs),
         "runtime_reviews": len(runtime_reviews),
         "validation": len(validation),
