@@ -283,6 +283,21 @@ class M3bRefereeTests(unittest.TestCase):
     def setUp(self) -> None:
         swarm._REPO_ROOT_CACHE = None
 
+    def test_quote_challenge_selects_non_blank_line_and_signals_none(self) -> None:
+        # A blank challenge line is echo-satisfiable; the selector must pick a
+        # non-blank line, and signal challenge_line 0 when none exists (R4-B1).
+        raw = b"\n\n   \nMean STR was 11.68%\n\n"
+        line_no, span = swarm._artifact_quote_challenge(
+            raw=raw, seed="s", task_id="T070", claim_id="C1", path="reports/tables/x.md"
+        )
+        self.assertNotEqual(line_no, 0)
+        self.assertTrue(span.strip())
+        blank_line, blank_span = swarm._artifact_quote_challenge(
+            raw=b"\n   \n\n", seed="s", task_id="T070", claim_id="C1", path="p"
+        )
+        self.assertEqual(blank_line, 0)
+        self.assertEqual(blank_span, "")
+
     def test_executor_written_swarm_run_forgery_hard_fails_before_kernel_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
@@ -991,14 +1006,16 @@ class M3bRefereeTests(unittest.TestCase):
             )
             with _fixture_root(fixture.root), self.assertRaisesRegex(
                 SystemExit,
-                "referee_waiver_requires_control_plane_branch",
+                "referee_waiver_requires_integration_branch",
             ):
                 swarm.cmd_referee_waiver(
                     argparse.Namespace(
                         task=fixture.task_id,
                         human_id="owner-1",
+                        # a task branch cannot authorize even by passing its own
+                        # name as base_branch — the trusted base comes from git
                         reason="task branch must not authorize",
-                        base_branch="main",
+                        base_branch=f"{fixture.task_id}_task",
                     )
                 )
 

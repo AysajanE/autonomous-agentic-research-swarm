@@ -982,15 +982,20 @@ def _artifact_quote_challenge(
     claim_id: str,
     path: str,
 ) -> tuple[int, str]:
-    """Choose a deterministic readable line without exposing its contents."""
+    """Choose a deterministic NON-BLANK line without exposing its contents. A
+    blank challenge is echo-satisfiable (a referee returns "" without reading),
+    so only lines with non-whitespace content are eligible; challenge_line 0
+    signals no challengeable line exists (binary/blank artifact) and the caller
+    fails closed rather than accepting an empty span."""
     lines = raw.decode("utf-8", errors="replace").splitlines()
-    if not lines:
-        lines = [""]
+    candidates = [(number, text) for number, text in enumerate(lines, start=1) if text.strip()]
+    if not candidates:
+        return 0, ""
     selector = hashlib.sha256(
         f"{seed}\0{task_id}\0{claim_id}\0{path}\0quoted-span".encode("utf-8")
     ).digest()
-    index = int.from_bytes(selector[:8], "big") % len(lines)
-    return index + 1, lines[index]
+    index = int.from_bytes(selector[:8], "big") % len(candidates)
+    return candidates[index]
 
 
 def _public_sampled_artifact(item: dict[str, object]) -> dict[str, object]:
@@ -1449,6 +1454,10 @@ def _normalize_referee_report(
     for item in sampled_artifacts:
         if item.get("tampered") is True:
             failures.append(f"referee_sampled_artifact_tampered:{item.get('path')}")
+        # A non-challengeable sample (blank/binary artifact, challenge_line 0)
+        # cannot prove opening — fail closed rather than accept an empty span.
+        if not item.get("challenge_line"):
+            failures.append(f"referee_sample_not_challengeable:{item.get('path')}")
     missing_sample: list[str] = []
     opened: list[dict[str, str]] = []
     for sampled in sampled_artifacts:
@@ -2461,6 +2470,34 @@ def _reconnaissance_line_count(task_text: str) -> int:
 def _git_current_branch(cwd: Path) -> str:
     cp = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd, capture=True, check=True)
     return (cp.stdout or "").strip()
+
+
+def _trusted_integration_branch(cwd: Path) -> str:
+    """The repository's real default/integration branch, derived from git — NOT
+    from a caller-supplied argument (a Worker on a task branch must not be able
+    to name its own branch as the 'base' to mint a control-plane waiver)."""
+    cp = _run(
+        ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        cwd=cwd,
+        capture=True,
+        check=False,
+    )
+    value = (cp.stdout or "").strip() if cp.returncode == 0 else ""
+    if value.startswith("origin/"):
+        value = value[len("origin/"):]
+    return value or "main"
+
+
+def _is_linked_worktree(cwd: Path) -> bool:
+    """True inside a linked git worktree (where Workers run) — the main
+    checkout's git dir equals its common dir; a linked worktree's does not."""
+    git_dir = _run(["git", "rev-parse", "--git-dir"], cwd=cwd, capture=True, check=False)
+    common = _run(["git", "rev-parse", "--git-common-dir"], cwd=cwd, capture=True, check=False)
+    gd = (git_dir.stdout or "").strip()
+    cd = (common.stdout or "").strip()
+    if not gd or not cd:
+        return False
+    return Path(gd).resolve() != Path(cd).resolve()
 
 
 def _git_head_sha(cwd: Path) -> str | None:
@@ -4850,13 +4887,15 @@ def _referee_owner_waiver(
     run_manifest_sha256: str,
 ) -> dict[str, object] | None:
     events, _ = swarm_events.read_events(repo)
+    trusted_base = _trusted_integration_branch(repo)
     for event in reversed(events):
         if not (
             event.get("event") == "referee_owner_waiver"
             and event.get("emitted_by") == REFEREE_WAIVER_EMITTER
             and event.get("actor") == "HumanOwner"
-            and isinstance(event.get("control_plane_branch"), str)
-            and bool(str(event.get("control_plane_branch")).strip())
+            # the waiver must have been emitted on the trusted integration branch,
+            # not merely carry a non-empty branch string
+            and event.get("control_plane_branch") == trusted_base
             and event.get("task_id") == task_id
             and event.get("run_manifest_sha256") == run_manifest_sha256
         ):
@@ -4879,11 +4918,14 @@ def _referee_owner_waiver(
 def cmd_referee_waiver(args: argparse.Namespace) -> int:
     """Append one human manuscript-quorum waiver as kernel evidence."""
     repo = _repo_root()
-    base_branch = str(getattr(args, "base_branch", "main")).strip() or "main"
+    # The protected integration branch comes from git, NOT from --base-branch — a
+    # Worker on a task branch cannot name its own branch to authorize a waiver —
+    # and the waiver must run on the main checkout, never a linked worktree.
+    trusted_base = _trusted_integration_branch(repo)
     current_branch = _git_current_branch(repo)
-    if current_branch != base_branch:
+    if _is_linked_worktree(repo) or current_branch != trusted_base:
         raise SystemExit(
-            f"referee_waiver_requires_control_plane_branch:{current_branch}!={base_branch}"
+            f"referee_waiver_requires_integration_branch:{current_branch}!={trusted_base}"
         )
     human_id = str(args.human_id).strip()
     reason = str(args.reason).strip()
@@ -9261,6 +9303,16 @@ def cmd_run_task(args: argparse.Namespace) -> int:
                 )
                 for path in executor_control_plane_written_paths:
                     blocked_reasons.append(f"executor_wrote_control_plane:{path}")
+                    # Quarantine the forged control-plane file immediately so it
+                    # cannot survive into a retry's "before" snapshot (where an
+                    # unchanged forgery would evade re-detection) or a later merge.
+                    try:
+                        forged = (repo / path).resolve()
+                        if repo.resolve() in forged.parents and forged.is_file():
+                            forged.unlink()
+                            _run(["git", "rm", "-f", "--ignore-unmatch", "--", path], cwd=repo, check=False)
+                    except OSError:
+                        pass
                     _record_swarm_event(
                         repo,
                         {

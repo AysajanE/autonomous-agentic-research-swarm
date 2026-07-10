@@ -258,6 +258,23 @@ def _git_path_is_ignored(path: str, repo: Path) -> bool:
     return cp.returncode == 0
 
 
+def _trusted_integration_branch(repo: Path) -> str:
+    """The repository's real default branch from git (never a caller argument),
+    used to validate that a control-plane waiver was emitted on the integration
+    branch rather than a Worker task branch."""
+    cp = subprocess.run(
+        ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        cwd=str(repo),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = (cp.stdout or "").strip() if cp.returncode == 0 else ""
+    if value.startswith("origin/"):
+        value = value[len("origin/"):]
+    return value or "main"
+
+
 def _git_path_is_tracked(path: str, repo: Path) -> bool:
     if not _repo_has_git_worktree(repo):
         return True
@@ -2744,13 +2761,14 @@ def _referee_owner_waiver(
     run_manifest_sha256: str,
 ) -> dict[str, object] | None:
     events, _ = _read_swarm_events(Path.cwd())
+    trusted_base = _trusted_integration_branch(Path.cwd())
     for event in reversed(events):
         if not (
             event.get("event") == "referee_owner_waiver"
             and event.get("emitted_by") == REFEREE_WAIVER_EMITTER
             and event.get("actor") == "HumanOwner"
-            and isinstance(event.get("control_plane_branch"), str)
-            and bool(str(event.get("control_plane_branch")).strip())
+            # emitted on the trusted integration branch, not any non-empty string
+            and event.get("control_plane_branch") == trusted_base
             and event.get("task_id") == task_id
             and event.get("run_manifest_sha256") == run_manifest_sha256
         ):
