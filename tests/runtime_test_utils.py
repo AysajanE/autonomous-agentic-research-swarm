@@ -7,6 +7,7 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any
 
@@ -16,7 +17,8 @@ SWARM_PATH = REPO_ROOT / "scripts" / "swarm.py"
 QUALITY_GATES_PATH = REPO_ROOT / "scripts" / "quality_gates.py"
 SWEEP_TASKS_PATH = REPO_ROOT / "scripts" / "sweep_tasks.py"
 
-SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v1"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
 JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v1"
 
 
@@ -304,6 +306,19 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     write_text(root, "tests/README.md", "# tests\n")
 
 
+def init_git_fixture_repo(root: Path) -> None:
+    subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "swarm-bot"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "swarm-bot@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "initial fixture"], cwd=root, check=True, capture_output=True, text=True)
+
+    origin = Path(f"{root}.origin.git")
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=root, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=root, check=True, capture_output=True, text=True)
+
+
 def _emit_list(key: str, values: list[str]) -> str:
     if not values:
         return f"{key}: []"
@@ -417,10 +432,13 @@ def write_run_manifest(
     workstream: str = "W1",
     state_before: str = "active",
     state_after: str = "ready_for_review",
+    provenance_class: str = "executor_run",
+    result_status: str = "ok",
+    schema_version: str = SWARM_RUN_MANIFEST_SCHEMA_VERSION,
 ) -> Path:
     rel = f"reports/status/swarm_runs/{task_id}_20260329T000000Z.json"
     payload = {
-        "schema_version": SWARM_RUN_MANIFEST_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "run_id": f"{task_id}_20260329T000000Z",
         "generated_at_utc": "2026-03-29T00:00:00Z",
         "task": {
@@ -476,10 +494,19 @@ def write_run_manifest(
             "missing_manifests": [],
         },
         "result": {
-            "status": "ok",
-            "blocked_reasons": [],
+            "status": result_status,
+            "blocked_reasons": [] if result_status == "ok" else ["fixture_blocked"],
         },
     }
+    if schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+        payload["provenance_class"] = provenance_class
+        payload["commands"]["executor_log_sha256"] = None
+        payload["frontmatter"] = {
+            "pinned_sha256": "0" * 64,
+            "tampered": False,
+            "tampered_keys": [],
+        }
+        payload["ownership"]["uncommitted_violations"] = []
     return write_json(root, rel, payload)
 
 

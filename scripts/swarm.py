@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -53,8 +54,11 @@ from swarm_taskfile import parse_task_id_from_branch as _parse_task_id_from_bran
 from swarm_taskfile import update_task_status_and_notes as _shared_update_task_status_and_notes
 
 
-SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v1"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
 JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v1"
+
+EXECUTOR_LOG_MAX_BYTES = 128 * 1024
+EXECUTOR_LOG_SEGMENT_BYTES = 64 * 1024
 
 DEFAULT_ALLOWED_STATES = (
     "backlog",
@@ -225,6 +229,70 @@ def _run(
             stderr=completed.stderr,
         )
     return completed
+
+
+def _invoke_executor(
+    *,
+    command: list[str],
+    cwd: Path,
+    timeout_seconds: int | None,
+) -> subprocess.CompletedProcess[str]:
+    return _run(
+        command,
+        cwd=cwd,
+        capture=True,
+        check=False,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _executor_output_bytes(output: object) -> bytes:
+    if isinstance(output, bytes):
+        return output
+    if isinstance(output, str):
+        return output.encode("utf-8")
+    return b""
+
+
+def _write_executor_log(*, repo: Path, run_id: str, output: object) -> tuple[str, str]:
+    raw = _executor_output_bytes(output)
+    if len(raw) > EXECUTOR_LOG_MAX_BYTES:
+        truncated_bytes = len(raw) - (2 * EXECUTOR_LOG_SEGMENT_BYTES)
+        marker = f"\n...[truncated {truncated_bytes} bytes]...\n".encode("utf-8")
+        raw = raw[:EXECUTOR_LOG_SEGMENT_BYTES] + marker + raw[-EXECUTOR_LOG_SEGMENT_BYTES:]
+
+    log_path = repo / "reports" / "status" / "swarm_runs" / "logs" / f"{run_id}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_bytes(raw)
+    return log_path.relative_to(repo).as_posix(), hashlib.sha256(raw).hexdigest()
+
+
+def _task_frontmatter_snapshot(path: Path) -> tuple[str, dict[str, object]]:
+    text = _read_text(path)
+    lines = text.splitlines(keepends=True)
+    if len(lines) < 3 or lines[0].strip() != "---":
+        raise ValueError(f"missing_yaml_frontmatter:{path}")
+
+    end_idx = next((index for index in range(1, len(lines)) if lines[index].strip() == "---"), None)
+    if end_idx is None:
+        raise ValueError(f"missing_yaml_frontmatter:{path}")
+
+    parsed = _parse_task_frontmatter(text)
+    if parsed is None:
+        raise ValueError(f"missing_yaml_frontmatter:{path}")
+    return "".join(lines[1:end_idx]), parsed
+
+
+def _frontmatter_tampered_keys(
+    pinned: dict[str, object],
+    current: dict[str, object] | None,
+) -> list[str]:
+    current_data = current or {}
+    return sorted(
+        key
+        for key in set(pinned) | set(current_data)
+        if pinned.get(key) != current_data.get(key) or (key in pinned) != (key in current_data)
+    )
 
 
 def _which_or_none(name: str) -> str | None:
@@ -930,8 +998,11 @@ def _preflight_strict_sync_requirements(*, cwd: Path, remote: str, unattended: b
     _PREFLIGHT_STRICT_SYNC_CACHE.add(cache_key)
 
 
-def _git_commit(*, cwd: Path, message: str, strict: bool) -> None:
-    cp = _run(["git", "commit", "-m", message], cwd=cwd, capture=True, check=False)
+def _git_commit(*, cwd: Path, message: str, strict: bool, paths: list[str] | None = None) -> None:
+    command = ["git", "commit", "-m", message]
+    if paths:
+        command.extend(["--", *paths])
+    cp = _run(command, cwd=cwd, capture=True, check=False)
     if cp.returncode == 0:
         return
     if strict:
@@ -1035,6 +1106,32 @@ def _git_untracked_files(cwd: Path) -> list[str]:
         check=True,
     )
     return [line.strip() for line in (cp.stdout or "").splitlines() if line.strip()]
+
+
+def _git_unstage_path(cwd: Path, path: str) -> None:
+    head_entry = _run(
+        ["git", "ls-tree", "HEAD", "--", path],
+        cwd=cwd,
+        capture=True,
+        check=True,
+    )
+    line = (head_entry.stdout or "").strip()
+    if line:
+        metadata = line.split("\t", 1)[0].split()
+        if len(metadata) == 3:
+            mode, _, object_id = metadata
+            _run(
+                ["git", "update-index", "--add", "--cacheinfo", mode, object_id, path],
+                cwd=cwd,
+                check=True,
+            )
+            return
+    _run(
+        ["git", "rm", "--cached", "-f", "--ignore-unmatch", "--", path],
+        cwd=cwd,
+        capture=True,
+        check=True,
+    )
 
 
 def _collect_changed_paths_with_sources(*, repo: Path, base_ref: str | None) -> tuple[dict[str, set[str]], list[dict[str, str]]]:
@@ -1285,7 +1382,29 @@ def _is_valid_run_manifest(path: Path, task_id: str) -> bool:
     if data.get("schema_version") != SWARM_RUN_MANIFEST_SCHEMA_VERSION:
         return False
     task = data.get("task")
-    return isinstance(task, dict) and task.get("task_id") == task_id
+    result = data.get("result")
+    return (
+        isinstance(task, dict)
+        and task.get("task_id") == task_id
+        and isinstance(result, dict)
+        and result.get("status") == "ok"
+        and data.get("provenance_class") == "executor_run"
+    )
+
+
+def _matching_v2_run_manifest_data(paths: list[Path], task_id: str) -> list[tuple[Path, dict[str, object]]]:
+    matches: list[tuple[Path, dict[str, object]]] = []
+    for path in paths:
+        try:
+            data = json.loads(_read_text(path))
+        except Exception:
+            continue
+        if not isinstance(data, dict) or data.get("schema_version") != SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+            continue
+        task = data.get("task")
+        if isinstance(task, dict) and task.get("task_id") == task_id:
+            matches.append((path, data))
+    return matches
 
 
 def _is_valid_review_log(path: Path, task_id: str, scientific_review_role: str) -> bool:
@@ -1644,15 +1763,6 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     if args.unattended:
         _require_unattended_ack()
 
-    _require_git_identity(cwd=repo, reason="runtime")
-    _preflight_strict_sync_requirements(
-        cwd=repo,
-        remote=args.remote,
-        unattended=bool(args.unattended),
-        create_pr=bool(args.create_pr),
-    )
-    strict_sync = bool(args.unattended or args.create_pr)
-
     task = tasks.get(args.task_id)
     if task is None:
         raise SystemExit(f"unknown_task_id:{args.task_id}")
@@ -1662,6 +1772,25 @@ def cmd_run_task(args: argparse.Namespace) -> int:
 
     if task.state not in {"backlog", "active", "blocked", "integration_ready"}:
         raise SystemExit(f"task_not_runnable_from_state:{task.task_id}:{task.state}")
+
+    missing_dependencies = [
+        dep_id
+        for dep_id in task.dependencies
+        if not dependency_is_satisfied(dep_id, task, tasks, contract)
+    ]
+    dependencies_satisfied = _dependencies_satisfied(task, tasks, contract)
+    force_deps = bool(getattr(args, "force_deps", False))
+    if task.state in {"backlog", "active"} and not dependencies_satisfied and not force_deps:
+        raise SystemExit(f"dependencies_unsatisfied:{task.task_id}:{','.join(missing_dependencies)}")
+
+    _require_git_identity(cwd=repo, reason="runtime")
+    _preflight_strict_sync_requirements(
+        cwd=repo,
+        remote=args.remote,
+        unattended=bool(args.unattended),
+        create_pr=bool(args.create_pr),
+    )
+    strict_sync = bool(args.unattended or args.create_pr)
 
     state_before = task.state
     if task.state == "backlog":
@@ -1685,6 +1814,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     executor_returncode: int | None = None
     executor_error: str | None = None
     executor_log_relpath: str | None = None
+    executor_log_sha256: str | None = None
 
     if task.allow_network and task.workstream not in set(contract.network_workstreams):
         blocked_reasons.append("network_policy_violation")
@@ -1696,10 +1826,12 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             blocked_reasons.append("integration_ready_missing_downstream_allowlist")
 
     run_timestamp = _utc_timestamp_compact()
-    logs_dir = repo / "data" / "tmp" / "swarm_logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
+    run_id = f"{task.task_id}_{run_timestamp}"
+    pinned_frontmatter_text, pinned_frontmatter = _task_frontmatter_snapshot(task.path)
+    pinned_frontmatter_sha256 = hashlib.sha256(pinned_frontmatter_text.encode("utf-8")).hexdigest()
 
     if not args.skip_executor and not blocked_reasons:
+        executor_output: object = None
         try:
             prompt_path = _executor_prompt_path(task, contract)
             prompt = load_prompt(
@@ -1714,27 +1846,45 @@ def cmd_run_task(args: argparse.Namespace) -> int:
                 allow_network=task.allow_network,
                 workdir=repo,
             )
-            cp = _run(
-                executor_command,
+            cp = _invoke_executor(
+                command=executor_command,
                 cwd=repo,
-                capture=True,
-                check=False,
                 timeout_seconds=int(args.max_worker_seconds) if args.max_worker_seconds else None,
             )
             executor_returncode = cp.returncode
-            executor_log_path = logs_dir / f"{task.task_id}_{run_timestamp}_executor.log"
-            executor_log_path.write_text(cp.stdout or "", encoding="utf-8")
-            executor_log_relpath = executor_log_path.relative_to(repo).as_posix()
+            executor_output = cp.stdout
             if cp.returncode != 0:
                 blocked_reasons.append("executor_failed")
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            executor_output = exc.stdout
             executor_error = "executor_timeout"
             blocked_reasons.append("executor_timeout")
         except Exception as exc:
+            executor_output = getattr(exc, "stdout", None) or getattr(exc, "output", None)
+            if not executor_output:
+                detail = str(exc).replace("\n", " ").strip()
+                executor_output = f"executor_error:{type(exc).__name__}:{detail}\n"
             executor_error = str(exc)
             blocked_reasons.append("executor_unavailable")
+        finally:
+            executor_log_relpath, executor_log_sha256 = _write_executor_log(
+                repo=repo,
+                run_id=run_id,
+                output=executor_output,
+            )
     elif args.skip_executor:
         executor_error = "executor_skipped"
+
+    try:
+        task_text_after_executor = _read_text(task.path)
+        current_frontmatter = _parse_task_frontmatter(task_text_after_executor)
+    except Exception:
+        task_text_after_executor = ""
+        current_frontmatter = None
+    tampered_keys = _frontmatter_tampered_keys(pinned_frontmatter, current_frontmatter)
+    frontmatter_tampered = bool(tampered_keys)
+    if frontmatter_tampered:
+        blocked_reasons.append("frontmatter_tampered")
 
     gate_ok, gate_outputs = _run_gates(repo, task.gates)
     if not gate_ok:
@@ -1742,6 +1892,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
 
     base_ref = _resolve_base_ref_for_diff(cwd=repo, base_branch=args.base_branch, remote=args.remote)
     ownership_failures: list[dict[str, str]] = []
+    uncommitted_violations: list[str] = []
     changed_paths: list[str] = []
     if base_ref is None:
         ownership_failures.append(
@@ -1789,6 +1940,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             if key in seen:
                 continue
             seen.add(key)
+            uncommitted_violations.append(changed_path)
             ownership_failures.append(
                 {
                     "path": changed_path,
@@ -1808,7 +1960,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     if manifest_failures:
         blocked_reasons.append("missing_required_manifests")
 
-    task_state_after_executor = load_task(task.path, contract).state
+    task_state_after_executor = _parse_status_value(task_text_after_executor, "State")
     if task_state_after_executor == "blocked":
         blocked_reasons.append("task_marked_blocked")
 
@@ -1828,8 +1980,9 @@ def cmd_run_task(args: argparse.Namespace) -> int:
 
     run_manifest = {
         "schema_version": SWARM_RUN_MANIFEST_SCHEMA_VERSION,
-        "run_id": f"{task.task_id}_{run_timestamp}",
+        "run_id": run_id,
         "generated_at_utc": _utc_now_iso(),
+        "provenance_class": "manual_operator" if args.skip_executor else "executor_run",
         "task": {
             "task_id": task.task_id,
             "task_path": task.path.relative_to(repo).as_posix(),
@@ -1862,13 +2015,20 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         "commands": {
             "executor": executor_command,
             "executor_log_path": executor_log_relpath,
+            "executor_log_sha256": executor_log_sha256,
             "gates": list(task.gates),
+        },
+        "frontmatter": {
+            "pinned_sha256": pinned_frontmatter_sha256,
+            "tampered": frontmatter_tampered,
+            "tampered_keys": tampered_keys,
         },
         "gates": gate_outputs,
         "ownership": {
             "ok": not ownership_failures,
             "changed_paths": changed_paths,
             "violations": ownership_failures,
+            "uncommitted_violations": sorted(set(uncommitted_violations)),
         },
         "artifacts": {
             "outputs_ok": outputs_ok,
@@ -1882,6 +2042,11 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             "blocked_reasons": blocked_reasons,
         },
     }
+    if force_deps:
+        run_manifest["overrides"] = {
+            "force_deps": True,
+            "unsatisfied_dependencies": missing_dependencies,
+        }
     _write_json(run_manifest_path, run_manifest)
 
     if state_after == "integration_ready":
@@ -1922,8 +2087,39 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     _update_task_status_and_notes(task_path=task.path, new_state=state_after, note_line=note)
 
     if _git_has_changes(repo):
-        _run(["git", "add", "-A"], cwd=repo, check=True)
-        _git_commit(cwd=repo, message=f"{task.task_id}: {state_after}", strict=strict_sync)
+        task_file_rel = task.path.relative_to(repo).as_posix()
+        control_plane_paths = {task_file_rel, run_manifest_relpath}
+        if executor_log_relpath is not None:
+            control_plane_paths.add(executor_log_relpath)
+
+        final_path_sources, _ = _collect_changed_paths_with_sources(repo=repo, base_ref=base_ref)
+        for violating_path in sorted(set(uncommitted_violations)):
+            _git_unstage_path(repo, violating_path)
+
+        paths_to_commit: list[str] = []
+        for changed_path in sorted(set(final_path_sources) | control_plane_paths):
+            allowed, _ = _path_is_allowed(
+                path=changed_path,
+                allowed_paths=task.allowed_paths,
+                disallowed_paths=task.disallowed_paths,
+                task_file_path=task_file_rel,
+                task_id=task.task_id,
+            )
+            if allowed or changed_path in control_plane_paths:
+                command = ["git", "add"]
+                if changed_path == executor_log_relpath:
+                    command.append("-f")
+                command.extend(["--", changed_path])
+                _run(command, cwd=repo, check=True)
+                paths_to_commit.append(changed_path)
+
+        if paths_to_commit:
+            _git_commit(
+                cwd=repo,
+                message=f"{task.task_id}: {state_after}",
+                strict=strict_sync,
+                paths=paths_to_commit,
+            )
         _git_push(
             cwd=repo,
             remote=args.remote,
@@ -1992,21 +2188,38 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
     outputs_ok, output_failures = _check_declared_outputs_exist(repo=repo, task=task)
     manifest_failures = required_manifest_failures(repo, task)
 
+    candidate_run_manifests = _matching_task_jsons(contract.run_manifest_dir, task.task_id)
+    matching_v2_manifests = _matching_v2_run_manifest_data(candidate_run_manifests, task.task_id)
     valid_run_manifests = [
-        path for path in _matching_task_jsons(contract.run_manifest_dir, task.task_id) if _is_valid_run_manifest(path, task.task_id)
+        path for path, _ in matching_v2_manifests if _is_valid_run_manifest(path, task.task_id)
     ]
     review_bundle_failures: list[str] = []
     if not valid_run_manifests:
-        review_bundle_failures.append("missing_valid_run_manifest")
+        passing_v2_manifests = [
+            (path, data)
+            for path, data in matching_v2_manifests
+            if isinstance(data.get("result"), dict) and data["result"].get("status") == "ok"
+        ]
+        if not matching_v2_manifests:
+            review_bundle_failures.append("missing_valid_run_manifest")
+        elif not passing_v2_manifests:
+            review_bundle_failures.append("no_passing_run_manifest")
+        elif passing_v2_manifests[-1][1].get("provenance_class") in {"manual_operator", "backfill"}:
+            review_bundle_failures.append("provenance_requires_independent_reverification")
+        else:
+            review_bundle_failures.append("missing_valid_run_manifest")
 
     approved = gate_ok and outputs_ok and not manifest_failures and not review_bundle_failures
     state_after = "done" if approved else args.on_fail
 
     review_log_path = _next_json_artifact_path(contract.judge_review_dir, task.task_id, _utc_timestamp_compact())
     review_log_relpath = review_log_path.relative_to(repo).as_posix()
-    run_manifest_relpath = (
-        valid_run_manifests[-1].relative_to(repo).as_posix() if valid_run_manifests else None
+    selected_run_manifest = (
+        valid_run_manifests[-1]
+        if valid_run_manifests
+        else (matching_v2_manifests[-1][0] if matching_v2_manifests else None)
     )
+    run_manifest_relpath = selected_run_manifest.relative_to(repo).as_posix() if selected_run_manifest else None
 
     check_failures: list[str] = []
     if not gate_ok:
@@ -2155,6 +2368,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_task.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
     run_task.add_argument("--unattended", action="store_true")
     run_task.add_argument("--skip-executor", action="store_true")
+    run_task.add_argument("--force-deps", action="store_true")
     run_task.add_argument("--max-worker-seconds", type=int, default=0)
     run_task.add_argument("--repair-context", default=None)
     run_task.add_argument("--create-pr", action="store_true")

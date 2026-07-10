@@ -29,7 +29,8 @@ from swarm_taskfile import parse_status_value as _parse_status_value
 from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 
 
-SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v1"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
 JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v1"
 
 DEFAULT_ALLOWED_STATES = (
@@ -739,8 +740,17 @@ def _validate_swarm_run_manifest(path: Path, contract: FrameworkContract) -> lis
         )
     )
 
-    if payload.get("schema_version") != SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version not in {
+        SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1,
+        SWARM_RUN_MANIFEST_SCHEMA_VERSION,
+    }:
         failures.append(f"{path}:invalid_schema_version:{payload.get('schema_version')}")
+
+    if schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+        provenance_class = payload.get("provenance_class")
+        if provenance_class not in {"executor_run", "manual_operator", "backfill"}:
+            failures.append(f"{path}:invalid_provenance_class:{provenance_class}")
 
     task = payload.get("task")
     failures.extend(
@@ -773,9 +783,12 @@ def _validate_swarm_run_manifest(path: Path, contract: FrameworkContract) -> lis
             failures.append(f"{path}:invalid_executor_role:{executor.get('role')}")
 
     commands = payload.get("commands")
+    command_keys = {"executor", "gates"}
+    if schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION:
+        command_keys.update({"executor_log_path", "executor_log_sha256"})
     failures.extend(
         f"{path}:{failure}"
-        for failure in _validate_required_keys(commands, {"executor", "gates"}, "commands")
+        for failure in _validate_required_keys(commands, command_keys, "commands")
     )
 
     ownership = payload.get("ownership")
