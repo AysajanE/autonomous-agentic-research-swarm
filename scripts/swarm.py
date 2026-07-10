@@ -1276,8 +1276,9 @@ def _claude_referee_argv(repo: Path, referee_family: str = "claude") -> list[str
     model = config.get("model")
     if not isinstance(executable, str) or not executable.strip() or not isinstance(model, str) or not model.strip():
         raise RuntimeError("referee_backend_unavailable")
-    if _which_or_none(executable.strip()) is None:
-        raise RuntimeError(f"referee_backend_unavailable:missing_cli:{executable.strip()}")
+    # NB: CLI-presence is checked at INVOCATION (_invoke_referee), not here —
+    # argv construction is pure so it (and the read-only-profile assertion) is
+    # testable on a runner without the referee CLI installed.
     return [
         executable.strip(),
         "-p",
@@ -1334,6 +1335,12 @@ def _invoke_referee(
     if backend == "claude":
         family = referee_family or "claude"
         argv = _claude_referee_argv(repo, family)
+        # Fail-closed at the invocation boundary if the referee CLI is absent
+        # (§4.3: unavailable → hard-block, never a silent waive).
+        if not argv or _which_or_none(argv[0]) is None:
+            return RefereeOutcome(
+                1, f"referee_backend_unavailable:missing_cli:{argv[0] if argv else 'claude'}", family, {}
+            )
         prompt = _render_referee_prompt(repo, context)
         try:
             cp = subprocess.run(
