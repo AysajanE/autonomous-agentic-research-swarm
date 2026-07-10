@@ -807,6 +807,9 @@ class M2PlannerTests(unittest.TestCase):
                 )
                 if filled:
                     task.write_text(_with_recon(task.read_text()), encoding="utf-8")
+                # An analysis task requires an active 2b lock to claim (§6.1);
+                # activate it so this test isolates the recon-promotion behavior.
+                _activate_analysis_lock(root)
                 _write_mock_executor(root, task_id)
                 init_git_fixture_repo(root)
 

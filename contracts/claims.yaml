@@ -1,5 +1,59 @@
 {
   "schema_version": "research_swarm.claims.v1",
-  "description": "Registered manuscript claims. Keep claims empty until evidence and verification commands are committed.",
-  "claims": []
+  "description": "Claim-evidence ledger for the STR battle-test reference manuscript (reports/paper/index.qmd). Every reportable manuscript numeric is registered here, scoped to the citation key it is reported under, and traces to a committed, hash-pinned artifact. The full asserted->registered semantic sweep (paraphrase / claim-typing adjudication) is the M3b referee layer; numeric recompute-against-artifact is the M4 computed-value-key layer.",
+  "claims": [
+    {
+      "claim_id": "REF-STR-REGIME",
+      "citation_key": "str_regime_summary",
+      "type": "descriptive",
+      "statement": "On the validated 2026-04-09 surface, mean ecosystem STR is 69.14% before Dencun and 11.68% after Dencun (8.98% during blob-fee-floor runs, 12.77% otherwise), while mean daily L1 rent falls from 147.014 ETH pre-Dencun to 19.064 ETH post-Dencun.",
+      "manuscript_numeric_literals": ["69.14%", "11.68%", "8.98%", "12.77%", "147.014 ETH", "19.064 ETH"],
+      "supporting_artifacts": [
+        {"path": "reports/tables/str_regime_summary.md", "sha256": "b77f33dd4992fb5c73b0e3ddfea342d5587c65110964852208982c5c2a48326e"},
+        {"path": "reports/tables/str_regime_summary.csv", "sha256": "35657202938c6ca63beb67f97b51d961b2fe4a66818a31ed2167b837a8a40f4c"}
+      ],
+      "verification_command": "python scripts/verify_reference_claims.py",
+      "uncertainty_artifact": {"path": "reports/validation/cross_source_reconciliation.md", "sha256": "53759a344654948c69d70374babf3a66dc4e055aede415b221338daae4cee6ae"}
+    },
+    {
+      "claim_id": "REF-PANEL-COVERAGE",
+      "citation_key": "rollup_panel_validation",
+      "type": "methodological",
+      "statement": "The authoritative validated panel contains 12,434 rollup-day rows across 14 rollups and 1,559 dates over the 2022-01-01 through 2026-04-08 window.",
+      "manuscript_numeric_literals": ["12,434 rollup", "14 rollups", "1,559 dates"],
+      "supporting_artifacts": [
+        {"path": "reports/validation/rollup_panel_validation.json", "sha256": "9e2489263099da247582a775d0fb193baef76a108c6919e4a73809ae2c36d66c"}
+      ],
+      "verification_command": "python scripts/verify_reference_claims.py",
+      "uncertainty_artifact": null,
+      "uncertainty_justification": "Dataset cardinality counts (rows/rollups/dates) are exact properties of the committed, hash-pinned panel-validation artifact, not inferential estimates; coverage caveats are documented in the release limitations."
+    },
+    {
+      "claim_id": "REF-VENDOR-RECONCILIATION",
+      "citation_key": "cross_source_reconciliation",
+      "type": "methodological",
+      "statement": "Canonical and vendor panels differ by about 0.02% in aggregate rent over the full matched slice; the one documented non-gating monthly residual is 2025-05, where authoritative rent is 148.42 ETH versus 166.78 ETH in the vendor benchmark (a 12.37% gap on a low-rent month).",
+      "manuscript_numeric_literals": ["0.02%", "12.37%", "148.42 ETH", "166.78 ETH"],
+      "supporting_artifacts": [
+        {"path": "reports/validation/cross_source_reconciliation.md", "sha256": "53759a344654948c69d70374babf3a66dc4e055aede415b221338daae4cee6ae"},
+        {"path": ".orchestrator/handoff/H060_release_output_caveats_2026-04-11.md", "sha256": "e7c4a770527ce03c32d01eb505409f92e393eaa839896e573881d2e3e64374f8"}
+      ],
+      "verification_command": "python scripts/verify_reference_claims.py",
+      "uncertainty_artifact": null,
+      "uncertainty_justification": "A data-quality reconciliation diagnostic (aggregate divergence and its worst-month residual), quantified directly in the committed reconciliation report and release-caveats handoff; it is itself the measurement-uncertainty context rather than an estimate carrying its own band."
+    },
+    {
+      "claim_id": "REF-BLOB-FLOOR-DEF",
+      "citation_key": "protocol_lock",
+      "type": "methodological",
+      "statement": "Blob-fee-floor runs are the protocol-locked post-Dencun stretches of at least 7 consecutive days where the blob base fee stays within 1.05 x the post-Dencun minimum.",
+      "manuscript_numeric_literals": ["1.05 x"],
+      "supporting_artifacts": [
+        {"path": "docs/protocol.md", "sha256": "ff925b900f59476213b5924f2e07aac43e45b8d1973ba4124ddbf97e5da8f1ea"}
+      ],
+      "verification_command": "python scripts/verify_reference_claims.py",
+      "uncertainty_artifact": null,
+      "uncertainty_justification": "A locked protocol definition (a constant, not a measured quantity); its authority is the hash-pinned protocol lock, so no numeric uncertainty band applies."
+    }
+  ]
 }

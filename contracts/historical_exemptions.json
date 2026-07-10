@@ -52,7 +52,7 @@
       "sha256": "cb734d4bc7a64db6fb3e113f2ca61c9ae0d7ce8dd17b333ec29586a0b0e7c07e"
     }
   ],
-  "rationale": "Gate-scoping rule (plan \u00a74.0 remediation): strict v2 checks apply to schema_version >= 2 artifacts; the battle-test's v1 artifacts live on this checked-in, hash-pinned exemption list. New-schema strictness never silently rewrites what an old release attested. The frozen battle-test manuscript is exempted under the same rule: numeric registration binds on the M4 computed paper (a new artifact), not retroactively on the pre-ledger reference; the hash pin lapses the moment the manuscript is regenerated.",
+  "rationale": "Gate-scoping rule (plan \u00a74.0 remediation): strict v2 checks apply to schema_version >= 2 artifacts; the battle-test's v1 artifacts live on this checked-in, hash-pinned exemption list. New-schema strictness never silently rewrites what an old release attested.",
   "raw_manifests": [
     {
       "path": "data/raw_manifest/growthepie_2026-04-01.json",
@@ -640,14 +640,6 @@
       "path": "reports/validation/rollup_panel_validation.json",
       "schema_version": "None",
       "sha256": "9e2489263099da247582a775d0fb193baef76a108c6919e4a73809ae2c36d66c"
-    }
-  ],
-  "manuscripts": [
-    {
-      "path": "reports/paper/index.qmd",
-      "sha256": "50982a530dca8a9b74b7bc56d8b80b508da9777fdccc60503e09e966d5298b99",
-      "provenance_class": "battle_test_reference",
-      "note": "Frozen STR battle-test manuscript kept as the regression reference (plan \u00a710). It predates the claim-ledger / numeric-registration requirement, so its bare numerics are not retroactively registered. The M4 computed paper is a new artifact: any edit changes these bytes, the pin lapses, and gate_claim_evidence_ledger binds in full."
     }
   ]
 }

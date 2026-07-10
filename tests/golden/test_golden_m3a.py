@@ -105,6 +105,9 @@ def _claims(repo: GoldenRepo, claims: list[dict[str, object]]) -> None:
         "contracts/claims.yaml",
         {"schema_version": "research_swarm.claims.v1", "claims": claims},
     )
+    # Claim evidence must be git-tracked for the ledger's purity check (§6.5);
+    # stage everything written into the fixture so the gate sees real tracking.
+    repo.git("add", "-A")
 
 
 def _snapshot(*, retraction_status: str = "none") -> dict[str, object]:
@@ -185,10 +188,17 @@ class GoldenM3aTest(unittest.TestCase):
             _lock(repo, "2b", "# Plan\n\n- H1: Golden hypothesis\n")
             with chdir(repo.root):
                 self.assertFalse(quality_gates.gate_prereg_conformance().ok)
+            # A terminal outcome is only 'reported' when content-bound to
+            # committed manuscript/deviations text naming the hypothesis (§6.1).
+            write_text(
+                repo.root,
+                "reports/paper/deviations.md",
+                "# Deviations\n\nH1: not supported on the validated surface.\n",
+            )
             write_json(
                 repo.root,
                 "docs/prereg/outcomes.yaml",
-                {"schema_version": "research_swarm.prereg_outcomes.v1", "outcomes": [{"hypothesis_id": "H1", "outcome": "not_supported"}]},
+                {"schema_version": "research_swarm.prereg_outcomes.v1", "outcomes": [{"hypothesis_id": "H1", "outcome": "not_supported", "reported_in": "reports/paper/deviations.md"}]},
             )
             with chdir(repo.root):
                 self.assertTrue(quality_gates.gate_prereg_conformance().ok)
@@ -495,7 +505,11 @@ class GoldenM3aTest(unittest.TestCase):
     def test_GM3A_18_unregistered_numeric_blocks_then_registered_claim_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = GoldenRepo.create(tmp)
-            write_text(repo.root, "reports/paper/index.qmd", "# Results\n\nMean STR was 11.68%.\n")
+            write_text(
+                repo.root,
+                "reports/paper/index.qmd",
+                "# Results\n\nMean STR was 11.68% [@str_mean].\n",
+            )
             with chdir(repo.root):
                 red = quality_gates.gate_claim_evidence_ledger()
             self.assertFalse(red.ok)
@@ -503,8 +517,11 @@ class GoldenM3aTest(unittest.TestCase):
                 "unregistered_manuscript_numeric",
                 {item["reason"] for item in red.details["failures"]},
             )
+            # Occurrence-scoped registration: the numeric binds only because its
+            # line cites [@str_mean] AND a claim under that citation key owns it.
             claim = _claim(repo, claim_type="descriptive")
             claim["statement"] = "Mean STR was 11.68%."
+            claim["citation_key"] = "str_mean"
             _claims(repo, [claim])
             with chdir(repo.root):
                 green = quality_gates.gate_claim_evidence_ledger()

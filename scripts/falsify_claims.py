@@ -139,7 +139,12 @@ def evaluate_numeric_expression(expression: str, point: Mapping[str, float]) -> 
         raise NumericExpressionError(f"invalid expression syntax: {exc.msg}") from exc
     try:
         value = _evaluate_node(tree, point)
-    except (ArithmeticError, OverflowError) as exc:
+    except (ArithmeticError, OverflowError, ValueError, TypeError) as exc:
+        # ValueError: math-domain errors (sqrt(-1), log(0), log(-1)).
+        # TypeError: float() of a complex result, e.g. (-2.0) ** 0.5 or a
+        # builtin pow() that yields a complex — a kernel-sampled boundary point
+        # must degrade to a clean falsification error, never an uncaught
+        # traceback that wedges the whole gate suite.
         raise NumericExpressionError(f"numeric evaluation failed: {exc}") from exc
     if isinstance(value, float) and not math.isfinite(value):
         raise NumericExpressionError("expression returned a non-finite value")

@@ -26,7 +26,7 @@ Four protocol rules matter most for interpreting the paper [@protocol_lock]:
 - STR is computed daily in ETH-native units.
 - A panel row exists only when both `l2_fees_eth` and `rent_paid_eth` are present.
 - Dates on or after `2024-03-13` are post-Dencun.
-- Blob-fee-floor runs are post-Dencun stretches of at least `7` consecutive days where blob base fee stays within `1.05 x` the post-Dencun minimum.
+- Blob-fee-floor runs are post-Dencun stretches of at least `7` consecutive days where blob base fee stays within `1.05 x` the post-Dencun minimum [@protocol_lock].
 
 On the validated `2026-04-09` surface, the authoritative panel contains `12,434` rollup-day rows across `14` rollups and `1,559` dates, while the decomposition covers the full `2022-01-01` through `2026-04-08` daily window [@rollup_panel_validation; @l1_rent_decomposition_validation]. The manuscript therefore treats the release figures and regime table as direct downstream artifacts of the locked analysis path rather than restating results from untracked calculations.
 

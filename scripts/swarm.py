@@ -1161,7 +1161,9 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
     budget_raw = budgets.get("max_program_usd") if isinstance(budgets, dict) else None
     budget_max_program_usd = (
         float(budget_raw)
-        if isinstance(budget_raw, (int, float)) and not isinstance(budget_raw, bool)
+        if isinstance(budget_raw, (int, float))
+        and not isinstance(budget_raw, bool)
+        and math.isfinite(budget_raw)
         else None
     )
 
@@ -1502,12 +1504,35 @@ def _task_registered_claim_types(repo: Path, task: Task) -> set[str]:
     return claim_types
 
 
+_PREREG_PHASE_RANK = {"2a": 1, "2b": 2, "lock_a": 1, "lock_b": 2}
+
+
+def _more_advanced_phase(a: str | None, b: str | None) -> str | None:
+    """The later of two same-family prereg phases (2a<2b, lock_a<lock_b)."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if _PREREG_PHASE_RANK.get(a, 0) >= _PREREG_PHASE_RANK.get(b, 0) else b
+
+
 def _effective_required_active_lock(
     task: Task, contract: FrameworkContract
 ) -> str | None:
-    if "counterfactual" in _task_registered_claim_types(contract.repo_root, task):
-        return "lock_b"
-    return _required_active_lock(task, contract.project_mode or "empirical")
+    """The most-advanced prereg phase that must be ACTIVE before this task may
+    claim, accounting for the claim types it registers (§6.1). A registered
+    `counterfactual` claim requires Lock B; a registered `computational` claim
+    requires the experiment lock (Lock A in modeling/hybrid) regardless of
+    task_kind — so a modeling `proof` task cannot register a computational
+    claim pre-experiment-lock."""
+    mode = contract.project_mode or "empirical"
+    required = _required_active_lock(task, mode)
+    claim_types = _task_registered_claim_types(contract.repo_root, task)
+    if mode == "hybrid" and "counterfactual" in claim_types:
+        required = _more_advanced_phase(required, "lock_b")
+    if mode in {"modeling", "hybrid"} and "computational" in claim_types:
+        required = _more_advanced_phase(required, "lock_a")
+    return required
 
 
 def _prereg_phase_is_active(repo: Path, phase: str) -> bool:
@@ -2756,6 +2781,24 @@ def _clip_gate_output(output: str) -> tuple[str, str]:
     return head, tail
 
 
+def _strip_cli_option(argv: list[str], option: str) -> list[str]:
+    """Drop `option value` and `option=value` occurrences from an argv list.
+    Used to remove kernel-injected-only options an author tried to supply."""
+    out: list[str] = []
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token == option:
+            skip_next = True
+            continue
+        if token.startswith(option + "="):
+            continue
+        out.append(token)
+    return out
+
+
 def _run_gates(
     repo: Path,
     gates: list[str],
@@ -2803,13 +2846,20 @@ def _run_gates(
             all_ok = False
             continue
         if (
-            task_kind is not None
-            and len(argv) >= 2
+            len(argv) >= 2
             and argv[0] in {"python", "python3", sys.executable}
             and argv[1] == "scripts/quality_gates.py"
-            and "--task-kind" not in argv
         ):
-            argv.extend(["--task-kind", task_kind])
+            # --task-kind is kernel-injected AUTHORITY, never author-supplied:
+            # strip any value the task frontmatter smuggled in (which would let
+            # a task suppress its own science-gate form, e.g. a model task
+            # pinning --task-kind lit_review) and force the authoritative
+            # frontmatter kind. task_kind=None (no authoritative kind) leaves it
+            # unset → mode-default union, which is strictly safer than any
+            # author-narrowed kind.
+            argv = _strip_cli_option(argv, "--task-kind")
+            if task_kind is not None:
+                argv.extend(["--task-kind", task_kind])
         record["argv"] = argv
 
         interpreter = argv[0]
@@ -3189,19 +3239,55 @@ def cmd_lock_prereg(args: argparse.Namespace) -> int:
     if not isinstance(current_version, int) or isinstance(current_version, bool) or current_version < 0:
         print("preregistration lock_version must be a non-negative integer", file=sys.stderr)
         return 1
-    if args.amend and current_version >= 3:
-        _record_swarm_event(
-            repo,
-            {
-                "event": "amendment_cap_exceeded",
-                "phase": args.phase,
-                "lock_version": current_version,
-                "required_gate": "L3",
-            },
-            escalation=True,
-        )
-        print("amendment_cap_exceeded:L3_required", file=sys.stderr)
-        return 1
+    if args.amend:
+        # §6.1 amendment discipline: the cap is TWO PER PROGRAM (not per phase),
+        # counted from the append-only journal, and versions are monotonic — a
+        # hand-edited header rolled back below the journal's recorded version
+        # cannot launder a fresh amendment past the cap.
+        events, _ = swarm_events.read_events(repo)
+        program_amendment_count = 0
+        phase_journal_versions: list[int] = []
+        for event in events:
+            if not isinstance(event, dict) or event.get("event") != "prereg_amendment":
+                continue
+            program_amendment_count += 1
+            ev_version = event.get("lock_version")
+            if event.get("phase") == args.phase and isinstance(ev_version, int) and not isinstance(ev_version, bool):
+                phase_journal_versions.append(ev_version)
+        journal_max = max(phase_journal_versions, default=1)
+        if current_version < journal_max:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "amendment_header_rollback",
+                    "phase": args.phase,
+                    "header_version": current_version,
+                    "journal_max_version": journal_max,
+                    "required_gate": "L3",
+                },
+                escalation=True,
+            )
+            print(
+                f"amendment_header_rollback:{args.phase}:{current_version}<{journal_max}",
+                file=sys.stderr,
+            )
+            return 1
+        # Per-phase header ceiling (fast local defense) AND the program-wide
+        # journal cap (the authoritative §6.1 "two per program" limit).
+        if current_version >= 3 or program_amendment_count >= 2:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "amendment_cap_exceeded",
+                    "phase": args.phase,
+                    "lock_version": current_version,
+                    "program_amendment_count": program_amendment_count,
+                    "required_gate": "L3",
+                },
+                escalation=True,
+            )
+            print("amendment_cap_exceeded:L3_required", file=sys.stderr)
+            return 1
     body = lock.get("body")
     body_sha256 = lock.get("body_sha256")
     if not isinstance(body, str) or not isinstance(body_sha256, str):
@@ -7290,6 +7376,23 @@ def cmd_run_task(args: argparse.Namespace) -> int:
     force_deps = bool(getattr(args, "force_deps", False))
     if not dependencies_satisfied and not force_deps:
         raise SystemExit(f"dependencies_unsatisfied:{task.task_id}:{','.join(missing_dependencies)}")
+
+    # §6.1 preregistration boundary — the SAME predicate the supervise-loop
+    # funnel and Judge enforce, applied to the direct run-task entrypoint so a
+    # manual claim cannot bypass the lock (force_deps overrides dependency
+    # ordering only, never the prereg gate). Fails closed on claim AND resume.
+    required_lock = _effective_required_active_lock(task, contract)
+    if required_lock is not None and not _prereg_phase_is_active(repo, required_lock):
+        _record_swarm_event(
+            repo,
+            {
+                "event": "blocked_on_prereg_lock",
+                "task_id": task.task_id,
+                "phase": required_lock,
+                "entrypoint": "run-task",
+            },
+        )
+        raise SystemExit(f"blocked_on_prereg_lock:{task.task_id}:{required_lock}")
 
     _require_git_identity(cwd=repo, reason="runtime")
     _preflight_strict_sync_requirements(

@@ -173,10 +173,15 @@ class M3aScienceGateTest(unittest.TestCase):
             claim = _valid_claim(root, claim_type="causal")
             claim.update({"prereg_lock_sha256": digest, "hypothesis_id": "H1"})
             _write_claims(root, [claim])
+            write_text(
+                root,
+                "reports/paper/index.qmd",
+                "# Results\n\nH1 is supported on the validated surface.\n",
+            )
             write_json(
                 root,
                 "docs/prereg/outcomes.yaml",
-                {"schema_version": "research_swarm.prereg_outcomes.v1", "outcomes": [{"hypothesis_id": "H1", "outcome": "supported"}]},
+                {"schema_version": "research_swarm.prereg_outcomes.v1", "outcomes": [{"hypothesis_id": "H1", "outcome": "supported", "reported_in": "reports/paper/index.qmd"}]},
             )
             with chdir(root):
                 result = quality_gates.gate_prereg_conformance()
@@ -448,12 +453,13 @@ class M3aScienceGateTest(unittest.TestCase):
     def test_manuscript_numeric_must_be_registered_or_computed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._root(tmp)
-            write_text(root, "reports/paper/index.qmd", "# Results\n\nMean STR was 12.5%.\n")
+            write_text(root, "reports/paper/index.qmd", "# Results\n\nMean STR was 12.5% [@str_mean].\n")
             with chdir(root):
                 red = quality_gates.gate_claim_evidence_ledger()
             self.assertIn("unregistered_manuscript_numeric", _reasons(red))
             claim = _valid_claim(root, claim_type="descriptive")
             claim["statement"] = "Mean STR was 12.5%."
+            claim["citation_key"] = "str_mean"
             _write_claims(root, [claim])
             with chdir(root):
                 registered = quality_gates.gate_claim_evidence_ledger()

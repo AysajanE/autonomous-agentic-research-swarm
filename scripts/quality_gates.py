@@ -2974,6 +2974,25 @@ def _verify_claim_artifact(
                 actual=None,
             )
         ]
+    # §6.5 purity: claim evidence must be a non-symlink, in-repo, git-tracked
+    # regular file — otherwise the verdict depends on non-committed state (a
+    # symlink to an environment file recomputes differently per machine).
+    repo = Path.cwd().resolve()
+    resolved = path.resolve()
+    if (
+        path.is_symlink()
+        or repo not in resolved.parents
+        or not _git_path_is_tracked(path.as_posix(), repo)
+    ):
+        return [
+            _science_failure(
+                "artifact_not_tracked_regular_file",
+                subject=subject,
+                field=field,
+                expected="non-symlink, in-repo, git-tracked regular file",
+                actual=raw_path,
+            )
+        ]
     actual_sha, _ = _sha256_and_bytes(path)
     if actual_sha != expected_sha:
         return [
@@ -3183,6 +3202,36 @@ def _modeling_prereg_result(claims: list[dict[str, object]]) -> GateResult:
                     actual=recorded_hash,
                 )
             )
+    # §6.1 modeling: every locked proposition/conjecture must reach a terminal
+    # REPORTED outcome — a failed or negative conjecture cannot be silently
+    # dropped any more than an empirical hypothesis can.
+    proposition_ids = [
+        h["hypothesis_id"]
+        for h in (lock.get("hypotheses", []) if lock is not None else [])
+        if isinstance(h, dict) and isinstance(h.get("hypothesis_id"), str)
+    ]
+    if proposition_ids and lock is not None and lock.get("active") is True:
+        outcomes_by_id, outcome_failures = _load_prereg_outcomes()
+        failures.extend(outcome_failures)
+        for pid in sorted(set(proposition_ids)):
+            outcome = outcomes_by_id.get(pid)
+            if outcome is None:
+                failures.append(_science_failure("missing_proposition_outcome", subject=pid))
+                continue
+            if outcome.get("outcome") not in TERMINAL_HYPOTHESIS_OUTCOMES:
+                failures.append(
+                    _science_failure(
+                        "invalid_terminal_outcome",
+                        subject=pid,
+                        field="outcome",
+                        expected=sorted(TERMINAL_HYPOTHESIS_OUTCOMES),
+                        actual=outcome.get("outcome"),
+                    )
+                )
+            anchor_failure = _outcome_reported_anchor_failure(outcome, pid, pid)
+            if anchor_failure is not None:
+                failures.append(anchor_failure)
+
     if not applicable and lock is None:
         failures = [
             failure
@@ -3200,6 +3249,60 @@ def _modeling_prereg_result(claims: list[dict[str, object]]) -> GateResult:
             "failures": failures,
         },
     )
+
+
+def _outcome_reported_anchor_failure(
+    outcome: dict[str, object], identifier: str, subject: str
+) -> dict[str, object] | None:
+    """§6.1/§6.5: a terminal outcome is not 'reported' until it is content-bound
+    to committed manuscript or deviations-appendix text. `reported_in` must
+    resolve to a tracked in-repo file whose text contains the hypothesis/
+    proposition id (or the explicit #anchor). Prevents a negative or missing
+    result being silently dropped while `outcomes.yaml` self-asserts it."""
+    reported = outcome.get("reported_in")
+    if not isinstance(reported, str) or not reported.strip():
+        return _science_failure(
+            "outcome_missing_reported_in",
+            subject=subject,
+            field="reported_in",
+            expected="manuscript/deviations path that reports this outcome",
+        )
+    base, _, fragment = reported.partition("#")
+    safe = _safe_repo_relative_path(base.strip())
+    if safe is None or not safe.is_file():
+        return _science_failure(
+            "outcome_reported_in_unresolvable",
+            subject=subject,
+            field="reported_in",
+            actual=reported,
+        )
+    text = _read_text(safe)
+    anchor = fragment.strip() or identifier
+    if anchor not in text and identifier not in text:
+        return _science_failure(
+            "outcome_reported_in_missing_anchor",
+            subject=subject,
+            field="reported_in",
+            expected=f"'{anchor}' present in {safe.as_posix()}",
+        )
+    return None
+
+
+def _load_prereg_outcomes() -> tuple[dict[str, dict[str, object]], list[dict[str, object]]]:
+    """id -> outcome map from docs/prereg/outcomes.yaml (light loader for the
+    modeling proposition coverage check; the empirical path validates inline)."""
+    path = Path("docs/prereg/outcomes.yaml")
+    payload, error = _load_json_file(path)
+    if error is not None or payload is None:
+        return {}, [_science_failure("invalid_prereg_outcomes", subject=path.as_posix(), actual=error)]
+    raw = payload.get("outcomes")
+    if not isinstance(raw, list):
+        return {}, [_science_failure("outcomes_not_list", subject=path.as_posix(), field="outcomes", actual=raw)]
+    out: dict[str, dict[str, object]] = {}
+    for outcome in raw:
+        if isinstance(outcome, dict) and isinstance(outcome.get("hypothesis_id"), str):
+            out[outcome["hypothesis_id"]] = outcome
+    return out, []
 
 
 def gate_prereg_conformance(*, form: str | None = None) -> GateResult:
@@ -3382,6 +3485,11 @@ def gate_prereg_conformance(*, form: str | None = None) -> GateResult:
                                 field="reason",
                             )
                         )
+                    anchor_failure = _outcome_reported_anchor_failure(
+                        outcome, hypothesis_id, hypothesis_id
+                    )
+                    if anchor_failure is not None:
+                        failures.append(anchor_failure)
         for hypothesis_id in sorted(set(hypothesis_ids)):
             if hypothesis_id not in outcomes_by_id:
                 failures.append(
@@ -3475,6 +3583,44 @@ def gate_prereg_lock_coverage() -> GateResult:
                         actual=event.get(field),
                     )
                 )
+
+    # §6.1 amendment discipline (deterministic backstop to the CLI guard): the
+    # cap is two amendments PER PROGRAM, and per-phase amendment versions are
+    # strictly increasing in journal order — a rolled-back header + re-amend is
+    # caught here even if the CLI guard was bypassed or the journal hand-edited.
+    program_amendment_count = 0
+    amendment_versions_by_phase: dict[str, list[int]] = {}
+    for event in events:
+        if event.get("event") != "prereg_amendment":
+            continue
+        phase = event.get("phase")
+        if phase not in PREREG_PHASE_FILES:
+            continue
+        program_amendment_count += 1
+        version = event.get("lock_version")
+        if isinstance(version, int) and not isinstance(version, bool):
+            amendment_versions_by_phase.setdefault(str(phase), []).append(version)
+    if program_amendment_count > 2:
+        failures.append(
+            _science_failure(
+                "amendment_cap_exceeded_program",
+                subject="docs/prereg",
+                expected="<=2 amendments per program (§6.1)",
+                actual=program_amendment_count,
+            )
+        )
+    for phase, versions in amendment_versions_by_phase.items():
+        for earlier, later in zip(versions, versions[1:]):
+            if later <= earlier:
+                failures.append(
+                    _science_failure(
+                        "amendment_version_non_monotonic",
+                        subject=PREREG_PHASE_FILES[phase],
+                        expected=f">{earlier}",
+                        actual=later,
+                    )
+                )
+                break
 
     try:
         contract = load_framework_contract()
@@ -3691,11 +3837,20 @@ def gate_claim_evidence_ledger() -> GateResult:
                     )
                 )
             normalized_command = " ".join(command.strip().split())
-            if normalized_command in {
-                "make gate",
-                "python scripts/quality_gates.py",
-                "python3 scripts/quality_gates.py",
-            }:
+            command_tokens = normalized_command.split()
+            # Self-referential by parsed semantics, not three literal strings:
+            # any `make gate` target or any invocation of the gate runner itself
+            # (with or without flags like --json/--gate) cannot be a claim's
+            # independent verification.
+            is_self_referential = (
+                command_tokens[:2] == ["make", "gate"]
+                or (
+                    len(command_tokens) >= 2
+                    and command_tokens[0] in {"python", "python3"}
+                    and command_tokens[1] == "scripts/quality_gates.py"
+                )
+            )
+            if is_self_referential:
                 failures.append(
                     _science_failure(
                         "verification_command_self_referential",
@@ -3805,6 +3960,17 @@ def gate_claim_evidence_ledger() -> GateResult:
                         actual=evidence_scope,
                     )
                 )
+            elif claim.get("claim_id") in evidence_scope:
+                # An interpretation cannot rest on itself — a circular scope is
+                # semantically empty (§6.2 evidence-scope must list OTHER claims).
+                failures.append(
+                    _science_failure(
+                        "interpretation_evidence_scope_self_referential",
+                        subject=subject,
+                        field="evidence_scope",
+                        actual=claim.get("claim_id"),
+                    )
+                )
         elif claim_type == "theoretical":
             assumption_scope = claim.get("assumption_scope")
             if not isinstance(assumption_scope, str) or not assumption_scope.strip():
@@ -3885,35 +4051,30 @@ def gate_claim_evidence_ledger() -> GateResult:
 
     manuscript = Path("reports/paper/index.qmd")
     unregistered_numerics: list[dict[str, object]] = []
-    # Gate-scoping rule (M0 precedent): a manuscript hash-pinned on the
-    # historical exemption list is a frozen pre-ledger reference. The numeric
-    # registration requirement binds on NEW (computed, M4) manuscripts, not
-    # retroactively on the battle-test paper. A drifted exemption stops
-    # exempting — the pin must match the manuscript's current bytes.
-    manuscript_exempt = False
     if manuscript.is_file():
-        pinned = _historical_exemption_hashes("manuscripts").get(manuscript.as_posix())
-        if isinstance(pinned, str):
-            actual_sha, _ = _sha256_and_bytes(manuscript)
-            manuscript_exempt = actual_sha == pinned
-    if manuscript.is_file() and not manuscript_exempt:
         manuscript_text = _read_text(manuscript)
-        registered_literals: set[str] = set()
+        # Occurrence-scoped registration (§6.2 registered->evidenced floor). A
+        # reportable manuscript numeric is registered iff its line cites a
+        # [@key] whose claim OWNS that literal (in its statement or
+        # manuscript_numeric_literals). Literals are scoped PER citation key —
+        # a claim cannot whitelist a number on a line that does not cite it, so
+        # one benign claim can no longer launder unrelated headline numbers
+        # (the global value-equality hole). The full semantic asserted->
+        # registered sweep (paraphrase, claim typing) is the §5.3 M3b referee;
+        # numeric recompute-against-artifact is the M4 computed-value-key layer.
+        line_citations = _manuscript_line_citation_keys(manuscript_text)
+        literals_by_key: dict[str, set[str]] = {}
         for claim in claims:
-            statement = claim.get("statement")
-            if isinstance(statement, str):
-                registered_literals.update(
-                    item["normalized"] for item in _reportable_numeric_literals(statement)
-                )
-            explicit = claim.get("manuscript_numeric_literals")
-            if isinstance(explicit, list):
-                registered_literals.update(
-                    _normalize_reportable_numeric(value)
-                    for value in explicit
-                    if isinstance(value, (str, int, float)) and not isinstance(value, bool)
-                )
+            declared = _claim_declared_literals(claim)
+            for key in _claim_citation_keys(claim):
+                literals_by_key.setdefault(key, set()).update(declared)
         for item in _reportable_numeric_literals(manuscript_text):
-            if item["normalized"] not in registered_literals:
+            cited_keys = line_citations.get(item["line"], set())
+            bound = any(
+                item["normalized"] in literals_by_key.get(key, set())
+                for key in cited_keys
+            )
+            if not bound:
                 unregistered_numerics.append(item)
                 failures.append(
                     _science_failure(
@@ -3955,6 +4116,65 @@ def _normalize_reportable_numeric(value: object) -> str:
     return re.sub(r"\s+", "", str(value)).replace(",", "").casefold()
 
 
+_CITATION_KEY_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9_:.\-]*)")
+
+
+def _manuscript_line_citation_keys(text: str) -> dict[int, set[str]]:
+    """Map 1-based line number -> citation keys cited on that line
+    (`[@key]`, `[@k1; @k2]`), skipping frontmatter and fenced code."""
+    out: dict[int, set[str]] = {}
+    in_fence = False
+    in_frontmatter = text.startswith("---\n")
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if line_number == 1 and in_frontmatter:
+            continue
+        if in_frontmatter:
+            if stripped == "---":
+                in_frontmatter = False
+            continue
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        keys: set[str] = set()
+        for bracket in re.findall(r"\[@[^\]]+\]", raw_line):
+            keys.update(_CITATION_KEY_RE.findall(bracket))
+        if keys:
+            out[line_number] = keys
+    return out
+
+
+def _claim_citation_keys(claim: dict[str, object]) -> set[str]:
+    keys: set[str] = set()
+    single = claim.get("citation_key")
+    if isinstance(single, str) and single.strip():
+        keys.add(single.strip())
+    multiple = claim.get("citation_keys")
+    if isinstance(multiple, list):
+        keys.update(k.strip() for k in multiple if isinstance(k, str) and k.strip())
+    return keys
+
+
+def _claim_declared_literals(claim: dict[str, object]) -> set[str]:
+    """Normalized reportable numerics a claim owns — from its statement and its
+    explicit `manuscript_numeric_literals`. These bind ONLY on manuscript lines
+    that cite one of the claim's citation keys (occurrence scoping)."""
+    literals: set[str] = set()
+    statement = claim.get("statement")
+    if isinstance(statement, str):
+        literals.update(item["normalized"] for item in _reportable_numeric_literals(statement))
+    explicit = claim.get("manuscript_numeric_literals")
+    if isinstance(explicit, list):
+        literals.update(
+            _normalize_reportable_numeric(value)
+            for value in explicit
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool)
+        )
+    return literals
+
+
 def _reportable_numeric_literals(text: str) -> list[dict[str, object]]:
     results: list[dict[str, object]] = []
     in_fence = False
@@ -3974,6 +4194,9 @@ def _reportable_numeric_literals(text: str) -> list[dict[str, object]]:
             continue
         line = re.sub(r"\{\{.*?\}\}", " ", raw_line)
         line = re.sub(r"\[@[^\]]+\]", " ", line)
+        # fig-alt / alt accessibility text describes an image; it is not a
+        # reported-statistic channel, so its numerics are not manuscript claims.
+        line = re.sub(r"""\b(?:fig-)?alt\s*=\s*(?:"[^"]*"|'[^']*')""", " ", line)
         line = re.sub(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b", " ", line)
         line = line.replace("`", "")
         matches = list(_REPORTABLE_UNIT_RE.finditer(line))
@@ -5074,6 +5297,7 @@ def gate_gap_convergence() -> GateResult:
         if isinstance(spec, dict)
         and isinstance(spec.get("convergence_tolerance"), (int, float))
         and not isinstance(spec.get("convergence_tolerance"), bool)
+        and math.isfinite(spec["convergence_tolerance"])
         else None
     )
     for path in sorted(checked):
