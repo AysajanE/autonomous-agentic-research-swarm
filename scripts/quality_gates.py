@@ -1238,6 +1238,20 @@ def _validate_swarm_run_manifest(path: Path, contract: FrameworkContract) -> lis
         if provenance_class not in {"executor_run", "manual_operator", "backfill"}:
             failures.append(f"{path}:invalid_provenance_class:{provenance_class}")
 
+    if "claim" in payload:
+        claim = payload.get("claim")
+        failures.extend(
+            f"{path}:{failure}"
+            for failure in _validate_required_keys(claim, {"lease_id", "sha"}, "claim")
+        )
+        if isinstance(claim, dict):
+            lease_id = claim.get("lease_id")
+            if not isinstance(lease_id, int) or isinstance(lease_id, bool):
+                failures.append(f"{path}:claim:invalid_lease_id")
+            sha = claim.get("sha")
+            if not isinstance(sha, str) or not sha.strip():
+                failures.append(f"{path}:claim:invalid_sha")
+
     task = payload.get("task")
     failures.extend(
         f"{path}:{failure}"
