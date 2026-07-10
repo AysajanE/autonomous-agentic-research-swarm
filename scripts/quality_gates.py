@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -28,12 +29,16 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from swarm_taskfile import parse_status_value as _parse_status_value
 from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
+from sweep_tasks import plan_sweep as _plan_sweep
 
 
 SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
 SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
 JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
 JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1 = "research_swarm.judge_review_log.v1"
+PROCESSED_MANIFEST_SCHEMA_VERSION = "research_swarm.processed_manifest.v2"
+MANIFEST_REBASELINE_SCHEMA_VERSION = "research_swarm.manifest_rebaseline.v1"
+VALIDATION_REPORT_SCHEMA_VERSION = "research_swarm.validation_report.v2"
 
 DEFAULT_ALLOWED_STATES = (
     "backlog",
@@ -721,6 +726,424 @@ def _validate_required_keys(data: object, required_keys: set[str], prefix: str) 
     return failures
 
 
+def _sha256_and_bytes(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _hash_claim_failure(
+    *,
+    manifest: Path,
+    path: object,
+    reason: str,
+    expected: object,
+    actual: object,
+) -> dict[str, object]:
+    return {
+        "manifest": manifest.as_posix(),
+        "path": path,
+        "reason": reason,
+        "expected": expected,
+        "actual": actual,
+    }
+
+
+def _verify_hash_claim(
+    *,
+    manifest: Path,
+    entry: object,
+    mismatch_reason: str | None = None,
+) -> list[dict[str, object]]:
+    if not isinstance(entry, dict):
+        return [
+            _hash_claim_failure(
+                manifest=manifest,
+                path=None,
+                reason="invalid_manifest",
+                expected="entry object with path, sha256, and bytes",
+                actual=entry,
+            )
+        ]
+
+    rel_path = entry.get("path")
+    expected_sha = entry.get("sha256")
+    expected_bytes = entry.get("bytes")
+    if (
+        not isinstance(rel_path, str)
+        or not rel_path
+        or not isinstance(expected_sha, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
+        or not isinstance(expected_bytes, int)
+        or isinstance(expected_bytes, bool)
+        or expected_bytes < 0
+    ):
+        return [
+            _hash_claim_failure(
+                manifest=manifest,
+                path=rel_path,
+                reason="invalid_manifest",
+                expected="path string, sha256 hex digest, and non-negative integer bytes",
+                actual=entry,
+            )
+        ]
+
+    disk_path = Path(rel_path)
+    expected = {"sha256": expected_sha, "bytes": expected_bytes}
+    if not disk_path.is_file():
+        return [
+            _hash_claim_failure(
+                manifest=manifest,
+                path=rel_path,
+                reason=mismatch_reason or "missing_file",
+                expected=expected,
+                actual=None,
+            )
+        ]
+
+    actual_sha, actual_bytes = _sha256_and_bytes(disk_path)
+    actual = {"sha256": actual_sha, "bytes": actual_bytes}
+    if mismatch_reason is not None:
+        if actual != expected:
+            return [
+                _hash_claim_failure(
+                    manifest=manifest,
+                    path=rel_path,
+                    reason=mismatch_reason,
+                    expected=expected,
+                    actual=actual,
+                )
+            ]
+        return []
+
+    failures: list[dict[str, object]] = []
+    if actual_sha != expected_sha:
+        failures.append(
+            _hash_claim_failure(
+                manifest=manifest,
+                path=rel_path,
+                reason="sha256_mismatch",
+                expected=expected_sha,
+                actual=actual_sha,
+            )
+        )
+    if actual_bytes != expected_bytes:
+        failures.append(
+            _hash_claim_failure(
+                manifest=manifest,
+                path=rel_path,
+                reason="bytes_mismatch",
+                expected=expected_bytes,
+                actual=actual_bytes,
+            )
+        )
+    return failures
+
+
+def _invalid_rebaseline_failure(
+    *,
+    manifest: Path,
+    sidecar: Path,
+    expected: object,
+    actual: object,
+) -> dict[str, object]:
+    return _hash_claim_failure(
+        manifest=manifest,
+        path=sidecar.as_posix(),
+        reason="invalid_rebaseline",
+        expected=expected,
+        actual=actual,
+    )
+
+
+def _manifest_hash_gate(
+    *,
+    manifest_dir: Path,
+    entries_key: str,
+    allow_raw_evidence_unavailable: bool,
+) -> GateResult:
+    if not manifest_dir.exists():
+        return GateResult(ok=False, details={"failures": [f"missing_dir:{manifest_dir}"]})
+
+    failures: list[dict[str, object]] = []
+    annotations: list[dict[str, object]] = []
+    checked_entries = 0
+    manifest_paths = sorted(manifest_dir.glob("*.json"))
+
+    for manifest_path in manifest_paths:
+        payload, error = _load_json_file(manifest_path)
+        if error is not None or payload is None:
+            failures.append(
+                _hash_claim_failure(
+                    manifest=manifest_path,
+                    path=manifest_path.as_posix(),
+                    reason="invalid_manifest",
+                    expected="JSON object",
+                    actual=error,
+                )
+            )
+            continue
+
+        entries = payload.get(entries_key)
+        if not isinstance(entries, list):
+            failures.append(
+                _hash_claim_failure(
+                    manifest=manifest_path,
+                    path=manifest_path.as_posix(),
+                    reason="invalid_manifest",
+                    expected=f"{entries_key} list",
+                    actual=entries,
+                )
+            )
+            continue
+
+        checked_entries += len(entries)
+        sidecar_path = manifest_dir / "rebaselines" / f"{manifest_path.name}.rebaseline.json"
+        if not sidecar_path.exists():
+            for entry in entries:
+                failures.extend(_verify_hash_claim(manifest=manifest_path, entry=entry))
+            continue
+
+        sidecar, sidecar_error = _load_json_file(sidecar_path)
+        if sidecar_error is not None or sidecar is None:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected="valid rebaseline JSON object",
+                    actual=sidecar_error,
+                )
+            )
+            continue
+
+        required = {
+            "schema_version",
+            "rebaseline_of",
+            "original_manifest_sha256",
+            "mode",
+            "provenance_note",
+            "rebaselined_at_utc",
+        }
+        missing = sorted(required - set(sidecar))
+        expected_manifest_path = manifest_path.as_posix()
+        provenance_note = sidecar.get("provenance_note")
+        rebaselined_at = sidecar.get("rebaselined_at_utc")
+        common_errors: list[str] = []
+        if missing:
+            common_errors.append(f"missing_keys:{','.join(missing)}")
+        if sidecar.get("schema_version") != MANIFEST_REBASELINE_SCHEMA_VERSION:
+            common_errors.append("invalid_schema_version")
+        if sidecar.get("rebaseline_of") != expected_manifest_path:
+            common_errors.append("rebaseline_of_mismatch")
+        if not isinstance(provenance_note, str) or not provenance_note.strip():
+            common_errors.append("empty_provenance_note")
+        if not isinstance(rebaselined_at, str) or not rebaselined_at.strip():
+            common_errors.append("invalid_rebaselined_at_utc")
+
+        actual_manifest_sha, _ = _sha256_and_bytes(manifest_path)
+        if sidecar.get("original_manifest_sha256") != actual_manifest_sha:
+            common_errors.append("original_manifest_sha256_mismatch")
+
+        mode = sidecar.get("mode")
+        if mode not in {"recomputed_against_disk", "superseded", "raw_evidence_unavailable"}:
+            common_errors.append("invalid_mode")
+        if mode == "raw_evidence_unavailable" and not allow_raw_evidence_unavailable:
+            common_errors.append("raw_evidence_unavailable_not_allowed")
+
+        if common_errors:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected={
+                        "schema_version": MANIFEST_REBASELINE_SCHEMA_VERSION,
+                        "rebaseline_of": expected_manifest_path,
+                        "original_manifest_sha256": actual_manifest_sha,
+                    },
+                    actual={"errors": common_errors, "sidecar": sidecar},
+                )
+            )
+            continue
+
+        original_paths = {
+            entry.get("path")
+            for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+        }
+
+        if mode == "recomputed_against_disk":
+            rebaseline_entries = sidecar.get("entries")
+            if not isinstance(rebaseline_entries, list):
+                failures.append(
+                    _invalid_rebaseline_failure(
+                        manifest=manifest_path,
+                        sidecar=sidecar_path,
+                        expected="entries list for recomputed_against_disk",
+                        actual=rebaseline_entries,
+                    )
+                )
+                continue
+            rebaseline_paths = {
+                entry.get("path")
+                for entry in rebaseline_entries
+                if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+            }
+            if not original_paths.issubset(rebaseline_paths):
+                failures.append(
+                    _invalid_rebaseline_failure(
+                        manifest=manifest_path,
+                        sidecar=sidecar_path,
+                        expected={"paths_covering": sorted(original_paths)},
+                        actual={"paths": sorted(rebaseline_paths)},
+                    )
+                )
+                continue
+            stale_failures: list[dict[str, object]] = []
+            for entry in rebaseline_entries:
+                stale_failures.extend(
+                    _verify_hash_claim(
+                        manifest=manifest_path,
+                        entry=entry,
+                        mismatch_reason="rebaseline_stale",
+                    )
+                )
+            failures.extend(stale_failures)
+            if not stale_failures:
+                annotations.append(
+                    {
+                        "manifest": manifest_path.as_posix(),
+                        "mode": mode,
+                        "entries": len(rebaseline_entries),
+                    }
+                )
+            continue
+
+        if mode == "raw_evidence_unavailable":
+            unavailable_entries = sidecar.get("entries")
+            if unavailable_entries == "all":
+                unavailable_paths = original_paths
+            elif isinstance(unavailable_entries, list) and all(
+                isinstance(entry, dict) and isinstance(entry.get("path"), str)
+                for entry in unavailable_entries
+            ):
+                unavailable_paths = {entry["path"] for entry in unavailable_entries}
+            else:
+                failures.append(
+                    _invalid_rebaseline_failure(
+                        manifest=manifest_path,
+                        sidecar=sidecar_path,
+                        expected='entries "all" or list of path objects',
+                        actual=unavailable_entries,
+                    )
+                )
+                continue
+
+            annotated_entries = 0
+            for entry in entries:
+                entry_path = entry.get("path") if isinstance(entry, dict) else None
+                if entry_path in unavailable_paths:
+                    annotated_entries += 1
+                else:
+                    failures.extend(_verify_hash_claim(manifest=manifest_path, entry=entry))
+            if annotated_entries:
+                annotations.append(
+                    {
+                        "manifest": manifest_path.as_posix(),
+                        "mode": mode,
+                        "annotated": "raw_evidence_unavailable",
+                        "entries": annotated_entries,
+                    }
+                )
+            continue
+
+        superseded_by = sidecar.get("superseded_by")
+        if not isinstance(superseded_by, str) or not superseded_by:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected="non-empty superseded_by path",
+                    actual=superseded_by,
+                )
+            )
+            continue
+        superseding_path = Path(superseded_by)
+        superseding_payload, superseding_error = _load_json_file(superseding_path)
+        if superseding_error is not None or superseding_payload is None:
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected="existing superseding manifest JSON object",
+                    actual={"path": superseded_by, "error": superseding_error},
+                )
+            )
+            continue
+        superseding_entries = superseding_payload.get(entries_key)
+        if not isinstance(superseding_entries, list):
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected=f"superseding manifest {entries_key} list",
+                    actual=superseding_entries,
+                )
+            )
+            continue
+        superseding_paths = {
+            entry.get("path")
+            for entry in superseding_entries
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+        }
+        if not original_paths.issubset(superseding_paths):
+            failures.append(
+                _invalid_rebaseline_failure(
+                    manifest=manifest_path,
+                    sidecar=sidecar_path,
+                    expected={"paths_covering": sorted(original_paths)},
+                    actual={"paths": sorted(superseding_paths)},
+                )
+            )
+            continue
+        stale_failures = []
+        for entry in superseding_entries:
+            stale_failures.extend(
+                _verify_hash_claim(
+                    manifest=manifest_path,
+                    entry=entry,
+                    mismatch_reason="superseding_manifest_stale",
+                )
+            )
+        failures.extend(stale_failures)
+        if not stale_failures:
+            annotations.append(
+                {
+                    "manifest": manifest_path.as_posix(),
+                    "mode": mode,
+                    "superseded_by": superseded_by,
+                }
+            )
+
+    # Rule-level diagnostics stay, volume stays bounded: a fully deleted raw
+    # layer must not turn every gate run into a 135k-entry dump.
+    max_failure_details = 50
+    return GateResult(
+        ok=len(failures) == 0,
+        details={
+            "count": len(manifest_paths),
+            "checked_entries": checked_entries,
+            "annotations": annotations,
+            "failure_count": len(failures),
+            "failures": failures[:max_failure_details],
+            "failures_truncated": max(0, len(failures) - max_failure_details),
+        },
+    )
+
+
 def _matching_task_jsons(directory: Path, task_id: str) -> list[Path]:
     if not directory.exists():
         return []
@@ -1327,6 +1750,33 @@ def gate_processed_manifest_validity() -> GateResult:
             for failure in _validate_required_keys(transform, {"script_path", "git_sha", "command"}, "transform")
         )
 
+        if payload.get("schema_version") == PROCESSED_MANIFEST_SCHEMA_VERSION:
+            failures.extend(
+                f"{path}:{failure}"
+                for failure in _validate_required_keys(
+                    transform,
+                    {"script_sha256", "dirty"},
+                    "transform",
+                )
+            )
+            if isinstance(transform, dict):
+                script_sha = transform.get("script_sha256")
+                if not isinstance(script_sha, str) or re.fullmatch(r"[0-9a-f]{64}", script_sha) is None:
+                    failures.append(f"{path}:transform:invalid_script_sha256")
+                dirty = transform.get("dirty")
+                if not isinstance(dirty, bool):
+                    failures.append(f"{path}:transform:dirty_not_boolean")
+                elif dirty and not isinstance(transform.get("tree_diff"), str):
+                    failures.append(f"{path}:transform:dirty_without_tree_diff")
+
+            environment = payload.get("environment")
+            failures.extend(
+                f"{path}:{failure}"
+                for failure in _validate_required_keys(environment, {"dependencies"}, "environment")
+            )
+            if isinstance(environment, dict) and not isinstance(environment.get("dependencies"), dict):
+                failures.append(f"{path}:environment:dependencies_not_object")
+
         outputs = payload.get("outputs")
         if not isinstance(outputs, list):
             failures.append(f"{path}:outputs_not_list")
@@ -1343,6 +1793,109 @@ def gate_processed_manifest_validity() -> GateResult:
                     failures.append(f"{path}:outputs[{index}]:invalid_sha256")
 
     return GateResult(ok=len(failures) == 0, details={"count": len(manifest_paths), "failures": failures})
+
+
+def gate_processed_manifest_hashes() -> GateResult:
+    return _manifest_hash_gate(
+        manifest_dir=Path("data/processed_manifest"),
+        entries_key="outputs",
+        allow_raw_evidence_unavailable=False,
+    )
+
+
+def gate_raw_manifest_hashes() -> GateResult:
+    return _manifest_hash_gate(
+        manifest_dir=Path("data/raw_manifest"),
+        entries_key="files",
+        allow_raw_evidence_unavailable=True,
+    )
+
+
+def gate_validation_report_content_binding() -> GateResult:
+    report_dir = Path("reports/validation")
+    if not report_dir.exists():
+        return GateResult(ok=True, details={"skipped": True, "reason": "validation_report_dir_missing"})
+
+    failures: list[dict[str, object]] = []
+    legacy_reports = 0
+    v2_reports = 0
+    checked_inputs = 0
+    report_paths = sorted(report_dir.glob("*.json"))
+    for report_path in report_paths:
+        payload, error = _load_json_file(report_path)
+        if error is not None or payload is None:
+            failures.append(
+                {
+                    "report": report_path.as_posix(),
+                    "path": report_path.as_posix(),
+                    "reason": "invalid_validation_report",
+                    "expected": "JSON object",
+                    "actual": error,
+                    "message": "validation report is date-bound to data that has drifted",
+                }
+            )
+            continue
+        if payload.get("schema_version") != VALIDATION_REPORT_SCHEMA_VERSION:
+            legacy_reports += 1
+            continue
+
+        v2_reports += 1
+        status = payload.get("status")
+        inputs_consumed = payload.get("inputs_consumed")
+        if status not in {"pass", "fail"}:
+            failures.append(
+                {
+                    "report": report_path.as_posix(),
+                    "path": report_path.as_posix(),
+                    "reason": "invalid_status",
+                    "expected": ["fail", "pass"],
+                    "actual": status,
+                    "message": "validation report is date-bound to data that has drifted",
+                }
+            )
+        if not isinstance(inputs_consumed, list) or not inputs_consumed:
+            failures.append(
+                {
+                    "report": report_path.as_posix(),
+                    "path": report_path.as_posix(),
+                    "reason": "invalid_inputs_consumed",
+                    "expected": "non-empty list of path, sha256, and bytes objects",
+                    "actual": inputs_consumed,
+                    "message": "validation report is date-bound to data that has drifted",
+                }
+            )
+            continue
+
+        checked_inputs += len(inputs_consumed)
+        for entry in inputs_consumed:
+            claim_failures = _verify_hash_claim(manifest=report_path, entry=entry)
+            for failure in claim_failures:
+                failure["report"] = failure.pop("manifest")
+                failure["message"] = "validation report is date-bound to data that has drifted"
+            failures.extend(claim_failures)
+
+    return GateResult(
+        ok=len(failures) == 0,
+        details={
+            "count": len(report_paths),
+            "v2_reports": v2_reports,
+            "legacy_reports": legacy_reports,
+            "checked_inputs": checked_inputs,
+            "failures": failures,
+        },
+    )
+
+
+def gate_projection_drift() -> GateResult:
+    moves, problems = _plan_sweep(Path(".").resolve())
+    serialized_moves = [
+        {"source": source.as_posix(), "target": target.as_posix()}
+        for source, target in moves
+    ]
+    return GateResult(
+        ok=not moves and not problems,
+        details={"moves": serialized_moves, "problems": problems},
+    )
 
 
 def gate_swarm_run_manifest_validity() -> GateResult:
@@ -1514,6 +2067,10 @@ def _collect_gate_results() -> dict[str, GateResult]:
         "swarm_run_manifest_validity": gate_swarm_run_manifest_validity(),
         "judge_review_log_validity": gate_judge_review_log_validity(),
         "review_bundle_integrity": gate_review_bundle_integrity(),
+        "processed_manifest_hashes": gate_processed_manifest_hashes(),
+        "raw_manifest_hashes": gate_raw_manifest_hashes(),
+        "validation_report_content_binding": gate_validation_report_content_binding(),
+        "projection_drift": gate_projection_drift(),
     }
 
 
