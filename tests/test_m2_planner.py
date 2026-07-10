@@ -345,7 +345,12 @@ class M2PlannerTests(unittest.TestCase):
             root = self._root(tmp)
             first = _render_task(root, "T905")
             second = _render_task(root, "T906")
-            planned_workstreams = "# Workstreams\n\nPlanner launch pass.\n"
+            planned_workstreams = (
+                "# Workstreams\n\n"
+                "| Workstream | Purpose | Owns paths | Does NOT own |\n"
+                "|---|---|---|---|\n"
+                "| W1 | Off-chain ETL | src/etl/ | reports/paper/ |\n"
+            )
             _write_mock_planner(
                 root,
                 "launch",

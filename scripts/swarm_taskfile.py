@@ -777,6 +777,20 @@ def lint_task_files(
                         value,
                     )
 
+        hypothesis_ids = frontmatter.get("hypothesis_ids")
+        if hypothesis_ids is not None:
+            if not isinstance(hypothesis_ids, list) or not all(
+                isinstance(item, str) and item.strip() for item in hypothesis_ids
+            ):
+                _diagnostic(
+                    diagnostics,
+                    task,
+                    "hypothesis_ids",
+                    "invalid_hypothesis_ids",
+                    "list of non-empty hypothesis id strings",
+                    hypothesis_ids,
+                )
+
         gates = frontmatter.get("gates")
         if not isinstance(gates, list) or not gates:
             _diagnostic(diagnostics, task, "gates", "invalid_gates", "non-empty list", gates)
@@ -899,6 +913,22 @@ def lint_task_files(
                     "at least one valid input with comparison_basis: true",
                     comparison_hashes,
                 )
+            def _input_ref(item: object) -> str | None:
+                if not isinstance(item, dict):
+                    return None
+                for key in TASK_INPUT_REFERENCE_KEYS:
+                    ref = _string(item.get(key))
+                    if ref is not None:
+                        return ref
+                return None
+
+            comparison_paths = {
+                ref
+                for item in (fields.inputs or ())
+                if isinstance(item, dict)
+                and _bool(item.get("comparison_basis")) is True
+                and (ref := _input_ref(item)) is not None
+            }
             if fields.constructed_by in tasks_by_id and comparison_hashes:
                 construction_fields = TaskV2Fields(tasks_by_id[fields.constructed_by])
                 construction_hashes = {
@@ -906,6 +936,11 @@ def lint_task_files(
                     for item in (construction_fields.inputs or ())
                     if (digest := _string(item.get("sha256"))) is not None
                     and _SHA256_RE.fullmatch(digest) is not None
+                }
+                construction_paths = {
+                    ref
+                    for item in (construction_fields.inputs or ())
+                    if (ref := _input_ref(item)) is not None
                 }
                 if not construction_hashes:
                     _diagnostic(
@@ -916,15 +951,27 @@ def lint_task_files(
                         "referenced task with hash-declared inputs",
                         fields.constructed_by,
                     )
-                elif overlap := sorted(set(comparison_hashes) & construction_hashes):
-                    _diagnostic(
-                        diagnostics,
-                        task,
-                        "inputs",
-                        "comparison_basis_not_disjoint",
-                        "all comparison-basis sha256 values absent from construction inputs",
-                        overlap,
-                    )
+                else:
+                    if overlap := sorted(set(comparison_hashes) & construction_hashes):
+                        _diagnostic(
+                            diagnostics,
+                            task,
+                            "inputs",
+                            "comparison_basis_not_disjoint",
+                            "all comparison-basis sha256 values absent from construction inputs",
+                            overlap,
+                        )
+                    # C6: same underlying artifact under different declared
+                    # hashes is not independence — the PATH must differ too
+                    if path_overlap := sorted(comparison_paths & construction_paths):
+                        _diagnostic(
+                            diagnostics,
+                            task,
+                            "inputs",
+                            "comparison_basis_path_not_disjoint",
+                            "comparison-basis input paths absent from construction inputs",
+                            path_overlap,
+                        )
 
     return diagnostics
 

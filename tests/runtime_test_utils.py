@@ -405,6 +405,7 @@ def write_task(
     recon_waiver: str | None = None,
     inputs: list[dict[str, object]] | None = None,
     constructed_by: str | None = None,
+    extra_frontmatter: dict[str, object] | None = None,
 ) -> Path:
     if schema not in {"v1", "v2"}:
         raise ValueError(f"unsupported task fixture schema: {schema}")
@@ -449,6 +450,14 @@ def write_task(
                 f"recon_required: {'true' if recon_required else 'false'}",
                 *([f'recon_waiver: "{recon_waiver}"'] if recon_waiver is not None else []),
                 *([f'constructed_by: "{constructed_by}"'] if constructed_by is not None else []),
+                *(
+                    [
+                        (f"{k}:\n" + "".join(f"  - {item}\n" for item in v)).rstrip()
+                        if isinstance(v, list)
+                        else f"{k}: {v}"
+                        for k, v in (extra_frontmatter or {}).items()
+                    ]
+                ),
                 _emit_mapping_list("inputs", inputs),
             ]
         )

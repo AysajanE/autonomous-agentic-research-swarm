@@ -202,5 +202,158 @@ class ReadOnlyPlannerArgvTest(unittest.TestCase):
             self.assertIn("--strict-mcp-config", argv)
 
 
+
+class ProposalIntegrityTest(unittest.TestCase):
+    """C5/C6/C10 — proposal-level integrity the reviewers demanded."""
+
+    def test_duplicate_task_id_proposal_is_refused(self) -> None:
+        # C5: a create_task whose frontmatter task_id collides with an
+        # existing task is refused (cannot brick the real task)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            write_task(root, "done", "T500", state="done", **_v2_task_kwargs())
+            init_git_fixture_repo(root)
+            args = _supervise_args()
+            proposals = [
+                {
+                    "action": "create_task",
+                    "path": ".orchestrator/backlog/T500_shadow.md",
+                    "content": _minimal_v2_task("T500", "shadow"),
+                }
+            ]
+            with _fixture_root(root):
+                summary = swarm._apply_planner_proposals(
+                    mode="launch", proposals=proposals, repo=root, args=args
+                )
+            outcome = summary["outcomes"][0]
+            self.assertEqual(outcome["status"], "refused")
+            self.assertTrue(str(outcome["reason"]).startswith("planner_task_id_not_unique"))
+
+    def test_task_id_filename_mismatch_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            init_git_fixture_repo(root)
+            proposals = [
+                {
+                    "action": "create_task",
+                    "path": ".orchestrator/backlog/T901_x.md",
+                    "content": _minimal_v2_task("T902", "x"),
+                }
+            ]
+            with _fixture_root(root):
+                summary = swarm._apply_planner_proposals(
+                    mode="launch", proposals=proposals, repo=root, args=_supervise_args()
+                )
+            self.assertTrue(
+                str(summary["outcomes"][0]["reason"]).startswith("planner_task_id_filename_mismatch")
+            )
+
+    def test_update_workstreams_rejects_invalid_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            init_git_fixture_repo(root)
+            proposals = [{"action": "update_workstreams", "content": "just prose, no rows"}]
+            with _fixture_root(root):
+                summary = swarm._apply_planner_proposals(
+                    mode="launch", proposals=proposals, repo=root, args=_supervise_args()
+                )
+            self.assertEqual(summary["outcomes"][0]["reason"], "planner_workstreams_content_invalid")
+
+    def test_validation_same_path_different_hash_rejected(self) -> None:
+        # C6: same underlying artifact under two fake hashes is not independence
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_runtime_repo(root)
+            write_task(
+                root, "backlog", "T100", schema="v2", task_kind="etl", complexity_tier="S",
+                gates=["python scripts/noop_gate.py"], outputs=["data/processed/panel.csv"],
+                inputs=[{"manifest": "data/raw_manifest/src.json", "sha256": "a" * 64}],
+            )
+            write_task(
+                root, "backlog", "T101", schema="v2", task_kind="validation", complexity_tier="S",
+                gates=["python scripts/noop_gate.py"], outputs=["reports/validation/v.json"],
+                constructed_by="T100",
+                inputs=[{"manifest": "data/raw_manifest/src.json", "sha256": "b" * 64, "comparison_basis": True}],
+            )
+            from runtime_test_utils import chdir
+            with chdir(root):
+                result = quality_gates.gate_task_lint()
+            reasons = {f["reason"] for f in result.details["failures"]}
+            self.assertIn("comparison_basis_path_not_disjoint", reasons)
+
+
+class HypothesisGuardTest(unittest.TestCase):
+    def test_split_of_hypothesis_linked_task_escalates(self) -> None:
+        # C11: list-field hypothesis_ids is honored by the retirement guard
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            scaffold_runtime_repo(root)
+            write_task(
+                root, "backlog", "T300", schema="v2", task_kind="analysis",
+                complexity_tier="S", gates=["python scripts/noop_gate.py"],
+                outputs=["reports/tables/t.csv"],
+                extra_frontmatter={"hypothesis_ids": ["H1"]},
+            )
+            init_git_fixture_repo(root)
+            proposals = [{
+                "action": "split_task", "task_id": "T300",
+                "into": [{"path": ".orchestrator/backlog/T301_a.md", "content": _minimal_v2_task("T301", "a")}],
+            }]
+            with _fixture_root(root):
+                summary = swarm._apply_planner_proposals(
+                    mode="replan", proposals=proposals, repo=root, args=_supervise_args()
+                )
+            self.assertEqual(summary["outcomes"][0]["reason"], "hypothesis_retirement_requires_human")
+            self.assertTrue((root / ".orchestrator/backlog/T300_task.md").exists())
+
+
+def _minimal_v2_task(task_id: str, slug: str) -> str:
+    return (
+        "---\n"
+        "task_schema: research_swarm.task.v2\n"
+        f"task_id: {task_id}\n"
+        f"title: {slug}\n"
+        "workstream: W1\n"
+        "task_kind: etl\n"
+        "complexity_tier: S\n"
+        "role: Worker\n"
+        "priority: medium\n"
+        "allow_network: false\n"
+        "recon_required: false\n"
+        "recon_waiver: S-tier bounded\n"
+        "dependencies: []\n"
+        "integration_ready_dependencies: []\n"
+        "success_criteria:\n"
+        "  - id: SC1\n"
+        "    statement: does the thing\n"
+        "    verification: python scripts/noop_gate.py\n"
+        "budgets:\n"
+        "  max_wall_clock: 1h\n"
+        "  max_tokens: 100000\n"
+        "  max_cost_usd: 5\n"
+        "inputs: []\n"
+        "allowed_paths:\n"
+        "  - src/etl/\n"
+        "disallowed_paths:\n"
+        "  - contracts/\n"
+        "outputs:\n"
+        "  - src/etl/x.py\n"
+        "gates:\n"
+        "  - python scripts/noop_gate.py\n"
+        "stop_conditions:\n"
+        "  - ambiguous\n"
+        "---\n\n"
+        f"# Task {task_id}\n\n## Context\nx\n\n## Inputs\nx\n\n## Outputs\nx\n\n"
+        "## Success Criteria\n- [ ] SC1\n\n## Review Bundle Requirements\n- [ ] x\n\n"
+        "## Validation / Commands\n- python scripts/noop_gate.py\n\n"
+        "## Reconnaissance\n- none (S-tier waived)\n\n"
+        "## Status\n- State: backlog\n- Last updated: 2026-07-10\n\n"
+        "## Notes / Decisions\n- 2026-07-10: created.\n"
+    )
+
+
 if __name__ == "__main__":
     unittest.main()

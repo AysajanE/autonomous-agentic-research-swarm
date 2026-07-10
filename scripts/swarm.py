@@ -82,6 +82,7 @@ EXECUTOR_LOG_SEGMENT_BYTES = 64 * 1024
 EXECUTOR_SESSION_SEGMENT_BYTES = 16 * 1024
 
 DEFAULT_REVIEW_MIN_SEPARATION_SECONDS = 60
+DEFAULT_REPLAN_FAILURE_THRESHOLD = 2
 DEFAULT_REPAIR_MAX_ATTEMPTS = 2
 DEFAULT_MAX_READY_FOR_REVIEW = 4
 
@@ -161,6 +162,7 @@ class FrameworkContract:
     gate_interpreter_allowlist: tuple[str, ...]
     gate_timeout_seconds: int
     repair_max_attempts: int
+    replan_failure_threshold: int
     wip_max_active: int | None
     wip_max_ready_for_review: int
     budget_max_program_usd: float | None
@@ -1132,6 +1134,12 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
     except (TypeError, ValueError):
         repair_max_attempts = DEFAULT_REPAIR_MAX_ATTEMPTS
     repair_max_attempts = max(0, repair_max_attempts)
+    replan = raw.get("replan") if isinstance(raw.get("replan"), dict) else {}
+    try:
+        replan_failure_threshold = int(replan.get("failure_threshold"))
+    except (TypeError, ValueError):
+        replan_failure_threshold = DEFAULT_REPLAN_FAILURE_THRESHOLD
+    replan_failure_threshold = max(1, replan_failure_threshold)
 
     wip = raw.get("wip")
     try:
@@ -1186,6 +1194,7 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
         gate_interpreter_allowlist=gate_interpreter_allowlist,
         gate_timeout_seconds=gate_timeout_seconds,
         repair_max_attempts=repair_max_attempts,
+        replan_failure_threshold=replan_failure_threshold,
         wip_max_active=wip_max_active,
         wip_max_ready_for_review=wip_max_ready_for_review,
         budget_max_program_usd=budget_max_program_usd,
@@ -1398,10 +1407,12 @@ def _task_triage_reasons(task: Task, tasks: dict[str, Task]) -> list[str]:
     backlog_peers = sorted(
         candidate.task_id
         for candidate in tasks.values()
-        if candidate.state == "backlog" and candidate.workstream == task.workstream
+        if candidate.state == "backlog"
+        and candidate.workstream == task.workstream
+        and candidate.task_kind == task.task_kind
     )
     if backlog_peers and backlog_peers[0] == task.task_id:
-        reasons.append("first_in_workstream")
+        reasons.append("first_of_kind_in_workstream")
     return reasons
 
 
@@ -1412,8 +1423,11 @@ def _task_has_planner_triage(task: Task) -> bool:
     status = triage.get("status")
     by = triage.get("by")
     note = triage.get("note")
+    # Only CONFIRMED satisfies claimability: a task marked `split` is a
+    # decomposition that must be APPLIED (parent removed, children created)
+    # — a lingering split-labelled task is unresolved, never claimable (C8).
     return (
-        status in {"confirmed", "split"}
+        status == "confirmed"
         and by == "planner"
         and isinstance(note, str)
         and bool(note.strip())
@@ -1535,17 +1549,31 @@ def _build_prompt_context(task: Task, repo: Path, repair_context: str | None) ->
     }
 
 
+_RECON_PLACEHOLDER_PREFIXES = (
+    "- Scope understanding:",
+    "- Risks and unknowns:",
+    "- Decomposition pressure assessment:",
+    "- Proposed bounded approach:",
+)
+
+
 def _reconnaissance_line_count(task_text: str) -> int:
     section = _extract_section(task_text, "Reconnaissance")
     if section is None:
         return 0
-    return sum(
-        1
-        for line in section.splitlines()
-        if line.strip()
-        and line.strip() not in {"-", "*"}
-        and not line.strip().startswith("<!--")
-    )
+    count = 0
+    for raw in section.splitlines():
+        line = raw.strip()
+        if not line or line in {"-", "*"} or line.startswith("<!--"):
+            continue
+        # a bare template label ("- Risks and unknowns:") with nothing after
+        # the colon is a placeholder, not reconnaissance (C7)
+        if any(line == prefix or line.rstrip() == prefix for prefix in _RECON_PLACEHOLDER_PREFIXES):
+            continue
+        if line.endswith(":") and any(line.startswith(prefix[:-1]) for prefix in _RECON_PLACEHOLDER_PREFIXES):
+            continue
+        count += 1
+    return count
 
 
 def _git_current_branch(cwd: Path) -> str:
@@ -3308,16 +3336,21 @@ def _planner_lint_diagnostics(
         v1_exemptions=_load_v1_task_exemptions(repo),
         task_texts=task_texts,
     )
-    labels: set[str] = set()
-    relpaths = {_planner_repo_relpath(repo, path) for path in changed_paths}
-    for path in changed_paths:
-        frontmatter = _parse_task_frontmatter(task_texts.get(path, ""))
-        if isinstance(frontmatter, dict) and isinstance(frontmatter.get("task_id"), str):
-            labels.add(frontmatter["task_id"])
+    # baseline diagnostics with NO proposed changes: any diagnostic present in
+    # the proposed set but absent from baseline is a regression this batch
+    # introduced (e.g. a split orphaning a validation task's constructed_by
+    # link) — reject the whole proposal, not just its changed children (C9).
+    baseline = lint_task_files(
+        sorted(path for path in _iter_task_files(contract)),
+        repo_root=repo,
+        network_workstreams=contract.network_workstreams,
+        v1_exemptions=_load_v1_task_exemptions(repo),
+    )
+    baseline_keys = {(d.task, d.field, d.reason) for d in baseline}
     return [
         diagnostic.as_dict()
         for diagnostic in diagnostics
-        if diagnostic.task in labels or diagnostic.task in relpaths
+        if (diagnostic.task, diagnostic.field, diagnostic.reason) not in baseline_keys
     ]
 
 
@@ -3373,6 +3406,59 @@ def _persist_planner_changes(
     return True
 
 
+def _task_hypothesis_links(frontmatter: object) -> list[str]:
+    """Resolve hypothesis links from a task's frontmatter — list field
+    hypothesis_ids (canonical, linted) plus the legacy scalar hypothesis_id
+    (C11). Preregistration-artifact linkage is M3a; recorded forward."""
+    if not isinstance(frontmatter, dict):
+        return []
+    links: list[str] = []
+    raw_list = frontmatter.get("hypothesis_ids")
+    if isinstance(raw_list, list):
+        links.extend(str(item).strip() for item in raw_list if str(item).strip())
+    scalar = frontmatter.get("hypothesis_id")
+    if isinstance(scalar, str) and scalar.strip():
+        links.append(scalar.strip())
+    return links
+
+
+def _workstreams_content_valid(content: str) -> bool:
+    """A proposed workstreams.md must have at least one well-formed workstream
+    row (| W# | purpose | owns | not-owns |...) — mirrors
+    gate_workstreams_complete so a poisoned proposal cannot erase the
+    coordination contract (C10)."""
+    rows = 0
+    for line in content.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 4 and re.fullmatch(r"W\d+", cells[0]) and all(cells[1:4]):
+            rows += 1
+    return rows >= 1
+
+
+def _existing_task_ids(contract: FrameworkContract) -> set[str]:
+    ids: set[str] = set()
+    for path in _iter_task_files(contract):
+        frontmatter = _parse_task_frontmatter(_read_text(path))
+        if isinstance(frontmatter, dict) and isinstance(frontmatter.get("task_id"), str):
+            ids.add(frontmatter["task_id"])
+    return ids
+
+
+def _proposed_task_id_error(
+    *, path: Path, content: str, existing_ids: set[str], batch_ids: set[str]
+) -> str | None:
+    frontmatter = _parse_task_frontmatter(content)
+    declared = frontmatter.get("task_id") if isinstance(frontmatter, dict) else None
+    filename_id = _parse_task_id_from_branch(path.stem)
+    if not isinstance(declared, str) or re.fullmatch(r"T\d{3}", declared) is None:
+        return "planner_task_id_invalid"
+    if filename_id != declared:
+        return f"planner_task_id_filename_mismatch:{filename_id}:{declared}"
+    if declared in existing_ids or declared in batch_ids:
+        return f"planner_task_id_not_unique:{declared}"
+    return None
+
+
 def _apply_planner_proposals(
     *,
     mode: str,
@@ -3417,6 +3503,8 @@ def _apply_planner_proposals(
     workstreams_text: str | None = None
     outcomes: list[dict[str, object]] = []
     split_events: list[dict[str, object]] = []
+    existing_task_ids = _existing_task_ids(contract)
+    batch_task_ids: set[str] = set()
 
     for index, proposal in enumerate(proposals):
         task_texts_before = dict(task_texts)
@@ -3441,12 +3529,28 @@ def _apply_planner_proposals(
                 outcome["reason"] = "planner_task_already_exists"
                 outcomes.append(outcome)
                 continue
+            deleted_ids = {
+                _parse_task_id_from_branch(dp.stem) for dp in deleted_paths
+            }
+            id_error = _proposed_task_id_error(
+                path=path,
+                content=content,
+                existing_ids=existing_task_ids - {i for i in deleted_ids if i},
+                batch_ids=batch_task_ids,
+            )
+            if id_error is not None:
+                outcome["reason"] = id_error
+                outcomes.append(outcome)
+                continue
+            declared_id = _parse_task_id_from_branch(path.stem)
+            if declared_id:
+                batch_task_ids.add(declared_id)
             task_texts[path] = content
             changed_paths.add(path)
 
         elif action == "update_workstreams":
             content = proposal.get("content")
-            if not isinstance(content, str) or not content.strip():
+            if not isinstance(content, str) or not content.strip() or not _workstreams_content_valid(content):
                 outcome["reason"] = "planner_workstreams_content_invalid"
                 outcomes.append(outcome)
                 continue
@@ -3485,12 +3589,9 @@ def _apply_planner_proposals(
             parent_frontmatter = _parse_task_frontmatter(
                 task_texts.get(parent, _read_text(parent))
             )
-            hypothesis_id = (
-                parent_frontmatter.get("hypothesis_id")
-                if isinstance(parent_frontmatter, dict)
-                else None
-            )
-            if isinstance(hypothesis_id, str) and hypothesis_id.strip():
+            hypothesis_links = _task_hypothesis_links(parent_frontmatter)
+            hypothesis_id = hypothesis_links[0] if hypothesis_links else None
+            if hypothesis_links:
                 outcome["reason"] = "hypothesis_retirement_requires_human"
                 outcomes.append(outcome)
                 _record_swarm_event(
@@ -3523,10 +3624,19 @@ def _apply_planner_proposals(
                 if path.exists() or path in task_texts or path in child_paths:
                     child_error = "planner_task_already_exists"
                     break
-                frontmatter = _parse_task_frontmatter(content)
-                child_id = frontmatter.get("task_id") if isinstance(frontmatter, dict) else None
-                if not isinstance(child_id, str) or re.fullmatch(r"T\d{3}", child_id) is None:
-                    child_error = "planner_split_child_task_id_invalid"
+                parent_id = _parse_task_id_from_branch(parent.stem)
+                deleted_ids = {
+                    _parse_task_id_from_branch(dp.stem) for dp in deleted_paths
+                } | ({parent_id} if parent_id else set())
+                id_error = _proposed_task_id_error(
+                    path=path,
+                    content=content,
+                    existing_ids=existing_task_ids - {i for i in deleted_ids if i},
+                    batch_ids=batch_task_ids | set(child_ids),
+                )
+                child_id = _parse_task_id_from_branch(path.stem)
+                if id_error is not None or child_id == parent_id:
+                    child_error = id_error or "planner_split_child_reuses_parent_id"
                     break
                 child_paths.append(path)
                 child_ids.append(child_id)
@@ -3659,6 +3769,21 @@ def _plan_program_context(repo: Path, contract: FrameworkContract) -> dict[str, 
     }
 
 
+def _plan_content_digest(repo: Path) -> str:
+    """Digest of the exact plan surface an approval binds to: every backlog
+    task file plus workstreams.md, content-hashed (C4)."""
+    parts: list[str] = []
+    backlog_dir = repo / ".orchestrator" / "backlog"
+    if backlog_dir.is_dir():
+        for path in sorted(backlog_dir.glob("*.md")):
+            parts.append(path.name)
+            parts.append(hashlib.sha256(path.read_bytes()).hexdigest())
+    workstreams = repo / ".orchestrator" / "workstreams.md"
+    if workstreams.is_file():
+        parts.append(hashlib.sha256(workstreams.read_bytes()).hexdigest())
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
 def cmd_plan_program(args: argparse.Namespace) -> int:
     repo = _repo_root()
     contract = load_framework_contract(repo)
@@ -3686,6 +3811,8 @@ def cmd_plan_program(args: argparse.Namespace) -> int:
                     "created_at_utc": _utc_now_iso(),
                     "planner_backend": getattr(args, "planner_backend", "mock"),
                     "proposal_count": len(outcome.proposals),
+                    "base_sha": _git_head_sha(repo),
+                    "plan_digest": _plan_content_digest(repo),
                 },
             )
             approval_pending = True
@@ -3741,6 +3868,33 @@ def cmd_approve_plan(args: argparse.Namespace) -> int:
             )
         )
         return 1
+    try:
+        pending = json.loads(_read_text(pending_path))
+    except (OSError, json.JSONDecodeError):
+        pending = {}
+    recorded_digest = pending.get("plan_digest")
+    current_digest = _plan_content_digest(repo)
+    if isinstance(recorded_digest, str) and recorded_digest != current_digest:
+        # the plan changed after it was proposed — approval of DIFFERENT
+        # content must not succeed (C4)
+        _record_swarm_event(
+            repo,
+            {
+                "event": "plan_approval_drift_refused",
+                "approved_by": args.approved_by,
+                "recorded_digest": recorded_digest,
+                "current_digest": current_digest,
+            },
+            escalation=True,
+        )
+        print(
+            json.dumps(
+                {"status": "plan_drift_refused", "approved_by": args.approved_by},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 1
     pending_path.unlink()
     _record_swarm_event(
         repo,
@@ -3748,6 +3902,7 @@ def cmd_approve_plan(args: argparse.Namespace) -> int:
             "event": "plan_approved",
             "approved_by": args.approved_by,
             "pending_path": PLAN_APPROVAL_PENDING_PATH.as_posix(),
+            "plan_digest": current_digest,
         },
     )
     print(
@@ -6093,6 +6248,19 @@ def _planner_replan_contexts(repo: Path) -> dict[str, dict[str, object]]:
     return contexts
 
 
+def _replan_fingerprint(*, task_id: str, trigger: str, evidence: str) -> str:
+    return hashlib.sha256(f"{task_id}|{trigger}|{evidence}".encode("utf-8")).hexdigest()[:16]
+
+
+def _fired_replan_fingerprints(repo: Path) -> set[str]:
+    events, _ = swarm_events.read_events(repo)
+    return {
+        event["fingerprint"]
+        for event in events
+        if event.get("event") == "replan_dispatched" and isinstance(event.get("fingerprint"), str)
+    }
+
+
 def _step_plan(args: argparse.Namespace) -> dict[str, object]:
     repo = _repo_root()
     dispatched: list[dict[str, object]] = []
@@ -6128,11 +6296,8 @@ def _step_plan(args: argparse.Namespace) -> dict[str, object]:
         )
 
         triggers: list[str] = []
-        if (
-            task.state == "blocked"
-            and failed
-            and len(failed) >= contract.repair_max_attempts
-        ):
+        threshold = contract.replan_failure_threshold
+        if task.state == "blocked" and failed and len(failed) >= threshold:
             triggers.append("failed_runs")
         if _planner_marker_on_last_note(task):
             triggers.append("planner_marker")
@@ -6141,7 +6306,18 @@ def _step_plan(args: argparse.Namespace) -> dict[str, object]:
 
         last_manifest = failed[-1][1] if failed else (typed_manifests[-1][1] if typed_manifests else {})
         failure_context = _failure_context_from_manifest(last_manifest)
+        # a trigger fingerprint keyed on the CURRENT evidence — the same
+        # standing failure/marker does not re-invoke the planner every cycle
+        # (C12); a new failed run or a fresh marker changes the fingerprint.
+        already_fired = _fired_replan_fingerprints(repo)
         for trigger in triggers:
+            fingerprint = _replan_fingerprint(
+                task_id=task_id,
+                trigger=trigger,
+                evidence=f"{len(failed)}:{int(wall_clock_seconds)}:{failure_context['blocked_reasons']}",
+            )
+            if fingerprint in already_fired:
+                continue
             context = {
                 "trigger_id": f"{task_id}_{trigger}",
                 "trigger": trigger,
@@ -6160,8 +6336,10 @@ def _step_plan(args: argparse.Namespace) -> dict[str, object]:
                     "event": "replan_dispatched",
                     "trigger": trigger,
                     "task_id": task_id,
+                    "fingerprint": fingerprint,
                 },
             )
+            already_fired.add(fingerprint)
             outcome = _invoke_planner(
                 mode="replan", context=context, repo=repo, args=args
             )
@@ -6855,6 +7033,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         and pinned_fields.task_schema == TASK_SCHEMA_VERSION
         and pinned_fields.complexity_tier in {"M", "L"}
         and pinned_fields.recon_required is True
+        and args.final_state in {"ready_for_review", "integration_ready"}
         and _reconnaissance_line_count(task_text_after_executor) < 3
     ):
         blocked_reasons.append("recon_missing")
