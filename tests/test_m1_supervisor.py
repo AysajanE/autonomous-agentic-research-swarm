@@ -159,6 +159,7 @@ class M1SupervisorTests(unittest.TestCase):
         role: str = "Worker",
         changed_path: str | None = None,
         changed_text: str = "changed\n",
+        before_review=None,
     ) -> tuple[Path, Path, Path]:
         task_path = self._scaffold_task_repo(
             root,
@@ -195,11 +196,23 @@ class M1SupervisorTests(unittest.TestCase):
             task_path=worktree_task.relative_to(worktree).as_posix(),
             generated_at_utc="2026-03-29T00:00:00Z",
         )
+        if before_review is not None:
+            before_review(worktree, manifest_path)
+        # mirror the real judge flow: the work (incl. manifest) is committed
+        # first; the review is a SEPARATE commit atop the reviewed tip and
+        # records the binding fields the merge queue verifies.
+        _git(worktree, "add", "-A")
+        _git(worktree, "commit", "-m", f"{task_id}: ready_for_review")
+        reviewed_sha = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+        import hashlib as _hashlib
+
         write_review_log(
             worktree,
             task_id,
             task_path=worktree_task.relative_to(worktree).as_posix(),
             run_manifest_path=manifest_path.relative_to(worktree).as_posix(),
+            manifest_sha256=_hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            reviewed_branch_sha=reviewed_sha,
         )
         _git(worktree, "add", "-A")
         _git(worktree, "commit", "-m", f"{task_id}: approved_pending_merge")
@@ -442,48 +455,43 @@ class M1SupervisorTests(unittest.TestCase):
             root = Path(tmp) / "repo"
             worktrees = Path(tmp) / "worktrees"
             task_id = "T909"
+            claim_holder: dict[str, object] = {}
+
+            def stamp_claim(worktree: Path, manifest_path: Path) -> None:
+                claim = swarm_claims.claim_task(
+                    root,
+                    "origin",
+                    task_id,
+                    session_id=swarm._ACTOR_SESSION_ID,
+                    branch=f"{task_id}_task",
+                )
+                assert claim.ok
+                claim_holder["claim"] = claim
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["claim"] = {
+                    "lease_id": claim.lease_id,
+                    "sha": claim.sha,
+                    "transport": claim.transport,
+                }
+                manifest_path.write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
+
             _, worktree, manifest_path = self._prepare_approved_branch(
                 root,
                 worktrees,
                 task_id,
+                before_review=stamp_claim,
             )
-            claim = swarm_claims.claim_task(
-                root,
-                "origin",
-                task_id,
-                session_id=swarm._ACTOR_SESSION_ID,
-                branch=f"{task_id}_task",
-            )
-            self.assertTrue(claim.ok)
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest["claim"] = {
-                "lease_id": claim.lease_id,
-                "sha": claim.sha,
-                "transport": claim.transport,
-            }
-            manifest_path.write_text(
-                json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
-            _git(worktree, "add", manifest_path.relative_to(worktree).as_posix())
-            _git(worktree, "commit", "-m", f"{task_id}: stamp lease")
+            claim = claim_holder["claim"]
 
-            # renewals advance the SAME chain — still mergeable (not stale)
-            renewed = swarm_claims.renew_lease(
-                root,
-                "origin",
-                task_id,
-                expected_sha=str(claim.sha),
-                session_id=swarm._ACTOR_SESSION_ID,
-            )
-            self.assertEqual(renewed.lease_id, 2)
-
-            # the REAL stale-lease attack: reap + reclaim = a NEW claim epoch
-            # (new commit root) — the old manifest must never merge under it
+            # renewals advance the SAME chain — a renewed claim still merges,
+            # so first prove the epoch attack is what fails: release + reclaim
             released = swarm_claims.release_claim(
                 root,
                 "origin",
                 task_id,
-                expected_sha=str(renewed.sha),
+                expected_sha=str(claim.sha),
                 reason="test_reap",
             )
             self.assertTrue(released.ok)

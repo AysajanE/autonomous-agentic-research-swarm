@@ -1738,8 +1738,8 @@ def _path_is_allowed(
         return False, "handoff_namespace_violation"
     if norm.startswith("reports/status/swarm_runs/") and Path(norm).name.startswith(f"{task_id}_"):
         return True, None
-    if norm.startswith("reports/status/reviews/") and Path(norm).name.startswith(f"{task_id}_"):
-        return True, None
+    # reports/status/reviews/ is deliberately NOT task-writable: review logs
+    # are Judge-only artifacts (M1 review fix — forged-approval channel).
     if norm.startswith(".orchestrator/"):
         return False, "orchestrator_write_forbidden"
 
@@ -2818,6 +2818,7 @@ def _persist_projection_changes(
     filenames: Iterable[str],
     message: str,
     strict: bool,
+    push: bool = True,
 ) -> bool:
     owned_paths = sorted(
         {
@@ -2864,13 +2865,14 @@ def _persist_projection_changes(
     if not (staged_after.stdout or "").strip():
         return False
     _git_commit(cwd=repo, message=message, strict=strict)
-    _git_push(
-        cwd=repo,
-        remote=remote,
-        ref=base_branch,
-        set_upstream=False,
-        strict=strict,
-    )
+    if push:
+        _git_push(
+            cwd=repo,
+            remote=remote,
+            ref=base_branch,
+            set_upstream=False,
+            strict=strict,
+        )
     return True
 
 
@@ -3166,6 +3168,22 @@ def cmd_tick(args: argparse.Namespace) -> int:
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
+
+
+def _merge_journal_records(repo: Path, task_id: str) -> tuple[dict | None, dict | None]:
+    """Latest (merge_started, merge_verified) journal records for a task."""
+    events, _ = swarm_events.read_events(repo)
+    started: dict | None = None
+    verified: dict | None = None
+    for event in events:
+        if event.get("task_id") != task_id:
+            continue
+        if event.get("event") == "merge_started":
+            started = event
+            verified = None
+        elif event.get("event") == "merge_verified":
+            verified = event
+    return started, verified
 
 
 def _merge_inflight_task_ids(repo: Path) -> set[str]:
@@ -3793,12 +3811,41 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
             continue
         if base_task.state == "done":
             if task_id in inflight:
+                started_event, verified_event = _merge_journal_records(repo, task_id)
+                if verified_event is None:
+                    # a crash raced the durable verification record: never
+                    # push an unverified base — revert to the RECORDED
+                    # pre-merge sha and block (Codex F4b).
+                    recorded_pre = (started_event or {}).get("pre_merge_sha")
+                    if isinstance(recorded_pre, str) and recorded_pre:
+                        _run(["git", "reset", "--hard", recorded_pre], cwd=repo, check=True)
+                    _record_swarm_event(
+                        repo,
+                        {
+                            "event": "merge_reverted",
+                            "task_id": task_id,
+                            "cause": "done_without_merge_verified",
+                            "pre_merge_sha": recorded_pre,
+                        },
+                        escalation=True,
+                    )
+                    _block_base_task(
+                        repo=repo,
+                        contract=contract,
+                        args=args,
+                        task_id=task_id,
+                        note="@human Merge recovery: done recorded without a durable verification record; base reverted.",
+                        message=f"{task_id}: block unverified merge recovery",
+                    )
+                    reverted.append(task_id)
+                    base_tasks, _ = load_tasks_quarantined(contract)
+                    continue
                 _git_push(
                     cwd=repo,
                     remote=args.remote,
                     ref=args.base_branch,
                     set_upstream=False,
-                    strict=bool(args.unattended),
+                    strict=True,
                 )
                 _record_swarm_event(
                     repo,
@@ -3812,6 +3859,81 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
                 )
                 merged.append(task_id)
             continue
+
+        # Claude adversary #1: a crash BETWEEN ff-merge and verification
+        # leaves the branch already merged while the task is still
+        # ready_for_review. Detect it (branch tip is an ancestor of base
+        # HEAD but differs from it or the journal shows an unverified
+        # merge_started) and verify-or-revert from the RECORDED pre-merge
+        # sha — never recompute it from the already-moved HEAD.
+        branch_name = context.get("branch")
+        if isinstance(branch_name, str):
+            branch_tip_cp = _run(
+                ["git", "rev-parse", "--verify", "--quiet", branch_name],
+                cwd=repo,
+                capture=True,
+                check=False,
+            )
+            branch_tip = branch_tip_cp.stdout.strip() if branch_tip_cp.returncode == 0 else None
+            head_sha = _git_head_sha(repo)
+            if (
+                branch_tip
+                and head_sha
+                and task_id in inflight
+                and _run(
+                    ["git", "merge-base", "--is-ancestor", branch_tip, head_sha],
+                    cwd=repo,
+                    capture=True,
+                    check=False,
+                ).returncode
+                == 0
+            ):
+                started_event, verified_event = _merge_journal_records(repo, task_id)
+                recorded_pre = (started_event or {}).get("pre_merge_sha")
+                if verified_event is None and isinstance(recorded_pre, str) and recorded_pre:
+                    quality_cp = _run(
+                        [sys.executable, "scripts/quality_gates.py"],
+                        cwd=repo,
+                        capture=True,
+                        check=False,
+                        timeout_seconds=max(30, contract.gate_timeout_seconds * 2),
+                    )
+                    if quality_cp.returncode != 0:
+                        _run(["git", "reset", "--hard", recorded_pre], cwd=repo, check=True)
+                        _record_swarm_event(
+                            repo,
+                            {
+                                "event": "merge_reverted",
+                                "task_id": task_id,
+                                "cause": "crash_recovery_verification_failed",
+                                "pre_merge_sha": recorded_pre,
+                            },
+                            escalation=True,
+                        )
+                        _block_base_task(
+                            repo=repo,
+                            contract=contract,
+                            args=args,
+                            task_id=task_id,
+                            note="@human Merge recovery: post-merge verification failed after a crash; base reverted to the recorded pre-merge sha.",
+                            message=f"{task_id}: block reverted crash merge",
+                        )
+                        reverted.append(task_id)
+                        base_tasks, _ = load_tasks_quarantined(contract)
+                        continue
+                    swarm_events.append_event(
+                        repo,
+                        {
+                            "event": "merge_verified",
+                            "task_id": task_id,
+                            "pre_merge_sha": recorded_pre,
+                            "post_merge_sha": head_sha,
+                            "recovered": True,
+                        },
+                        actor_session=_ACTOR_SESSION_ID,
+                    )
+                    # fall through: the normal path's ff-merge is now a no-op
+                    # and promotion proceeds under the verified record
 
         manifest_path = context.get("manifest_path")
         manifest = context.get("manifest")
@@ -3949,10 +4071,185 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
             base_tasks, _ = load_tasks_quarantined(contract)
             continue
 
+        # F6: the merge queue owns a CLEAN base; anything else is skipped
+        # loudly rather than gambled with reset --hard later.
+        status_cp = _run(
+            ["git", "status", "--porcelain", "-uall"], cwd=repo, capture=True, check=True
+        )
+        event_paths = _runtime_event_paths(repo)
+        dirty = [
+            line
+            for line in (status_cp.stdout or "").splitlines()
+            if line.strip() and line[3:].strip() not in event_paths
+        ]
+        if dirty:
+            _record_swarm_event(
+                repo,
+                {"event": "merge_skipped_dirty_base", "task_id": task_id, "dirty": dirty[:10]},
+                escalation=True,
+            )
+            refused.append({"task_id": task_id, "reason": "dirty_base"})
+            continue
+
+        # F2 (merge side): the approval binds to CONTENT and TOPOLOGY —
+        # the manifest bytes must hash to what the Judge reviewed, and the
+        # branch tip must be exactly the review commit atop the reviewed sha
+        # (no post-approval commits of any kind).
+        branch_tip_sha = _run(
+            ["git", "rev-parse", branch], cwd=repo, capture=True, check=True
+        ).stdout.strip()
+        reviewed_sha = review.get("reviewed_branch_sha")
+        review_manifest_sha = review.get("manifest_sha256")
+        actual_manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        tip_parent = _run(
+            ["git", "rev-parse", f"{branch}^"], cwd=repo, capture=True, check=False
+        ).stdout.strip()
+        binding_failure: str | None = None
+        if not isinstance(review_manifest_sha, str) or review_manifest_sha != actual_manifest_sha:
+            binding_failure = "manifest_content_changed_after_review"
+        elif not isinstance(reviewed_sha, str) or reviewed_sha != tip_parent:
+            binding_failure = "post_review_commits_present"
+        if binding_failure is not None:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "merge_refused_review_binding",
+                    "task_id": task_id,
+                    "reason": binding_failure,
+                    "reviewed_branch_sha": reviewed_sha,
+                    "branch_tip_parent": tip_parent,
+                },
+                escalation=True,
+            )
+            _block_base_task(
+                repo=repo,
+                contract=contract,
+                args=args,
+                task_id=task_id,
+                note=f"@human Merge refused: review binding failed ({binding_failure}).",
+                message=f"{task_id}: block review binding merge",
+            )
+            refused.append({"task_id": task_id, "reason": binding_failure})
+            base_tasks, _ = load_tasks_quarantined(contract)
+            continue
+
+        # re-run the tamper-evident checks against the branch state: a forged
+        # approving review earns nothing these checks would not grant. Actor
+        # separation was enforced at judge time by a distinct session; here
+        # we verify CONTENT: pinned frontmatter, log binding, sha ancestry,
+        # and strict path discipline split around the review commit (the
+        # pre-review range must pass ownership WITH reviews disallowed; the
+        # review commit itself may touch only the review log + task file).
+        worktree_path = Path(context.get("worktree"))
+        recheck_failures: list[str] = []
+
+        frontmatter_block = manifest.get("frontmatter") if isinstance(manifest.get("frontmatter"), dict) else {}
+        pinned_sha = frontmatter_block.get("pinned_sha256")
+        try:
+            current_text, _ = _task_frontmatter_snapshot(branch_task.path)
+            current_fm_sha = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+        except ValueError:
+            current_fm_sha = None
+        if not isinstance(pinned_sha, str) or current_fm_sha != pinned_sha:
+            recheck_failures.append("post_run_frontmatter_tamper")
+
+        commands_block2 = manifest.get("commands") if isinstance(manifest.get("commands"), dict) else {}
+        log_rel = commands_block2.get("executor_log_path")
+        log_sha = commands_block2.get("executor_log_sha256")
+        if manifest.get("provenance_class") == "executor_run":
+            if not isinstance(log_rel, str) or not isinstance(log_sha, str):
+                recheck_failures.append("executor_log_binding_missing")
+            else:
+                log_path = worktree_path / log_rel
+                if not log_path.is_file() or hashlib.sha256(log_path.read_bytes()).hexdigest() != log_sha:
+                    recheck_failures.append("executor_log_binding_failed")
+
+        base_ref = _resolve_base_ref_for_diff(cwd=worktree_path, base_branch=args.base_branch, remote=args.remote)
+        task_file_rel = branch_task.path.relative_to(worktree_path).as_posix()
+        if base_ref is None:
+            recheck_failures.append("merge_recheck_base_unresolved")
+        else:
+            range_cp = _run(
+                ["git", "diff", "--name-only", f"{base_ref}...{tip_parent}"],
+                cwd=worktree_path,
+                capture=True,
+                check=False,
+            )
+            for changed in [line.strip() for line in (range_cp.stdout or "").splitlines() if line.strip()]:
+                ok, reason = _path_is_allowed(
+                    path=changed,
+                    allowed_paths=branch_task.allowed_paths,
+                    disallowed_paths=branch_task.disallowed_paths,
+                    task_file_path=task_file_rel,
+                    task_id=task_id,
+                )
+                if not ok:
+                    recheck_failures.append(f"ownership_violation:{changed}:{reason}")
+            tip_cp = _run(
+                ["git", "show", "--name-only", "--pretty=format:", branch],
+                cwd=worktree_path,
+                capture=True,
+                check=False,
+            )
+            review_prefix = f"reports/status/reviews/{task_id}_"
+            for tip_path in [line.strip() for line in (tip_cp.stdout or "").splitlines() if line.strip()]:
+                if tip_path == task_file_rel or tip_path.startswith(review_prefix):
+                    continue
+                if tip_path in _task_projection_paths(task_file_rel):
+                    continue
+                recheck_failures.append(f"review_commit_touched:{tip_path}")
+        if recheck_failures:
+            _record_swarm_event(
+                repo,
+                {
+                    "event": "merge_refused_integrity_recheck",
+                    "task_id": task_id,
+                    "failures": recheck_failures[:10],
+                },
+                escalation=True,
+            )
+            _block_base_task(
+                repo=repo,
+                contract=contract,
+                args=args,
+                task_id=task_id,
+                note="@human Merge refused: judge-checklist recheck failed at merge time.",
+                message=f"{task_id}: block integrity recheck merge",
+            )
+            refused.append({"task_id": task_id, "reason": "integrity_recheck"})
+            base_tasks, _ = load_tasks_quarantined(contract)
+            continue
+
+        # F5: cross-supervisor safety — the local base must equal the remote
+        # tip before we move it (the CAS push below enforces it again).
+        if _git_remote_exists(repo, args.remote):
+            _run(["git", "fetch", args.remote, args.base_branch], cwd=repo, check=False)
+            remote_tip = _run(
+                ["git", "rev-parse", f"{args.remote}/{args.base_branch}"],
+                cwd=repo,
+                capture=True,
+                check=False,
+            ).stdout.strip()
+            local_tip = _git_head_sha(repo)
+            if remote_tip and local_tip and remote_tip != local_tip:
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "merge_skipped_base_divergence",
+                        "task_id": task_id,
+                        "local": local_tip,
+                        "remote": remote_tip,
+                    },
+                    escalation=True,
+                )
+                refused.append({"task_id": task_id, "reason": "base_divergence"})
+                continue
+
         pre_merge_sha = _git_head_sha(repo)
         if pre_merge_sha is None:
             raise SystemExit("merge_precondition_missing_base_sha")
-        _record_swarm_event(
+        # F9: the durable intent record FAILS CLOSED — no record, no merge.
+        swarm_events.append_event(
             repo,
             {
                 "event": "merge_started",
@@ -3960,6 +4257,7 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
                 "branch": branch,
                 "pre_merge_sha": pre_merge_sha,
             },
+            actor_session=_ACTOR_SESSION_ID,
         )
         merge_cp = _run(
             ["git", "merge", "--ff-only", branch],
@@ -3989,6 +4287,8 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
             base_tasks, _ = load_tasks_quarantined(contract)
             continue
 
+        post_merge_sha = _git_head_sha(repo)
+
         merged_contract = load_framework_contract(repo)
         merged_tasks, merged_quarantined = load_tasks_quarantined(merged_contract)
         merged_task = _resolve_runtime_task(merged_tasks, merged_quarantined, task_id)
@@ -4013,6 +4313,23 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
             timeout_seconds=contract.gate_timeout_seconds,
         )
         if quality_cp.returncode != 0 or not pinned_ok:
+            # F6: the reset target is the sha THIS step recorded, and the tip
+            # must still be the merge this step created — anything else means
+            # concurrent movement and demands a human, not a reset.
+            current_head = _git_head_sha(repo)
+            if current_head != post_merge_sha:
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "merge_revert_refused_concurrent_movement",
+                        "task_id": task_id,
+                        "expected": post_merge_sha,
+                        "actual": current_head,
+                    },
+                    escalation=True,
+                )
+                refused.append({"task_id": task_id, "reason": "concurrent_base_movement"})
+                continue
             _run(["git", "reset", "--hard", pre_merge_sha], cwd=repo, check=True)
             _record_swarm_event(
                 repo,
@@ -4039,6 +4356,19 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
             base_tasks, _ = load_tasks_quarantined(contract)
             continue
 
+        # F9: verification passed — record it durably (fail closed) BEFORE
+        # any promotion; crash recovery keys off this record.
+        swarm_events.append_event(
+            repo,
+            {
+                "event": "merge_verified",
+                "task_id": task_id,
+                "pre_merge_sha": pre_merge_sha,
+                "post_merge_sha": post_merge_sha,
+            },
+            actor_session=_ACTOR_SESSION_ID,
+        )
+
         merged_tasks, merged_quarantined = load_tasks_quarantined(merged_contract)
         merged_task = _resolve_runtime_task(merged_tasks, merged_quarantined, task_id)
         _update_task_status_and_notes(
@@ -4057,8 +4387,40 @@ def _step_merge(args: argparse.Namespace) -> dict[str, object]:
             base_branch=args.base_branch,
             filenames=[filename],
             message=f"{task_id}: done",
-            strict=bool(args.unattended),
+            strict=True,
+            push=False,
         )
+        # F5: base advance is a CAS against the sha we verified from — a
+        # concurrent supervisor's push loses the race loudly, never silently.
+        if _git_remote_exists(repo, args.remote):
+            cas_cp = _run(
+                [
+                    "git",
+                    "push",
+                    args.remote,
+                    f"{args.base_branch}:{args.base_branch}",
+                    f"--force-with-lease={args.base_branch}:{pre_merge_sha}",
+                ],
+                cwd=repo,
+                capture=True,
+                check=False,
+            )
+            if cas_cp.returncode != 0:
+                _run(["git", "reset", "--hard", pre_merge_sha], cwd=repo, check=True)
+                _record_swarm_event(
+                    repo,
+                    {
+                        "event": "merge_reverted",
+                        "task_id": task_id,
+                        "cause": "base_cas_push_lost",
+                        "pre_merge_sha": pre_merge_sha,
+                        "push_output": (cas_cp.stderr or cas_cp.stdout or "")[-500:],
+                    },
+                    escalation=True,
+                )
+                refused.append({"task_id": task_id, "reason": "base_cas_push_lost"})
+                base_tasks, _ = load_tasks_quarantined(contract)
+                continue
         _record_swarm_event(
             repo,
             {
@@ -5502,7 +5864,18 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
     review_bundle_failures.extend(integrity_failures)
 
     approved = gate_ok and outputs_ok and not manifest_failures and not review_bundle_failures
-    approve_only = bool(getattr(args, "approve_only", False))
+    promote_directly = bool(getattr(args, "promote_directly", False))
+    approve_only = not promote_directly
+    if promote_directly:
+        _record_swarm_event(
+            repo,
+            {
+                "event": "judge_promote_directly",
+                "task_id": task.task_id,
+                "note": "manual override: done promoted without the merge queue's post-merge verification",
+            },
+            escalation=True,
+        )
     intended_state_after = "done" if approved else args.on_fail
     actual_state_after = (
         "ready_for_review" if approved and approve_only else intended_state_after
@@ -5527,10 +5900,18 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
         else f"{note_prefix} Judge returned task with failures: {', '.join(check_failures)}."
     ).strip()
 
+    reviewed_branch_sha = _git_head_sha(repo)
+    reviewed_manifest_sha256 = (
+        hashlib.sha256(selected_run_manifest.read_bytes()).hexdigest()
+        if selected_run_manifest is not None and selected_run_manifest.is_file()
+        else None
+    )
     review_log = {
         "schema_version": JUDGE_REVIEW_LOG_SCHEMA_VERSION,
         "review_id": f"{task.task_id}_{_utc_timestamp_compact()}",
         "generated_at_utc": _utc_now_iso(),
+        "reviewed_branch_sha": reviewed_branch_sha,
+        "manifest_sha256": reviewed_manifest_sha256,
         "reviewer": {
             "role": contract.scientific_review_role,
             "session_id": _ACTOR_SESSION_ID,
@@ -5752,7 +6133,8 @@ def build_parser() -> argparse.ArgumentParser:
     judge_task.add_argument("--unattended", action="store_true")
     judge_task.add_argument("--on-fail", choices=["active", "blocked"], default="blocked")
     judge_task.add_argument("--note", default="")
-    judge_task.add_argument("--approve-only", action="store_true")
+    judge_task.add_argument("--approve-only", action="store_true", help="(default behavior; retained for compatibility)")
+    judge_task.add_argument("--promote-directly", action="store_true", dest="promote_directly", help="Manual override: promote done without the merge queue (loudly journaled)")
     judge_task.set_defaults(func=cmd_judge_task)
 
     attest = subparsers.add_parser("attest-containment", help="Record the machine-local containment attestation required for unattended runs")

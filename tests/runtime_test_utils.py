@@ -583,6 +583,8 @@ def write_review_log(
     schema_version: str = JUDGE_REVIEW_LOG_SCHEMA_VERSION,
     reviewer_session_id: str = "fixture-judge-session",
     generated_at_utc: str = "2026-03-29T01:00:00Z",
+    manifest_sha256: str | None = None,
+    reviewed_branch_sha: str | None = None,
 ) -> Path:
     rel = f"reports/status/reviews/{task_id}_20260329T010000Z.json"
     reviewer: dict[str, Any] = {"role": reviewer_role}
@@ -593,6 +595,8 @@ def write_review_log(
         "schema_version": schema_version,
         "review_id": f"{task_id}_20260329T010000Z",
         "generated_at_utc": generated_at_utc,
+        "manifest_sha256": manifest_sha256,
+        "reviewed_branch_sha": reviewed_branch_sha,
         "reviewer": reviewer,
         "task": {
             "task_id": task_id,

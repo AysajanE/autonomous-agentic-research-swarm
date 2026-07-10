@@ -24,6 +24,7 @@ import datetime as dt
 import json
 from pathlib import Path
 import subprocess
+import uuid
 
 
 CLAIM_SCHEMA_VERSION = "research_swarm.claim.v1"
@@ -199,6 +200,11 @@ def claim_task(
     payload: dict[str, object] = {
         "schema_version": CLAIM_SCHEMA_VERSION,
         "task_id": task_id,
+        # epoch nonce: two claims created in the same second would otherwise
+        # hash to the SAME root commit (identical tree/message/timestamps),
+        # making a reap+reclaim indistinguishable from the original chain and
+        # defeating ancestry fencing at merge time.
+        "epoch": uuid.uuid4().hex,
         "lease_id": 1,
         "claimed_by": session_id,
         "claimed_at_utc": stamp,
