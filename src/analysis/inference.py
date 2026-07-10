@@ -93,6 +93,10 @@ def driscoll_kraay_se(
     if not isinstance(min_time_periods, int) or min_time_periods < 2:
         raise ValueError("min_time_periods must be an integer of at least 2")
     unique_times = list(dict.fromkeys(times.tolist()))
+    try:
+        unique_times.sort()
+    except TypeError as exc:
+        raise ValueError("time_ids must be chronologically comparable") from exc
     periods = len(unique_times)
     if periods < min_time_periods:
         raise SmallTError(
@@ -120,6 +124,22 @@ def _cluster_covariance(
     if len(clusters) != len(residuals):
         raise ValueError("cluster_ids and X must have the same number of rows")
     cluster_values = clusters.tolist()
+    for value in cluster_values:
+        invalid = value is None
+        if isinstance(value, (float, complex, np.floating, np.complexfloating)):
+            invalid = invalid or not bool(np.isfinite(value))
+        elif isinstance(value, (np.datetime64, np.timedelta64)):
+            invalid = invalid or bool(np.isnat(value))
+        elif callable(getattr(value, "is_finite", None)):
+            invalid = invalid or not bool(value.is_finite())
+        else:
+            try:
+                self_equal = value == value
+                invalid = invalid or not bool(self_equal)
+            except (TypeError, ValueError):
+                invalid = True
+        if invalid:
+            raise ValueError("cluster identifiers must be non-null and finite")
     try:
         unique_clusters = list(dict.fromkeys(cluster_values))
     except TypeError as exc:
@@ -128,10 +148,21 @@ def _cluster_covariance(
         raise ValueError("clustered inference requires at least two clusters")
     scores = design * residuals[:, None]
     meat = np.zeros((design.shape[1], design.shape[1]), dtype=float)
+    memberships = np.zeros(len(cluster_values), dtype=int)
     for cluster in unique_clusters:
-        mask = np.fromiter((value == cluster for value in cluster_values), dtype=bool)
+        try:
+            mask = np.fromiter(
+                (bool(value == cluster) for value in cluster_values),
+                dtype=bool,
+                count=len(cluster_values),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("cluster identifiers must support scalar equality") from exc
+        memberships += mask.astype(int)
         cluster_score = scores[mask].sum(axis=0)
         meat += np.outer(cluster_score, cluster_score)
+    if not np.all(memberships == 1):
+        raise ValueError("every observation must belong to exactly one cluster")
     bread = np.linalg.inv(design.T @ design)
     return bread @ meat @ bread
 
@@ -177,10 +208,10 @@ def two_way_clustered_se(
         + _cluster_covariance(design, u, b)
         - _cluster_covariance(design, u, intersections)
     )
-    diagonal = np.diag((covariance + covariance.T) / 2.0)
-    if np.any(diagonal < -1e-12):
-        raise ValueError("two-way clustered covariance has a negative diagonal")
-    return np.sqrt(np.maximum(diagonal, 0.0))
+    symmetric = (covariance + covariance.T) / 2.0
+    eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
+    projected = (eigenvectors * np.maximum(eigenvalues, 0.0)) @ eigenvectors.T
+    return np.sqrt(np.maximum(np.diag(projected), 0.0))
 
 
 def _take_rows(data: T, indices: np.ndarray) -> T:
@@ -237,10 +268,11 @@ def bai_perron_breaks(
     """Estimate piecewise-constant Bai--Perron-class breaks by dynamic programming.
 
     Segment cost is ``SSR(i,j) = sum_{t=i}^{j-1}(y_t - mean(y_i:j))^2``.
-    Dynamic programming minimizes total SSR over at most ``max_breaks`` breaks
-    subject to ``min_segment`` observations per segment.  With unpenalized SSR,
-    the largest feasible number of breaks is selected; break indices are the
-    first observation of each new segment.
+    Dynamic programming computes the minimum SSR for every feasible break count
+    up to ``max_breaks``, subject to ``min_segment`` observations per segment.
+    It then minimizes ``n*log(SSR/n) + (m+1)*log(n)`` (Gaussian BIC for the
+    ``m+1`` segment means), preferring fewer breaks on ties.  Break indices are
+    the first observation of each new segment.
     """
 
     values = np.asarray(series, dtype=float).reshape(-1)
@@ -251,9 +283,9 @@ def bai_perron_breaks(
         raise ValueError("max_breaks must be a non-negative integer")
     if not isinstance(min_segment, int) or min_segment < 1:
         raise ValueError("min_segment must be a positive integer")
-    segments = max_breaks + 1
-    if segments * min_segment > n:
-        raise ValueError("series is too short for max_breaks and min_segment")
+    if n < min_segment:
+        raise ValueError("series is too short for min_segment")
+    max_segments = min(max_breaks + 1, n // min_segment)
 
     prefix = np.concatenate(([0.0], np.cumsum(values)))
     prefix_sq = np.concatenate(([0.0], np.cumsum(values * values)))
@@ -261,13 +293,13 @@ def bai_perron_breaks(
     def cost(start: int, end: int) -> float:
         count = end - start
         total = prefix[end] - prefix[start]
-        return float(prefix_sq[end] - prefix_sq[start] - total * total / count)
+        return float(max(prefix_sq[end] - prefix_sq[start] - total * total / count, 0.0))
 
     infinity = float("inf")
-    dp = np.full((segments + 1, n + 1), infinity)
-    previous = np.full((segments + 1, n + 1), -1, dtype=int)
+    dp = np.full((max_segments + 1, n + 1), infinity)
+    previous = np.full((max_segments + 1, n + 1), -1, dtype=int)
     dp[0, 0] = 0.0
-    for count in range(1, segments + 1):
+    for count in range(1, max_segments + 1):
         earliest_end = count * min_segment
         for end in range(earliest_end, n + 1):
             start_min = (count - 1) * min_segment
@@ -278,16 +310,31 @@ def bai_perron_breaks(
                     dp[count, end] = candidate
                     previous[count, end] = start
 
+    scale = max(float(np.dot(values, values)), 1.0)
+    zero_tolerance = np.finfo(float).eps * scale * n
+    selected_segments = 1
+    selected_criterion = float("inf")
+    for segments in range(1, max_segments + 1):
+        ssr = float(max(dp[segments, n], 0.0))
+        criterion = (
+            float("-inf")
+            if ssr <= zero_tolerance
+            else n * float(np.log(ssr / n)) + segments * float(np.log(n))
+        )
+        if criterion < selected_criterion - 1e-12:
+            selected_criterion = criterion
+            selected_segments = segments
+
     breaks: list[int] = []
     end = n
-    for count in range(segments, 1, -1):
+    for count in range(selected_segments, 1, -1):
         start = int(previous[count, end])
         if start < 0:
             raise ValueError("no feasible break partition")
         breaks.append(start)
         end = start
     breaks.reverse()
-    return breaks, float(max(dp[segments, n], 0.0))
+    return breaks, float(max(dp[selected_segments, n], 0.0))
 
 
 def oster_delta(

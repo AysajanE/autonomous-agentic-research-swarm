@@ -66,14 +66,32 @@ class M3cInferenceKnownAnswerTest(unittest.TestCase):
         )
         self.assertAlmostEqual(float(result[0]), math.sqrt(3.0) / 4.0, places=12)
 
-    def test_driscoll_kraay_large_t_guard(self) -> None:
+    def test_driscoll_kraay_unordered_time_known_answer(self) -> None:
+        # Chronological scores are [-1, 1, 2, -2]: B = 10 + (-3) = 7.
+        result = driscoll_kraay_se(
+            np.array([1.0, -1.0, 2.0, -2.0]),
+            np.ones((4, 1)),
+            np.array([2, 1, 3, 4]),
+            1,
+            min_time_periods=4,
+        )
+        self.assertAlmostEqual(float(result[0]), math.sqrt(7.0) / 4.0, places=12)
+
+    def test_driscoll_kraay_guard_exact_threshold_passes_below_raises(self) -> None:
+        residuals = np.array([1.0, -1.0, 1.0, -1.0])
+        design = np.ones((4, 1))
+        times = np.array([1, 2, 3, 4])
+        result = driscoll_kraay_se(
+            residuals, design, times, 0, min_time_periods=4
+        )
+        self.assertAlmostEqual(float(result[0]), 0.5, places=12)
         with self.assertRaises(SmallTError):
             driscoll_kraay_se(
-                np.array([1.0, -1.0, 1.0, -1.0]),
-                np.ones((4, 1)),
-                np.array([1, 1, 2, 2]),
+                residuals,
+                design,
+                times,
                 0,
-                min_time_periods=3,
+                min_time_periods=5,
             )
 
     def test_one_way_cluster_known_answer(self) -> None:
@@ -82,6 +100,17 @@ class M3cInferenceKnownAnswerTest(unittest.TestCase):
         residuals = np.array([1.0, 2.0, -1.0, -2.0])
         result = clustered_se(X, residuals, np.array(["a", "a", "b", "b"]))
         self.assertAlmostEqual(float(result[0]), math.sqrt(18.0 / 16.0), places=12)
+
+    def test_clustered_inference_rejects_nan_identifier(self) -> None:
+        design = np.ones((4, 1))
+        residuals = np.array([1.0, -1.0, 2.0, -2.0])
+        clusters = np.array([1.0, 1.0, np.nan, np.nan])
+        with self.assertRaisesRegex(ValueError, "non-null and finite"):
+            clustered_se(design, residuals, clusters)
+        with self.assertRaisesRegex(ValueError, "non-null and finite"):
+            two_way_clustered_se(design, residuals, clusters, np.array([1, 2, 1, 2]))
+        with self.assertRaisesRegex(ValueError, "non-null and finite"):
+            clustered_se(design, residuals, np.array([1.0, 1.0, np.inf, np.inf]))
 
     def test_two_way_cluster_matches_independent_inclusion_exclusion(self) -> None:
         rng = np.random.default_rng(2)
@@ -101,7 +130,35 @@ class M3cInferenceKnownAnswerTest(unittest.TestCase):
             + _manual_cluster_covariance(X, residuals, cluster_b.astype(object))
             - _manual_cluster_covariance(X, residuals, intersection)
         )
-        expected = np.sqrt(np.diag(expected_covariance))
+        eigenvalues, eigenvectors = np.linalg.eigh(
+            (expected_covariance + expected_covariance.T) / 2.0
+        )
+        projected = (eigenvectors * np.maximum(eigenvalues, 0.0)) @ eigenvectors.T
+        expected = np.sqrt(np.maximum(np.diag(projected), 0.0))
+        np.testing.assert_allclose(
+            two_way_clustered_se(X, residuals, cluster_a, cluster_b),
+            expected,
+            rtol=0,
+            atol=1e-12,
+        )
+
+    def test_two_way_cluster_projects_non_psd_covariance(self) -> None:
+        rng = np.random.default_rng(2)
+        X = np.column_stack([np.ones(12), rng.normal(size=12)])
+        residuals = rng.normal(size=12)
+        cluster_a = np.repeat(np.arange(3), 4)
+        cluster_b = np.tile(np.arange(4), 3)
+        intersection = np.empty(12, dtype=object)
+        intersection[:] = list(zip(cluster_a.tolist(), cluster_b.tolist(), strict=True))
+        raw = (
+            _manual_cluster_covariance(X, residuals, cluster_a.astype(object))
+            + _manual_cluster_covariance(X, residuals, cluster_b.astype(object))
+            - _manual_cluster_covariance(X, residuals, intersection)
+        )
+        eigenvalues, eigenvectors = np.linalg.eigh((raw + raw.T) / 2.0)
+        self.assertLess(float(eigenvalues[0]), 0.0)
+        projected = (eigenvectors * np.maximum(eigenvalues, 0.0)) @ eigenvectors.T
+        expected = np.sqrt(np.maximum(np.diag(projected), 0.0))
         np.testing.assert_allclose(
             two_way_clustered_se(X, residuals, cluster_a, cluster_b),
             expected,
@@ -121,6 +178,21 @@ class M3cInferenceKnownAnswerTest(unittest.TestCase):
         )
         self.assertEqual((point, lo, hi), (2.5, 2.5, 2.5))
 
+    def test_block_bootstrap_seeded_moving_blocks_known_answer(self) -> None:
+        # Seed 23 gives draw means [3.4,3.8,3.2,6.4,2,2,6.8,4];
+        # independently sorting/interpolating the .125/.875 quantiles gives 2/6.45.
+        point, lo, hi = block_bootstrap_ci(
+            lambda values: float(np.mean(values)),
+            np.array([1.0, 2.0, 4.0, 8.0, 16.0]),
+            n_boot=8,
+            block_len=2,
+            seed=23,
+            alpha=0.25,
+        )
+        self.assertEqual(point, 6.2)
+        self.assertAlmostEqual(lo, 2.0, places=12)
+        self.assertAlmostEqual(hi, 6.45, places=12)
+
     def test_bai_perron_piecewise_constant_known_break_and_ssr(self) -> None:
         breaks, ssr = bai_perron_breaks(
             np.array([1.0, 1.0, 1.0, 5.0, 5.0, 5.0]),
@@ -129,6 +201,18 @@ class M3cInferenceKnownAnswerTest(unittest.TestCase):
         )
         self.assertEqual(breaks, [3])
         self.assertAlmostEqual(ssr, 0.0, places=12)
+
+    def test_bai_perron_bic_selects_no_break_for_constant_series(self) -> None:
+        breaks, ssr = bai_perron_breaks(
+            np.ones(6), max_breaks=1, min_segment=2
+        )
+        self.assertEqual((breaks, ssr), ([], 0.0))
+
+    def test_bai_perron_overdeclared_max_uses_feasible_counts(self) -> None:
+        breaks, ssr = bai_perron_breaks(
+            np.ones(5), max_breaks=2, min_segment=2
+        )
+        self.assertEqual((breaks, ssr), ([], 0.0))
 
     def test_oster_textbook_proportional_selection_example(self) -> None:
         # ((.4-0)*(.3-.1))/((.5-.4)*(.6-.3)) = 8/3.

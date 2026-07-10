@@ -103,6 +103,8 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise ValueError("the locked grid requires at least two distinct missingness variants")
     if not set(keying).issubset({"rollup_day", "date_aggregate"}):
         raise ValueError("keying variants must be rollup_day/date_aggregate")
+    if vce in {"clustered", "two_way_clustered"} and "date_aggregate" in keying:
+        raise ValueError("vce_incompatible_with_aggregate_variant")
     if not set(missingness).issubset({"drop", "zero_fill"}):
         raise ValueError("missingness variants must be drop/zero_fill")
     variants = curve.get("analysis_variants")

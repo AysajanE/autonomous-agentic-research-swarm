@@ -194,7 +194,7 @@ class GoldenM3cTest(unittest.TestCase):
         self.assertEqual(artifact["survival_count"], 4)
         self.assertTrue(artifact["headline_within_curve"])
 
-    def test_statistical_reporting_gate_green_then_rule_level_vce_red(self) -> None:
+    def test_statistical_reporting_gate_recursive_green_then_adversarial_red(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = GoldenRepo.create(tmp)
             config = _statistical_config(survival_threshold=4)
@@ -253,7 +253,7 @@ class GoldenM3cTest(unittest.TestCase):
             )
             table = write_text(
                 repo.root,
-                "reports/tables/causal.csv",
+                "reports/tables/nested/causal.csv",
                 "claim_id,estimate,se,ci_lower,ci_upper,n,vce,headline\n"
                 "C-CAUSAL,-0.44,0.05,-0.54,-0.34,16,newey_west,true\n",
             )
@@ -290,9 +290,14 @@ class GoldenM3cTest(unittest.TestCase):
                 headline_estimate=-0.44,
                 config=config,
                 prereg_lock_sha256=digest,
+                input_entry={
+                    "path": "data/processed/panels/toy.csv",
+                    "sha256": panel_sha,
+                    "bytes": panel_path.stat().st_size,
+                },
             )
             write_json(repo.root, "reports/analysis/spec_curve/C-CAUSAL.json", curve)
-            write_json(
+            claims_path = write_json(
                 repo.root,
                 "contracts/claims.yaml",
                 {
@@ -304,7 +309,7 @@ class GoldenM3cTest(unittest.TestCase):
                             "type": "causal",
                             "headline": True,
                             "supporting_artifacts": [
-                                {"path": "reports/tables/causal.csv", "sha256": _sha(table)}
+                                {"path": "reports/tables/nested/causal.csv", "sha256": _sha(table)}
                             ],
                             "verification_command": "python scripts/noop_gate.py",
                             "uncertainty_artifact": {
@@ -332,6 +337,217 @@ class GoldenM3cTest(unittest.TestCase):
             self.assertFalse(red.ok)
             reasons = {failure["reason"] for failure in red.details["failures"]}
             self.assertIn("statistical_table_vce_required", reasons)
+
+            valid_table = (
+                "claim_id,estimate,se,ci_lower,ci_upper,n,vce,headline\n"
+                "C-CAUSAL,-0.44,0.05,-0.54,-0.34,16,newey_west,true\n"
+            )
+            original_claims = json.loads(claims_path.read_text(encoding="utf-8"))
+
+            table.write_text(
+                valid_table.replace("-0.44,0.05", "garbage,0.05").replace(
+                    ",16,newey_west", ",garbage,newey_west"
+                ),
+                encoding="utf-8",
+            )
+            with chdir(repo.root):
+                garbage = quality_gates.gate_statistical_reporting()
+            garbage_reasons = {failure["reason"] for failure in garbage.details["failures"]}
+            self.assertIn("statistical_estimate_not_numeric", garbage_reasons)
+            self.assertIn("statistical_n_not_positive_integer", garbage_reasons)
+
+            table.write_text(
+                valid_table.replace("0.05,-0.54,-0.34", "garbage,1.0,-1.0"),
+                encoding="utf-8",
+            )
+            with chdir(repo.root):
+                invalid_uncertainty = quality_gates.gate_statistical_reporting()
+            uncertainty_reasons = {
+                failure["reason"] for failure in invalid_uncertainty.details["failures"]
+            }
+            self.assertIn("statistical_se_or_ci_not_numeric", uncertainty_reasons)
+
+            table.write_text(valid_table, encoding="utf-8")
+            inconsistent = json.loads(json.dumps(original_claims))
+            inconsistent["claims"][0]["headline"] = False
+            claims_path.write_text(json.dumps(inconsistent), encoding="utf-8")
+            with chdir(repo.root):
+                headline_red = quality_gates.gate_statistical_reporting()
+            headline_reasons = {
+                failure["reason"] for failure in headline_red.details["failures"]
+            }
+            self.assertIn("statistical_headline_mismatch", headline_reasons)
+
+            claims_path.write_text(json.dumps(original_claims), encoding="utf-8")
+            table.write_text(valid_table.replace(",true\n", ",false\n"), encoding="utf-8")
+            with chdir(repo.root):
+                missing_headline_row = quality_gates.gate_statistical_reporting()
+            missing_headline_reasons = {
+                failure["reason"] for failure in missing_headline_row.details["failures"]
+            }
+            self.assertIn("statistical_headline_mismatch", missing_headline_reasons)
+            self.assertIn("headline_table_row_required", missing_headline_reasons)
+
+            table.write_text(valid_table, encoding="utf-8")
+            causal_elsewhere = json.loads(json.dumps(original_claims))
+            causal_elsewhere["claims"].append(
+                {
+                    "claim_id": "C-ELSEWHERE",
+                    "statement": "Causal claim supported outside reports/tables.",
+                    "type": "causal",
+                    "supporting_artifacts": [
+                        {"path": "reports/analysis/elsewhere.json", "sha256": "0" * 64}
+                    ],
+                    "verification_command": "python scripts/noop_gate.py",
+                }
+            )
+            claims_path.write_text(json.dumps(causal_elsewhere), encoding="utf-8")
+            with chdir(repo.root):
+                causal_red = quality_gates.gate_statistical_reporting()
+            causal_reasons = {failure["reason"] for failure in causal_red.details["failures"]}
+            self.assertIn("causal_sensitivity_artifact_invalid", causal_reasons)
+
+            unparseable = json.loads(json.dumps(original_claims))
+            unparseable["claims"][0]["supporting_artifacts"] = [
+                {"path": "reports/tables/nested/unparseable.md", "sha256": "0" * 64}
+            ]
+            claims_path.write_text(json.dumps(unparseable), encoding="utf-8")
+            write_text(repo.root, "reports/tables/nested/unparseable.md", "not a table\n")
+            with chdir(repo.root):
+                unparseable_red = quality_gates.gate_statistical_reporting()
+            unparseable_reasons = {
+                failure["reason"] for failure in unparseable_red.details["failures"]
+            }
+            self.assertIn("invalid_statistical_table", unparseable_reasons)
+
+            unrecognized = json.loads(json.dumps(original_claims))
+            unrecognized["claims"][0]["supporting_artifacts"] = [
+                {"path": "reports/tables/nested/unrecognized.txt", "sha256": "0" * 64}
+            ]
+            claims_path.write_text(json.dumps(unrecognized), encoding="utf-8")
+            write_text(repo.root, "reports/tables/nested/unrecognized.txt", "opaque\n")
+            with chdir(repo.root):
+                unrecognized_red = quality_gates.gate_statistical_reporting()
+            unrecognized_reasons = {
+                failure["reason"] for failure in unrecognized_red.details["failures"]
+            }
+            self.assertIn("unrecognized_statistical_table", unrecognized_reasons)
+
+    def test_spec_curve_recomputes_forged_survival(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = GoldenRepo.create(tmp)
+            panel = write_text(repo.root, "data/processed/panels/toy.csv", "x\n1\n")
+            config = _statistical_config(survival_threshold=1)
+            specs = []
+            for keying in ("rollup_day", "date_aggregate"):
+                for missingness in ("drop", "zero_fill"):
+                    specs.append(
+                        {
+                            "spec_id": f"keying={keying}|missingness={missingness}|analysis=base",
+                            "construction_variant": {
+                                "keying": keying,
+                                "missingness": missingness,
+                            },
+                            "analysis_variant": "base",
+                            "estimate": 1.0,
+                            "se": 1.0,
+                            "ci": [-1.0, 3.0],
+                            "n": 10,
+                            "vce": "newey_west",
+                        }
+                    )
+            curve_path = write_json(
+                repo.root,
+                "reports/analysis/spec_curve/C-FORGED.json",
+                {
+                    "schema_version": "research_swarm.spec_curve.v1",
+                    "claim_id": "C-FORGED",
+                    "prereg_lock_sha256": "a" * 64,
+                    "declared_vce": "newey_west",
+                    "grid_dimensions": {
+                        "keying": ["rollup_day", "date_aggregate"],
+                        "missingness": ["drop", "zero_fill"],
+                        "analysis_variant": ["base"],
+                    },
+                    "specs": specs,
+                    "headline_estimate": 1.0,
+                    "survival_count": 4,
+                    "survival_threshold": 1,
+                    "headline_within_curve": True,
+                    "inputs": [
+                        {
+                            "path": "data/processed/panels/toy.csv",
+                            "sha256": _sha(panel),
+                            "bytes": panel.stat().st_size,
+                        }
+                    ],
+                },
+            )
+            with chdir(repo.root):
+                failures = quality_gates._validate_spec_curve(
+                    curve_path,
+                    claim_id="C-FORGED",
+                    config=config,
+                    lock_sha="a" * 64,
+                )
+            reasons = {failure["reason"] for failure in failures}
+            self.assertIn("spec_curve_survival_count_mismatch", reasons)
+            self.assertIn("spec_curve_survival_below_threshold", reasons)
+
+            forged = json.loads(curve_path.read_text(encoding="utf-8"))
+            forged["headline_estimate"] = 2.0
+            forged["survival_count"] = 0
+            forged.pop("inputs")
+            curve_path.write_text(json.dumps(forged), encoding="utf-8")
+            with chdir(repo.root):
+                failures = quality_gates._validate_spec_curve(
+                    curve_path,
+                    claim_id="C-FORGED",
+                    config=config,
+                    lock_sha="a" * 64,
+                )
+            reasons = {failure["reason"] for failure in failures}
+            self.assertIn("headline_outside_spec_curve", reasons)
+            self.assertIn("spec_curve_inputs_required", reasons)
+
+    def test_clustered_vce_rejected_with_date_aggregate_lock_grid(self) -> None:
+        config = _statistical_config()
+        config["vce"] = "clustered"
+        with self.assertRaisesRegex(ValueError, "vce_incompatible_with_aggregate_variant"):
+            spec_curve._validate_config(config)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = GoldenRepo.create(tmp)
+            body = (
+                "# Analysis plan\n\n```json\n"
+                + json.dumps({"statistical_reporting": config}, indent=2, sort_keys=True)
+                + "\n```\n"
+            )
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            write_text(
+                repo.root,
+                "docs/prereg/analysis_plan.lock.md",
+                "\n".join(
+                    [
+                        "---",
+                        "schema_version: research_swarm.prereg_lock.v1",
+                        "phase: 2b",
+                        "status: locked",
+                        "locked_at_utc: 2026-07-10T12:00:00Z",
+                        f"locked_sha256: {digest}",
+                        "locked_by: Golden Owner",
+                        "lock_version: 1",
+                        "---",
+                        "",
+                    ]
+                )
+                + body,
+            )
+            with chdir(repo.root):
+                _loaded, _sha256, failures = quality_gates._active_statistical_config()
+            self.assertIn(
+                "vce_incompatible_with_aggregate_variant",
+                {failure["reason"] for failure in failures},
+            )
 
 
 if __name__ == "__main__":

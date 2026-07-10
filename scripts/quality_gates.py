@@ -4253,6 +4253,20 @@ def _active_statistical_config() -> tuple[
                     actual=keying,
                 )
             )
+        if (
+            config.get("vce") in {"clustered", "two_way_clustered"}
+            and isinstance(keying, list)
+            and "date_aggregate" in keying
+        ):
+            failures.append(
+                _science_failure(
+                    "vce_incompatible_with_aggregate_variant",
+                    subject=lock_path.as_posix(),
+                    field="statistical_reporting.specification_curve.construction_variants.keying",
+                    expected="no date_aggregate variant with clustered VCE",
+                    actual=keying,
+                )
+            )
         if not isinstance(missingness, list) or len(set(map(str, missingness))) < 2:
             failures.append(
                 _science_failure(
@@ -4318,6 +4332,54 @@ def _table_rows(path: Path) -> tuple[list[dict[str, object]], str | None]:
 
 def _row_has_value(row: dict[str, object], *fields: str) -> bool:
     return any(field in row and str(row[field]).strip() not in {"", "null", "None"} for field in fields)
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _positive_integer(value: object) -> int | None:
+    number = _finite_number(value)
+    if number is None or number <= 0 or not number.is_integer():
+        return None
+    return int(number)
+
+
+def _ordered_finite_ci(row: dict[str, object]) -> tuple[float, float] | None:
+    if _row_has_value(row, "ci_lower") and _row_has_value(row, "ci_upper"):
+        lower = _finite_number(row.get("ci_lower"))
+        upper = _finite_number(row.get("ci_upper"))
+    else:
+        raw = row.get("ci")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+            return None
+        lower = _finite_number(raw[0])
+        upper = _finite_number(raw[1])
+    if lower is None or upper is None or lower > upper:
+        return None
+    return lower, upper
+
+
+def _reported_headline(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value if value is not None else "").strip().lower()
+    if normalized in {"true", "yes", "1"}:
+        return True
+    if normalized in {"", "false", "no", "0"}:
+        return False
+    return None
 
 
 def _validate_regime_break_manifest(path: Path) -> list[dict[str, object]]:
@@ -4411,6 +4473,7 @@ def _validate_spec_curve(
         )
     specs = payload.get("specs")
     expected_count = math.prod(len(values) for values in expected_grid.values())
+    valid_cells: list[tuple[float, tuple[float, float]]] = []
     if not isinstance(specs, list) or len(specs) != expected_count:
         failures.append(
             _science_failure(
@@ -4438,6 +4501,26 @@ def _validate_spec_curve(
                     failures.append(
                         _science_failure("spec_curve_cell_field_missing", subject=f"{claim_id}:{index}", field=field)
                     )
+            estimate = _finite_number(spec.get("estimate"))
+            ci = _ordered_finite_ci(spec)
+            if estimate is None:
+                failures.append(
+                    _science_failure(
+                        "spec_curve_estimate_not_numeric",
+                        subject=f"{claim_id}:{index}",
+                        actual=spec.get("estimate"),
+                    )
+                )
+            if ci is None:
+                failures.append(
+                    _science_failure(
+                        "spec_curve_ci_not_ordered_finite",
+                        subject=f"{claim_id}:{index}",
+                        actual=spec.get("ci"),
+                    )
+                )
+            if estimate is not None and ci is not None:
+                valid_cells.append((estimate, ci))
             if spec.get("vce") != config.get("vce"):
                 failures.append(
                     _science_failure(
@@ -4457,23 +4540,68 @@ def _validate_spec_curve(
                 actual=payload.get("survival_threshold"),
             )
         )
-    survival = payload.get("survival_count")
-    if not isinstance(survival, int) or not isinstance(locked_threshold, int) or survival < locked_threshold:
+    headline = _finite_number(payload.get("headline_estimate"))
+    if headline is None:
         failures.append(
             _science_failure(
-                "spec_curve_survival_below_threshold",
+                "spec_curve_headline_estimate_not_numeric",
                 subject=claim_id,
-                expected=locked_threshold,
-                actual=survival,
+                actual=payload.get("headline_estimate"),
             )
         )
-    if payload.get("headline_within_curve") is not True:
-        failures.append(_science_failure("headline_outside_spec_curve", subject=claim_id))
-    for entry in payload.get("inputs", []) if isinstance(payload.get("inputs"), list) else []:
-        for failure in _verify_hash_claim(manifest=path, entry=entry):
+    if headline is not None and len(valid_cells) == expected_count:
+        headline_sign = 0 if headline == 0.0 else (1 if headline > 0.0 else -1)
+        recomputed_survival = sum(
+            1
+            for estimate, (lower, upper) in valid_cells
+            if (0 if estimate == 0.0 else (1 if estimate > 0.0 else -1)) == headline_sign
+            and (lower > 0.0 or upper < 0.0)
+        )
+        reported_survival = payload.get("survival_count")
+        if (
+            not isinstance(reported_survival, int)
+            or isinstance(reported_survival, bool)
+            or reported_survival != recomputed_survival
+        ):
             failures.append(
-                _science_failure("spec_curve_input_hash_invalid", subject=claim_id, actual=failure)
+                _science_failure(
+                    "spec_curve_survival_count_mismatch",
+                    subject=claim_id,
+                    expected=recomputed_survival,
+                    actual=reported_survival,
+                )
             )
+        if not isinstance(locked_threshold, int) or recomputed_survival < locked_threshold:
+            failures.append(
+                _science_failure(
+                    "spec_curve_survival_below_threshold",
+                    subject=claim_id,
+                    expected=locked_threshold,
+                    actual=recomputed_survival,
+                )
+            )
+        estimates = [estimate for estimate, _ci in valid_cells]
+        recomputed_within = min(estimates) <= headline <= max(estimates)
+        if payload.get("headline_within_curve") is not recomputed_within:
+            failures.append(
+                _science_failure(
+                    "spec_curve_headline_within_curve_mismatch",
+                    subject=claim_id,
+                    expected=recomputed_within,
+                    actual=payload.get("headline_within_curve"),
+                )
+            )
+        if not recomputed_within:
+            failures.append(_science_failure("headline_outside_spec_curve", subject=claim_id))
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, list) or not inputs:
+        failures.append(_science_failure("spec_curve_inputs_required", subject=claim_id))
+    else:
+        for entry in inputs:
+            for failure in _verify_hash_claim(manifest=path, entry=entry):
+                failures.append(
+                    _science_failure("spec_curve_input_hash_invalid", subject=claim_id, actual=failure)
+                )
     return failures
 
 
@@ -4527,26 +4655,44 @@ def gate_statistical_reporting() -> GateResult:
                         )
     claims, claim_failures = _load_claim_ledger()
     failures.extend(claim_failures)
-    registered = {
-        str(claim.get("claim_id")): claim
-        for claim in claims
-        if claim.get("type") in {"descriptive", "associational", "causal"}
-        and any(
-            isinstance(entry, dict)
+    table_artifacts_by_claim: dict[str, list[Path]] = {}
+    registered: dict[str, dict[str, object]] = {}
+    for claim in claims:
+        claim_id = str(claim.get("claim_id"))
+        artifacts = [
+            Path(str(entry["path"]))
+            for entry in claim.get("supporting_artifacts", [])
+            if isinstance(entry, dict)
             and isinstance(entry.get("path"), str)
             and entry["path"].startswith("reports/tables/")
-            for entry in claim.get("supporting_artifacts", [])
-        )
-    }
+        ]
+        if claim.get("type") in {"descriptive", "associational", "causal"} and artifacts:
+            registered[claim_id] = claim
+            table_artifacts_by_claim[claim_id] = artifacts
     rows_by_claim: dict[str, list[tuple[Path, dict[str, object]]]] = {}
+    headline_rows_by_claim: dict[str, int] = {}
+    recognized_suffixes = {".md", ".csv", ".json"}
+    referenced_paths = {
+        path for paths in table_artifacts_by_claim.values() for path in paths
+    }
+    for path in sorted(referenced_paths):
+        if path.suffix.lower() not in recognized_suffixes:
+            failures.append(
+                _science_failure(
+                    "unrecognized_statistical_table",
+                    subject=path.as_posix(),
+                    expected=sorted(recognized_suffixes),
+                )
+            )
     table_paths = sorted(
         path
-        for suffix in ("*.md", "*.csv", "*.json")
-        for path in Path("reports/tables").glob(suffix)
-        if path.is_file()
+        for path in Path("reports/tables").rglob("*")
+        if path.is_file() and path.suffix.lower() in recognized_suffixes
     )
+    row_counts: dict[Path, int] = {}
     for path in table_paths:
         rows, error = _table_rows(path)
+        row_counts[path] = len(rows)
         if error is not None:
             failures.append(_science_failure("invalid_statistical_table", subject=path.as_posix(), actual=error))
             continue
@@ -4564,31 +4710,91 @@ def gate_statistical_reporting() -> GateResult:
                     _science_failure("table_claim_id_not_registered", subject=f"{path.as_posix()}:{index + 1}", actual=claim_id)
                 )
                 continue
+            claim = registered[claim_id]
             rows_by_claim.setdefault(claim_id, []).append((path, row))
-            required_checks = {
-                "estimate": _row_has_value(row, "estimate"),
-                "se_or_ci": _row_has_value(row, "se", "standard_error")
-                or (_row_has_value(row, "ci_lower") and _row_has_value(row, "ci_upper"))
-                or _row_has_value(row, "ci"),
-                "n": _row_has_value(row, "n"),
-                "vce": str(row.get("vce", "")).strip() == str(config.get("vce")),
-            }
-            for rule, passed in required_checks.items():
-                if not passed:
-                    failures.append(
-                        _science_failure(
-                            f"statistical_table_{rule}_required",
-                            subject=f"{path.as_posix()}:{index + 1}",
-                            expected=config.get("vce") if rule == "vce" else True,
-                            actual=row.get("vce") if rule == "vce" else None,
-                        )
+            subject = f"{path.as_posix()}:{index + 1}"
+            if _finite_number(row.get("estimate")) is None:
+                failures.append(
+                    _science_failure(
+                        "statistical_estimate_not_numeric",
+                        subject=subject,
+                        actual=row.get("estimate"),
                     )
+                )
+            se = next(
+                (
+                    number
+                    for number in (
+                        _finite_number(row.get("se")),
+                        _finite_number(row.get("standard_error")),
+                    )
+                    if number is not None
+                ),
+                None,
+            )
+            ci = _ordered_finite_ci(row)
+            if se is None and ci is None:
+                failures.append(
+                    _science_failure(
+                        "statistical_se_or_ci_not_numeric",
+                        subject=subject,
+                        actual={
+                            "se": row.get("se", row.get("standard_error")),
+                            "ci": row.get("ci", [row.get("ci_lower"), row.get("ci_upper")]),
+                        },
+                    )
+                )
+            if _positive_integer(row.get("n", row.get("N"))) is None:
+                failures.append(
+                    _science_failure(
+                        "statistical_n_not_positive_integer",
+                        subject=subject,
+                        actual=row.get("n", row.get("N")),
+                    )
+                )
+            if str(row.get("vce", "")).strip() != str(config.get("vce")):
+                failures.append(
+                    _science_failure(
+                        "statistical_table_vce_required",
+                        subject=subject,
+                        expected=config.get("vce"),
+                        actual=row.get("vce"),
+                    )
+                )
+            reported_headline = _reported_headline(row.get("headline"))
+            ledger_headline = claim.get("headline") is True
+            if reported_headline is not ledger_headline:
+                failures.append(
+                    _science_failure(
+                        "statistical_headline_mismatch",
+                        subject=subject,
+                        expected=ledger_headline,
+                        actual=row.get("headline"),
+                    )
+                )
+            if reported_headline is True:
+                headline_rows_by_claim[claim_id] = headline_rows_by_claim.get(claim_id, 0) + 1
+
+    for path in sorted(referenced_paths):
+        if path.suffix.lower() not in recognized_suffixes:
+            continue
+        if not path.is_file():
+            failures.append(_science_failure("referenced_statistical_table_missing", subject=path.as_posix()))
+        elif row_counts.get(path, 0) == 0:
+            failures.append(
+                _science_failure(
+                    "invalid_statistical_table",
+                    subject=path.as_posix(),
+                    actual="registered table surface contains no parseable rows",
+                )
+            )
 
     for claim_id, claim in registered.items():
         if claim_id not in rows_by_claim:
             failures.append(_science_failure("registered_estimate_missing_table_row", subject=claim_id))
-            continue
         if claim.get("headline") is True:
+            if headline_rows_by_claim.get(claim_id, 0) == 0:
+                failures.append(_science_failure("headline_table_row_required", subject=claim_id))
             curve_path = Path("reports/analysis/spec_curve") / f"{claim_id}.json"
             if not curve_path.is_file():
                 failures.append(_science_failure("headline_spec_curve_required", subject=claim_id))
@@ -4617,7 +4823,9 @@ def gate_statistical_reporting() -> GateResult:
                 failures.append(
                     _science_failure("headline_measurement_uncertainty_required", subject=claim_id)
                 )
+    for claim in claims:
         if claim.get("type") == "causal":
+            claim_id = str(claim.get("claim_id"))
             sensitivity = claim.get("sensitivity_artifact")
             sensitivity_path = Path(str(sensitivity.get("path"))) if isinstance(sensitivity, dict) else None
             payload, error = (
