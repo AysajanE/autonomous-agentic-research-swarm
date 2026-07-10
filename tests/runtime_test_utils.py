@@ -326,6 +326,11 @@ def init_git_fixture_repo(root: Path) -> None:
     subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.name", "swarm-bot"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "swarm-bot@example.invalid"], cwd=root, check=True)
+    # background maintenance detaches and keeps writing .git after tests end,
+    # racing TemporaryDirectory teardown on fast runners
+    subprocess.run(["git", "config", "gc.auto", "0"], cwd=root, check=True)
+    subprocess.run(["git", "config", "gc.autoDetach", "false"], cwd=root, check=True)
+    subprocess.run(["git", "config", "maintenance.auto", "false"], cwd=root, check=True)
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-m", "initial fixture"], cwd=root, check=True, capture_output=True, text=True)
 
