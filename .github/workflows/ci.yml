@@ -38,6 +38,12 @@ jobs:
       - name: Run quality gates
         run: make gate
 
+      - name: BT2 Stage A rehearsal (frozen-reference regression + drills)
+        run: |
+          make bt2a-rehearsal
+          # the rehearsal report is deterministic; a drift dirties the tree
+          git diff --exit-code reports/status/bt2a/rehearsal.json
+
       - name: Run tests
         run: make test
 

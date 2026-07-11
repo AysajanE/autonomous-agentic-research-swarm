@@ -10969,6 +10969,88 @@ def gate_replication_package_audit(*, release_perimeter: bool = False) -> GateRe
     return check_replication_package_audit(Path("."), release_perimeter=release_perimeter)
 
 
+BT2_BAR_PATH = Path("contracts/bt2_bar.json")
+BT2_BAR_SCHEMA_VERSION = "research_swarm.bt2_bar.v1"
+BT2A_REHEARSAL_SCHEMA_VERSION = "research_swarm.bt2a_rehearsal.v1"
+_BT2_BAR_NUMBER_KEYS = (
+    "seeded_defect_catch_rate_min",
+    "human_review_hours_per_artifact_max",
+    "token_dollar_ceiling_usd",
+    "unresolved_fabrication_findings_max",
+    "registered_vs_reported_hypothesis_ratio",
+)
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def gate_bt2_bar() -> GateResult:
+    """Validate the pre-committed BT2 pass/fail bar (§10) and hold the LATEST
+    frozen-reference rehearsal to it: the bar must be present + well-formed with
+    the abort clause, and the committed rehearsal report's measured seeded-defect
+    catch rate must meet `seeded_defect_catch_rate_min`, its registered-vs-reported
+    hypothesis ratio must equal the committed invariant, its release perimeter must
+    have blocked as expected, and its frozen-reference known answers must have
+    reproduced.  Absent on a pack that has not committed a bar → skip."""
+    if not BT2_BAR_PATH.exists():
+        return GateResult(ok=True, details={"status": "no_bt2_bar", "skipped": True, "failures": []})
+
+    failures: list[str] = []
+    bar, error = _load_json_file(BT2_BAR_PATH)
+    if error is not None or not isinstance(bar, dict):
+        return GateResult(ok=False, details={"failures": [f"{BT2_BAR_PATH}:{error or 'not_object'}"]})
+    if bar.get("schema_version") != BT2_BAR_SCHEMA_VERSION:
+        failures.append("bt2_bar_invalid_schema_version")
+
+    pass_fail_bar = bar.get("pass_fail_bar")
+    if not isinstance(pass_fail_bar, dict):
+        failures.append("bt2_bar_pass_fail_bar_missing")
+        pass_fail_bar = {}
+    for key in _BT2_BAR_NUMBER_KEYS:
+        if not _is_number(pass_fail_bar.get(key)):
+            failures.append(f"bt2_bar_number_missing_or_invalid:{key}")
+
+    abort = bar.get("stage_b_abort_clause")
+    if (
+        not isinstance(abort, dict)
+        or not isinstance(abort.get("triggers"), list)
+        or len(abort.get("triggers", [])) < 4
+        or not isinstance(abort.get("required_artifact"), str)
+        or not abort.get("required_artifact", "").strip()
+    ):
+        failures.append("bt2_bar_abort_clause_malformed")
+
+    rehearsal_rel = bar.get("rehearsal_report")
+    if not isinstance(rehearsal_rel, str) or not rehearsal_rel.strip():
+        failures.append("bt2_bar_rehearsal_report_unbound")
+    else:
+        report, rerror = _load_json_file(Path(rehearsal_rel))
+        if rerror is not None or not isinstance(report, dict):
+            failures.append(f"bt2_bar_rehearsal_report_unreadable:{rerror or 'not_object'}")
+        else:
+            if report.get("schema_version") != BT2A_REHEARSAL_SCHEMA_VERSION:
+                failures.append("bt2_bar_rehearsal_invalid_schema")
+            if report.get("all_known_answers_reproduced") is not True:
+                failures.append("bt2_bar_rehearsal_reference_not_reproduced")
+            catch = report.get("seeded_defect_catch_rate")
+            min_catch = pass_fail_bar.get("seeded_defect_catch_rate_min")
+            if not _is_number(catch) or not _is_number(min_catch) or catch < min_catch:
+                failures.append("bt2_bar_catch_rate_below_threshold")
+            if report.get("registered_vs_reported_hypothesis_ratio") != pass_fail_bar.get(
+                "registered_vs_reported_hypothesis_ratio"
+            ):
+                failures.append("bt2_bar_hypothesis_ratio_violated")
+            perimeter = report.get("release_perimeter")
+            if not isinstance(perimeter, dict) or perimeter.get("release_blocked_as_expected") is not True:
+                failures.append("bt2_bar_release_perimeter_not_exercised")
+
+    return GateResult(
+        ok=not failures,
+        details={"status": "bt2_bar", "failures": [{"reason": reason} for reason in failures]},
+    )
+
+
 _CORE_GATE_NAMES = (
     "pack_compat",
     "scaffold_safety",
@@ -11018,6 +11100,7 @@ _MODE_INDEPENDENT_SCIENCE_GATES = (
     "render_qa",
     "text_overlap",
     "checklist_derivation",
+    "bt2_bar",
 )
 _EMPIRICAL_SCIENCE_GATES = (
     "prereg_conformance",
@@ -11063,6 +11146,7 @@ _ALL_GATE_NAMES = _CORE_GATE_NAMES + (
     "render_qa",
     "text_overlap",
     "checklist_derivation",
+    "bt2_bar",
 )
 
 
@@ -11127,6 +11211,7 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
         "network_strings": gate_network_strings,
         "task_lint": gate_task_lint,
         "runbook_staleness": gate_runbook_staleness,
+        "bt2_bar": gate_bt2_bar,
         "prereg_lock_coverage": gate_prereg_lock_coverage,
         "raw_retention": gate_raw_retention,
         "program_conformance": gate_program_conformance,

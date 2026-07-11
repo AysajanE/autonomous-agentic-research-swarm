@@ -148,6 +148,36 @@ adversarially at every milestone with fresh cases aimed at current mechanisms.
 Prompt/contract PRs run only the visible `tests/golden/` regression tier in CI.
 Tier-c live-LLM calibration remains on-demand/BT2 and is not a per-PR job.
 
+## BT2 Stage A rehearsal and the pass/fail bar
+
+Re-run the STR pack as a frozen-reference regression plus seeded drills with:
+
+```sh
+make bt2a-rehearsal
+```
+
+It asserts the KNOWN ANSWERS reproduce (`reproduce-analysis` byte/content identity
++ computed-paper key resolution), executes the seeded-defect rotation (empirical
+fabrication classes + a proof defect + a bridge-layer tampered-instance defect —
+every case must be CAUGHT), exercises the release perimeter (the all-failing STR
+registry correctly BLOCKS a release — recorded as the EXPECTED known outcome), and
+writes the deterministic `reports/status/bt2a/rehearsal.json`. A drift in any
+frozen-reference value, a missed injection, or a release that fails to block is a
+RED regression. The report is committed evidence; the drill KPI events go to the
+ephemeral drill journal, never the compliance journal.
+
+The pre-committed BT2 pass/fail bar lives in `contracts/bt2_bar.json` (§10):
+`seeded_defect_catch_rate_min`, `human_review_hours_per_artifact_max`,
+`token_dollar_ceiling_usd`, `unresolved_fabrication_findings_max`,
+`registered_vs_reported_hypothesis_ratio`, plus the Stage B abort clause (an
+aborted Stage B is a measured outcome — event-journal closure + a written
+negative-result report through the manuscript machinery, not a silent stall). The
+`bt2_bar` gate validates the bar is present + well-formed and holds the LATEST
+rehearsal report to it (catch rate ≥ threshold, hypothesis ratio = 1, release
+perimeter blocked, frozen reference reproduced). Stage B (a real fresh research
+program) is out of scope for Stage A and is judged against these numbers under its
+own project contract.
+
 ## Effective scratch confinement
 
 The integrity audit always uses a disposable detached worktree (or a hermetic
@@ -250,3 +280,4 @@ Adding a kernel gate without adding its operator entry fails CI.
 - gate: render_qa
 - gate: text_overlap
 - gate: checklist_derivation
+- gate: bt2_bar

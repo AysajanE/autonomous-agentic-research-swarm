@@ -1,0 +1,31 @@
+{
+  "schema_version": "research_swarm.bt2_bar.v1",
+  "committed_at_utc": "2026-07-11",
+  "recommended_stage_b_mode": "hybrid",
+  "rehearsal_report": "reports/status/bt2a/rehearsal.json",
+  "pass_fail_bar": {
+    "seeded_defect_catch_rate_min": 1.0,
+    "human_review_hours_per_artifact_max": 8.0,
+    "token_dollar_ceiling_usd": 1500.0,
+    "unresolved_fabrication_findings_max": 0,
+    "registered_vs_reported_hypothesis_ratio": 1
+  },
+  "number_provenance": {
+    "seeded_defect_catch_rate_min": "BT2-A drill-baseline: the rotation caught 5/5 (rate 1.0); the fabrication class is unforgivable, so the committed threshold is 1.0.",
+    "human_review_hours_per_artifact_max": "Plan §11 (~6 human-hours for the manuscript gate alone) plus the other §5.4 per-artifact touchpoints; committed at 8.0h with margin.",
+    "token_dollar_ceiling_usd": "Plan §9.1: BT2 Stage A ≈ a few hundred dollars; a full Stage-B end-to-end release is larger and is re-confirmed in Stage B's own project contract — committed ceiling 1500 USD.",
+    "unresolved_fabrication_findings_max": "Scientific-integrity invariant (§2 top-priority): zero unresolved fabrication findings at release.",
+    "registered_vs_reported_hypothesis_ratio": "Bidirectional prereg-conformance invariant (§6): every registered hypothesis has a terminal reported outcome."
+  },
+  "stage_b_abort_clause": {
+    "note": "An aborted Stage B is a MEASURED outcome, not a silent stall. These numbers are what a future BT2 Stage B (a real fresh research program, budgeted in its own project contract) is judged against.",
+    "triggers": [
+      "program_budget_ceiling_breached",
+      "seeded_or_live_provenance_defect_not_caught_by_the_pipeline",
+      "unrecoverable_data_validity_break",
+      "human_owner_withdrawal"
+    ],
+    "required_artifact": "orderly abort: event-journal closure plus a written abort/negative-result report through the same manuscript machinery (§6.5)"
+  },
+  "scope": "Stage A (rehearsal) commits these numbers and validates them against the STR frozen-reference rehearsal. Stage B (the real launch) is OUT OF SCOPE here and is budgeted/executed under its own contract."
+}

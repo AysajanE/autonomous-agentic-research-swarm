@@ -785,8 +785,8 @@ class M3aScienceGateTest(unittest.TestCase):
                 names = list(quality_gates._collect_gate_results())
             self.assertEqual(names, list(quality_gates._ALL_GATE_NAMES))
             self.assertEqual(
-                names[-3:],
-                ["render_qa", "text_overlap", "checklist_derivation"],
+                names[-4:],
+                ["render_qa", "text_overlap", "checklist_derivation", "bt2_bar"],
             )
 
 

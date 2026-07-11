@@ -1,9 +1,12 @@
 PYTHON ?= python3.11
 
-.PHONY: gate reproduce-analysis paper drill eval-heldout
+.PHONY: gate reproduce-analysis paper drill eval-heldout bt2a-rehearsal
 
 gate:
 	$(PYTHON) scripts/quality_gates.py
+
+bt2a-rehearsal:
+	$(PYTHON) scripts/bt2a_rehearsal.py
 
 reproduce-analysis:
 	$(PYTHON) scripts/reproduce_analysis.py

@@ -1,0 +1,50 @@
+{
+  "all_known_answers_reproduced": true,
+  "drills": [
+    {
+      "blocking_gate": "swarm_run_manifest",
+      "caught": true,
+      "defect_class": "fabricated_run_manifest",
+      "drill_id": "M5B-D01"
+    },
+    {
+      "blocking_gate": "citation_integrity",
+      "caught": true,
+      "defect_class": "fabricated_citation",
+      "drill_id": "M5B-D02"
+    },
+    {
+      "blocking_gate": "claim_evidence_ledger",
+      "caught": true,
+      "defect_class": "fabricated_claim_number",
+      "drill_id": "M5B-D03"
+    },
+    {
+      "blocking_gate": "theoretical_falsification",
+      "caught": true,
+      "defect_class": "false_lemma",
+      "drill_id": "M5B-D04"
+    },
+    {
+      "blocking_gate": "instance_manifest_conformance",
+      "caught": true,
+      "defect_class": "tampered_instance",
+      "drill_id": "M5B-D05"
+    }
+  ],
+  "kind": "frozen_reference_regression",
+  "machinery_coverage": [
+    "computed_paper_key_resolution",
+    "registered_vs_reported_hypothesis_ratio",
+    "release_perimeter_exercised",
+    "reproduce_analysis_byte_and_content_identity",
+    "seeded_defect_drill_rotation"
+  ],
+  "registered_vs_reported_hypothesis_ratio": 1.0,
+  "release_perimeter": {
+    "registry_all_failing": true,
+    "release_blocked_as_expected": true
+  },
+  "schema_version": "research_swarm.bt2a_rehearsal.v1",
+  "seeded_defect_catch_rate": 1.0
+}
