@@ -154,7 +154,12 @@ class M4cReplicationTests(unittest.TestCase):
             export = tmp_path / "export"
             export.mkdir()
             with tarfile.open(archive) as handle:
-                handle.extractall(export, filter="data")
+                # The data filter was backported to CPython 3.11.4; CI runs 3.11.0. This tar is a
+                # git archive of the repo's own tracked files, so fall back to a plain extract.
+                try:
+                    handle.extractall(export, filter="data")
+                except TypeError:
+                    handle.extractall(export)
             for profile in ("modeling", "hybrid"):
                 package = tmp_path / f"package-{profile}"
                 replication.generate_package(export / f"tests/fixtures/m4c_{profile}", package, profile=profile)
