@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 import re
 
-import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -67,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("paper_values_top_level_not_object")
     try:
         resolved = resolve_manuscript(args.source.read_text(encoding="utf-8"), payload)
-        authorship = yaml.safe_load(args.authorship.read_text(encoding="utf-8"))
+        authorship = json.loads(args.authorship.read_text(encoding="utf-8"))
         if not isinstance(authorship, dict):
             raise ValueError("authorship_top_level_not_object")
         resolved = render_authorship_front_matter(resolved, authorship)

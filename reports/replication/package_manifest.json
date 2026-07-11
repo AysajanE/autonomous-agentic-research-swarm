@@ -18,9 +18,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 5066,
+      "bytes": 4853,
       "path": "README.md",
-      "sha256": "23128be4383ffa09834905a132021ccfb69100e253156a22fe0ea61d39372df7",
+      "sha256": "ad39876fd9bcb91e24a7ad16e566c46520edca05abfc6d11e2410ff0342adfa5",
       "verification_bar": "byte_identity"
     },
     {
@@ -48,9 +48,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 1445,
+      "bytes": 1644,
       "path": "contracts/authorship.yaml",
-      "sha256": "e452225b77d6b58839deadd3bc2b8df94b937a7bf0adf9a48e1c5cbcc4c33c94",
+      "sha256": "7e45d72e38cc87d886e79a292ddf73393127d8d8d341b8525facba0a262bd212",
       "verification_bar": "byte_identity"
     },
     {
@@ -132,9 +132,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 864,
+      "bytes": 1030,
       "path": "contracts/manuscript_sections.yaml",
-      "sha256": "b68e2d5a6ba2dadf4eed6af8582441d1b55b7a9d28f0dd31fc18f93c5a50aa75",
+      "sha256": "f30a45aa1a790f01609f90260bc4046475b33749b18549d4b25f64766e9dbecb",
       "verification_bar": "byte_identity"
     },
     {
@@ -378,9 +378,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 1215,
+      "bytes": 1468,
       "path": "contracts/venue.yaml",
-      "sha256": "e5aa2094488933b438e82214cb5edd276c5240614828c9656c836884be2283b1",
+      "sha256": "05212f1c4823e4cd8bd78aa73f2fa5f59665d0dd9f019f0e7717f3429daa7c0a",
       "verification_bar": "byte_identity"
     },
     {
@@ -1616,9 +1616,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 455034,
+      "bytes": 455177,
       "path": "scripts/quality_gates.py",
-      "sha256": "d2796701a2433e7cd6bb0065bf7e1363d8e1165160e9748812bb6cb9664414b9",
+      "sha256": "5d71fb91228ed7f07fdac49a4cbe2c6c766528e37afc8742f1c9e7f82f3e1d9c",
       "verification_bar": "byte_identity"
     },
     {
@@ -1634,9 +1634,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 3284,
+      "bytes": 3268,
       "path": "scripts/render_paper.py",
-      "sha256": "6b193547368d68be27b79a10ea88f76173f7b79e3cfac87e21dbff11871fb176",
+      "sha256": "0641dd638812b34f4032ed08eb8a089fb0ac30124b590ea8529e8365ac9bb37a",
       "verification_bar": "byte_identity"
     },
     {
@@ -1646,9 +1646,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 39797,
+      "bytes": 40703,
       "path": "scripts/replication_package.py",
-      "sha256": "fdbe464efa9c8ced6835e9ccad31c43464f0967de6e2faa717319e71c2c1b11a",
+      "sha256": "9f704dc1fa9cb60a53ab235abb85a49b57c533cc93d4d2df3bf00e83dae9f9a3",
       "verification_bar": "byte_identity"
     },
     {

@@ -14,7 +14,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -198,9 +197,9 @@ class M4cReplicationTests(unittest.TestCase):
             root = Path(tmp)
             _venue_fixture(root)
             path = root / "contracts/venue.yaml"
-            venue = yaml.safe_load(path.read_text(encoding="utf-8"))
+            venue = json.loads(path.read_text(encoding="utf-8"))
             venue["ai_policy"]["allowed_release_modes"] = ["ai_native"]
-            path.write_text(yaml.safe_dump(venue, sort_keys=False), encoding="utf-8")
+            path.write_text(json.dumps(venue, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             result = quality_gates.check_venue_compliance(root)
             self.assertFalse(result.ok)
             self.assertIn("venue_compliance_mode_conflict", _reasons(result))
@@ -210,9 +209,9 @@ class M4cReplicationTests(unittest.TestCase):
             root = Path(tmp)
             _venue_fixture(root)
             path = root / "contracts/venue.yaml"
-            venue = yaml.safe_load(path.read_text(encoding="utf-8"))
+            venue = json.loads(path.read_text(encoding="utf-8"))
             venue["venue_consent"]["consent_compatible"] = False
-            path.write_text(yaml.safe_dump(venue, sort_keys=False), encoding="utf-8")
+            path.write_text(json.dumps(venue, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             result = quality_gates.check_venue_compliance(root, submission_declared=True)
             self.assertFalse(result.ok)
             self.assertIn("venue_compliance_consent_incompatible", _reasons(result))
@@ -315,20 +314,20 @@ class M4cReplicationTests(unittest.TestCase):
             root = Path(tmp)
             _venue_fixture(root)
             authorship_path = root / "contracts/authorship.yaml"
-            authorship = yaml.safe_load(authorship_path.read_text(encoding="utf-8"))
+            authorship = json.loads(authorship_path.read_text(encoding="utf-8"))
             authorship["human_author_of_record"] = "Fixture Author"
             authorship["human_author_consent"] = {
                 "status": "consented",
                 "evidence_pointer": {"path": "evidence/missing-consent.json", "sha256": "a" * 64},
             }
-            authorship_path.write_text(yaml.safe_dump(authorship, sort_keys=False), encoding="utf-8")
+            authorship_path.write_text(json.dumps(authorship, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             manuscript = root / "reports/paper/index.qmd"
             manuscript.write_text(
                 manuscript.read_text(encoding="utf-8").replace("author: null", 'author: "Fixture Author"'),
                 encoding="utf-8",
             )
             venue_path = root / "contracts/venue.yaml"
-            venue = yaml.safe_load(venue_path.read_text(encoding="utf-8"))
+            venue = json.loads(venue_path.read_text(encoding="utf-8"))
             venue["venue_consent"].update(
                 {
                     "real_submission_authorized": True,
@@ -339,7 +338,7 @@ class M4cReplicationTests(unittest.TestCase):
                 "path": "evidence/missing-policy.json",
                 "sha256": "c" * 64,
             }
-            venue_path.write_text(yaml.safe_dump(venue, sort_keys=False), encoding="utf-8")
+            venue_path.write_text(json.dumps(venue, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             result = quality_gates.check_venue_compliance(root, submission_declared=True)
             reasons = _reasons(result)
             self.assertIn("venue_compliance_consent_evidence_unresolved", reasons)
@@ -350,9 +349,9 @@ class M4cReplicationTests(unittest.TestCase):
             root = Path(tmp)
             _venue_fixture(root)
             sections_path = root / "contracts/manuscript_sections.yaml"
-            sections = yaml.safe_load(sections_path.read_text(encoding="utf-8"))
+            sections = json.loads(sections_path.read_text(encoding="utf-8"))
             del sections["required_statement_bindings"]["data_availability"]
-            sections_path.write_text(yaml.safe_dump(sections, sort_keys=False), encoding="utf-8")
+            sections_path.write_text(json.dumps(sections, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             result = quality_gates.check_venue_compliance(root, submission_declared=True)
             failures = result.details["failures"]
             self.assertTrue(

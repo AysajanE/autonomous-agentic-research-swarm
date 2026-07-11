@@ -28,7 +28,6 @@ import subprocess
 import sys
 from typing import Any
 
-import yaml
 
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -10222,9 +10221,12 @@ def gate_raw_retention() -> GateResult:
 
 
 def _load_yaml_object(path: Path) -> tuple[dict[str, object] | None, str | None]:
+    # Contracts are written as JSON-in-YAML (the repo convention — see claims.yaml,
+    # program_templates/*.yaml) and parsed with json.loads; the repo deliberately carries
+    # no pyyaml runtime dependency.
     try:
-        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
         return None, str(exc)
     return (payload, None) if isinstance(payload, dict) else (None, "top_level_not_object")
 
@@ -10256,13 +10258,12 @@ def _statement_binding_resolves(
     if not isinstance(selector, str) or not selector.strip():
         return False
     try:
-        if path.suffix.lower() == ".json":
+        if path.suffix.lower() in {".json", ".yaml", ".yml"}:
+            # JSON-in-YAML contracts (see _load_yaml_object).
             value: object = json.loads(path.read_text(encoding="utf-8"))
-        elif path.suffix.lower() in {".yaml", ".yml"}:
-            value = yaml.safe_load(path.read_text(encoding="utf-8"))
         else:
             return False
-    except (OSError, json.JSONDecodeError, yaml.YAMLError):
+    except (OSError, json.JSONDecodeError):
         return False
     for part in selector.split("."):
         if not isinstance(value, dict) or part not in value:

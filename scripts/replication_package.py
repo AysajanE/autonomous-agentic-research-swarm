@@ -17,7 +17,6 @@ import tempfile
 import tomllib
 from typing import Any, Iterable
 
-import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -86,9 +85,16 @@ def _json(path: Path) -> dict[str, Any]:
 def _project_mode(repo: Path) -> str:
     project = repo / "contracts/project.yaml"
     if project.is_file():
-        payload = yaml.safe_load(project.read_text(encoding="utf-8")) or {}
-        if isinstance(payload, dict) and payload.get("mode") in PROFILES:
-            return str(payload["mode"])
+        # project.yaml is authored YAML; the repo reads only the `mode:` scalar from it
+        # with a manual line parse (no pyyaml runtime dependency — see quality_gates
+        # _parse_project_mode). framework.json's project_mode is the JSON fallback.
+        for raw_line in project.read_text(encoding="utf-8").splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if line.startswith("mode:"):
+                mode = line.split(":", 1)[1].strip().strip("'\"").lower()
+                if mode in PROFILES:
+                    return mode
+                break
     spec = repo / "replication_spec.json"
     if spec.is_file():
         value = _json(spec).get("profile")
@@ -230,7 +236,18 @@ def _exhibit_mapping(repo: Path) -> list[dict[str, object]]:
         return []
     payload = _json(path)
     catalog_path = repo / "reports/catalog.yaml"
-    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8")) if catalog_path.is_file() else {}
+    # reports/catalog.yaml is authored YAML (rendered by release_assembly); the exhibit
+    # mapping's authoritative source is the JSON exhibits manifest above, and the catalog's
+    # artifact_roots is supplementary. Read it only if it is JSON-in-YAML; otherwise degrade
+    # to {} rather than take a pyyaml runtime dependency.
+    catalog: dict[str, object] = {}
+    if catalog_path.is_file():
+        try:
+            loaded = json.loads(catalog_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                catalog = loaded
+        except json.JSONDecodeError:
+            catalog = {}
     catalog_roots = catalog.get("artifact_roots", {}) if isinstance(catalog, dict) else {}
     mappings: list[dict[str, object]] = []
     for item in payload.get("exhibits", []):

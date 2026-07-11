@@ -9,7 +9,6 @@ import sys
 import tempfile
 import unittest
 
-import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -261,9 +260,9 @@ class GoldenM4cTests(unittest.TestCase):
             root = Path(tmp)
             _venue_fixture(root)
             path = root / "contracts/venue.yaml"
-            venue = yaml.safe_load(path.read_text(encoding="utf-8"))
+            venue = json.loads(path.read_text(encoding="utf-8"))
             venue["ai_policy"]["allowed_release_modes"] = ["ai_native"]
-            path.write_text(yaml.safe_dump(venue, sort_keys=False), encoding="utf-8")
+            path.write_text(json.dumps(venue, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             result = quality_gates.check_venue_compliance(root)
             self.assertIn("venue_compliance_mode_conflict", _reasons(result))
 
@@ -273,9 +272,9 @@ class GoldenM4cTests(unittest.TestCase):
             root = Path(tmp)
             _venue_fixture(root)
             path = root / "contracts/venue.yaml"
-            venue = yaml.safe_load(path.read_text(encoding="utf-8"))
+            venue = json.loads(path.read_text(encoding="utf-8"))
             venue["venue_consent"]["consent_compatible"] = False
-            path.write_text(yaml.safe_dump(venue, sort_keys=False), encoding="utf-8")
+            path.write_text(json.dumps(venue, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             result = quality_gates.check_venue_compliance(root, submission_declared=True)
             self.assertIn("venue_compliance_consent_incompatible", _reasons(result))
 
