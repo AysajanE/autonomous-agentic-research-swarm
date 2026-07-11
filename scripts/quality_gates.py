@@ -11007,15 +11007,36 @@ def gate_bt2_bar() -> GateResult:
     if not isinstance(pass_fail_bar, dict):
         failures.append("bt2_bar_pass_fail_bar_missing")
         pass_fail_bar = {}
+    provenance = bar.get("number_provenance") if isinstance(bar.get("number_provenance"), dict) else {}
     for key in _BT2_BAR_NUMBER_KEYS:
-        if not _is_number(pass_fail_bar.get(key)):
+        value = pass_fail_bar.get(key)
+        if not _is_number(value):
             failures.append(f"bt2_bar_number_missing_or_invalid:{key}")
+            continue
+        # DOMAIN constraints — a well-typed number is not enough: an out-of-range
+        # bar would silently weaken the committed invariant or the abort policy.
+        if key == "seeded_defect_catch_rate_min" and not (0.0 < value <= 1.0):
+            failures.append("bt2_bar_catch_threshold_out_of_range")
+        if key == "registered_vs_reported_hypothesis_ratio" and value != 1:
+            failures.append("bt2_bar_hypothesis_ratio_invariant_not_one")
+        if key == "unresolved_fabrication_findings_max" and (isinstance(value, float) or value != 0):
+            failures.append("bt2_bar_fabrication_ceiling_not_zero")
+        if key in {"human_review_hours_per_artifact_max", "token_dollar_ceiling_usd"} and not value > 0:
+            failures.append(f"bt2_bar_nonpositive:{key}")
+        if not isinstance(provenance.get(key), str) or not provenance.get(key, "").strip():
+            failures.append(f"bt2_bar_number_provenance_missing:{key}")
 
     abort = bar.get("stage_b_abort_clause")
+    triggers = abort.get("triggers") if isinstance(abort, dict) else None
+    valid_triggers = (
+        isinstance(triggers, list)
+        and len(triggers) >= 4
+        and all(isinstance(t, str) and t.strip() for t in triggers)
+        and len({t for t in triggers if isinstance(t, str)}) == len(triggers)
+    )
     if (
         not isinstance(abort, dict)
-        or not isinstance(abort.get("triggers"), list)
-        or len(abort.get("triggers", [])) < 4
+        or not valid_triggers
         or not isinstance(abort.get("required_artifact"), str)
         or not abort.get("required_artifact", "").strip()
     ):
@@ -11033,16 +11054,32 @@ def gate_bt2_bar() -> GateResult:
                 failures.append("bt2_bar_rehearsal_invalid_schema")
             if report.get("all_known_answers_reproduced") is not True:
                 failures.append("bt2_bar_rehearsal_reference_not_reproduced")
+            # Reconcile the summary catch rate against the drill list rather than
+            # trusting the reported number: a report claiming 1.0 with a drill
+            # marked caught:false must NOT pass.
+            drills = report.get("drills")
             catch = report.get("seeded_defect_catch_rate")
             min_catch = pass_fail_bar.get("seeded_defect_catch_rate_min")
-            if not _is_number(catch) or not _is_number(min_catch) or catch < min_catch:
-                failures.append("bt2_bar_catch_rate_below_threshold")
+            if not isinstance(drills, list) or not drills or not all(isinstance(d, dict) for d in drills):
+                failures.append("bt2_bar_rehearsal_drills_missing")
+            else:
+                caught = sum(1 for d in drills if d.get("caught") is True)
+                recomputed = caught / len(drills)
+                if not _is_number(catch) or abs(catch - recomputed) > 1e-9:
+                    failures.append("bt2_bar_catch_rate_inconsistent_with_drills")
+                elif not _is_number(min_catch) or recomputed < min_catch:
+                    failures.append("bt2_bar_catch_rate_below_threshold")
             if report.get("registered_vs_reported_hypothesis_ratio") != pass_fail_bar.get(
                 "registered_vs_reported_hypothesis_ratio"
             ):
                 failures.append("bt2_bar_hypothesis_ratio_violated")
             perimeter = report.get("release_perimeter")
-            if not isinstance(perimeter, dict) or perimeter.get("release_blocked_as_expected") is not True:
+            if (
+                not isinstance(perimeter, dict)
+                or perimeter.get("release_blocked_as_expected") is not True
+                or perimeter.get("registry_all_failing") is not True
+                or perimeter.get("blocked_by_registry") is not True
+            ):
                 failures.append("bt2_bar_release_perimeter_not_exercised")
 
     return GateResult(

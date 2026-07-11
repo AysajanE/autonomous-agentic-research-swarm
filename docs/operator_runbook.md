@@ -172,11 +172,18 @@ The pre-committed BT2 pass/fail bar lives in `contracts/bt2_bar.json` (§10):
 `registered_vs_reported_hypothesis_ratio`, plus the Stage B abort clause (an
 aborted Stage B is a measured outcome — event-journal closure + a written
 negative-result report through the manuscript machinery, not a silent stall). The
-`bt2_bar` gate validates the bar is present + well-formed and holds the LATEST
-rehearsal report to it (catch rate ≥ threshold, hypothesis ratio = 1, release
-perimeter blocked, frozen reference reproduced). Stage B (a real fresh research
-program) is out of scope for Stage A and is judged against these numbers under its
-own project contract.
+`bt2_bar` gate validates the bar is present + well-formed (domain-checked: catch
+threshold in (0,1], hypothesis-ratio invariant = 1, zero fabrication ceiling,
+positive review-hours/$ ceiling, four unique abort triggers, per-number
+provenance) and holds the rehearsal report to it — reconciling the catch rate
+against the drill list (not the reported number), requiring the release block to
+be attributable to the failing registry, and requiring the frozen reference to
+have reproduced. The gate validates the COMMITTED reference; report FRESHNESS is
+CI-enforced — CI runs `make bt2a-rehearsal` (regenerating the report) BEFORE
+`make gate` and asserts the report is byte-stable, so a stale report cannot pass
+in CI. The `human_review_hours` and `$` numbers are committed PROVISIONALLY
+(see `contracts/bt2_bar.json` provenance), to be confirmed by Stage B's
+spend-ledger actuals under its own project contract.
 
 ## Effective scratch confinement
 

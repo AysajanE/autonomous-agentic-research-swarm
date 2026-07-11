@@ -42,6 +42,7 @@
   ],
   "registered_vs_reported_hypothesis_ratio": 1.0,
   "release_perimeter": {
+    "blocked_by_registry": true,
     "registry_all_failing": true,
     "release_blocked_as_expected": true
   },

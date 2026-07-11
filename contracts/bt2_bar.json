@@ -1,6 +1,11 @@
 {
   "schema_version": "research_swarm.bt2_bar.v1",
   "committed_at_utc": "2026-07-11",
+  "commitment_timing": {
+    "plan_says": "§10 line 446: numbers committed at M5 into the project contract.",
+    "actual": "Committed at the M5→BT2-A boundary (this Stage-A branch), a RECORDED timing deviation. Rationale: the seeded-defect catch-rate baseline is produced by the M5-B drill harness, so the earliest point at which the catch-rate number can be committed from a measured baseline is BT2-A. The SHAPE (the five metrics + abort clause) was fixed at plan time (v1.3).",
+    "ex_ante_status": "seeded_defect_catch_rate_min (1.0), registered_vs_reported_hypothesis_ratio (1), and unresolved_fabrication_findings_max (0) are PRINCIPLED invariants (the unforgivable fabrication class + the bidirectional prereg invariant), not thresholds fitted to the observed 5/5 result. human_review_hours_per_artifact_max and token_dollar_ceiling_usd are PROVISIONAL estimates (see provisional flags) to be confirmed by Stage B's spend-ledger actuals in its own project contract."
+  },
   "recommended_stage_b_mode": "hybrid",
   "rehearsal_report": "reports/status/bt2a/rehearsal.json",
   "pass_fail_bar": {
@@ -10,12 +15,16 @@
     "unresolved_fabrication_findings_max": 0,
     "registered_vs_reported_hypothesis_ratio": 1
   },
+  "provisional": {
+    "human_review_hours_per_artifact_max": true,
+    "token_dollar_ceiling_usd": true
+  },
   "number_provenance": {
-    "seeded_defect_catch_rate_min": "BT2-A drill-baseline: the rotation caught 5/5 (rate 1.0); the fabrication class is unforgivable, so the committed threshold is 1.0.",
-    "human_review_hours_per_artifact_max": "Plan §11 (~6 human-hours for the manuscript gate alone) plus the other §5.4 per-artifact touchpoints; committed at 8.0h with margin.",
-    "token_dollar_ceiling_usd": "Plan §9.1: BT2 Stage A ≈ a few hundred dollars; a full Stage-B end-to-end release is larger and is re-confirmed in Stage B's own project contract — committed ceiling 1500 USD.",
-    "unresolved_fabrication_findings_max": "Scientific-integrity invariant (§2 top-priority): zero unresolved fabrication findings at release.",
-    "registered_vs_reported_hypothesis_ratio": "Bidirectional prereg-conformance invariant (§6): every registered hypothesis has a terminal reported outcome."
+    "seeded_defect_catch_rate_min": "Firm invariant: the fabrication class is unforgivable (§2), so the committed threshold is 1.0; the BT2-A drill baseline measured 5/5 (rate 1.0), which confirms the pipeline meets it but does not set it.",
+    "human_review_hours_per_artifact_max": "PROVISIONAL: plan §11 gives ~6 human-hours for the manuscript gate alone plus the other §5.4 per-artifact touchpoints (amendment reviews, escalations, merge-conflict resolution); committed at 8.0h as a planning estimate, to be replaced by Stage B spend-ledger/touchpoint actuals.",
+    "token_dollar_ceiling_usd": "PROVISIONAL: plan §9.1 estimates BT2 Stage A ≈ a few hundred dollars and states Stage B is budgeted in its own project contract; committed at 1500 USD as a planning-grade Stage-B end-to-end release ceiling, to be fixed by Stage B's contract from M1 spend-ledger actuals.",
+    "unresolved_fabrication_findings_max": "Firm invariant (§2 top-priority): zero unresolved fabrication findings at release.",
+    "registered_vs_reported_hypothesis_ratio": "Firm invariant (§6 bidirectional prereg conformance): every REGISTERED hypothesis in the active analysis-plan lock has a terminal REPORTED outcome."
   },
   "stage_b_abort_clause": {
     "note": "An aborted Stage B is a MEASURED outcome, not a silent stall. These numbers are what a future BT2 Stage B (a real fresh research program, budgeted in its own project contract) is judged against.",

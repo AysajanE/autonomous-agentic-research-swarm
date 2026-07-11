@@ -27,6 +27,7 @@ for _p in (REPO_ROOT / "scripts", REPO_ROOT / "tests"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+import quality_gates  # noqa: E402
 import release_assembly  # noqa: E402
 import render_paper  # noqa: E402
 import reproduce_analysis  # noqa: E402
@@ -82,14 +83,25 @@ def _registry_all_failing() -> bool:
 def exercise_release_perimeter() -> dict[str, object]:
     """The all-failing STR registry must BLOCK a release — the expected known
     outcome the rehearsal RECORDS (not a rehearsal failure).  A release that is
-    NOT blocked here is a RED regression of the release perimeter."""
+    NOT blocked, or a block NOT causally attributable to the failing registry
+    (`paper_registry`), is a RED regression of the release perimeter."""
     payload = release_assembly.check_release_integrity(REPO_ROOT, enforce_required_gates=True)
     blocked = not bool(payload.get("ok", False))
     if not blocked:
         raise RehearsalRed("release_perimeter_did_not_block_all_failing_registry")
+    registry_all_failing = _registry_all_failing()
+    if not registry_all_failing:
+        raise RehearsalRed("release_perimeter_registry_not_all_failing")
+    # The block must be CAUSED by the failing registry, not merely by some
+    # unrelated required gate — otherwise "the registry blocks release" is unproven.
+    failures = payload.get("failures", [])
+    blocked_by_registry = any("paper_registry" in str(item) for item in failures)
+    if not blocked_by_registry:
+        raise RehearsalRed("release_block_not_attributable_to_paper_registry")
     return {
-        "registry_all_failing": _registry_all_failing(),
+        "registry_all_failing": True,
         "release_blocked_as_expected": True,
+        "blocked_by_registry": True,
     }
 
 
@@ -117,12 +129,37 @@ def run_drills(timestamp: str) -> dict[str, object]:
 
 
 def hypothesis_ratio() -> float:
-    """registered-vs-reported ratio: every registered claim/hypothesis in the STR
-    reference has a terminal reported outcome (supporting evidence), so 1.0."""
-    claims = json.loads((REPO_ROOT / "contracts/claims.yaml").read_text(encoding="utf-8")).get("claims", [])
-    registered = len(claims)
-    reported = sum(1 for claim in claims if isinstance(claim, dict) and claim.get("supporting_artifacts"))
-    return 1.0 if registered == 0 else reported / registered
+    """§6/§9.3 registered-vs-reported invariant: every REGISTERED hypothesis in the
+    active analysis-plan lock must have a terminal REPORTED outcome.
+
+    Measured from the PREREGISTRATION (the active lock's `hypotheses` + the
+    terminal outcomes in `docs/prereg/outcomes.yaml`), NOT the descriptive/
+    methodological claims ledger (whose mandatory `supporting_artifacts` would make
+    the ratio tautological), and gated on the authoritative bidirectional
+    `gate_prereg_conformance`.  The STR reference's prereg is draft (zero registered
+    hypotheses, empty outcomes), so the invariant holds trivially → 1.0.  A real
+    prereg-conformance violation fails the rehearsal RED.
+    """
+    if not quality_gates.gate_prereg_conformance().ok:
+        raise RehearsalRed("prereg_conformance_violated")
+    lock_path = Path(quality_gates.PREREG_PHASE_FILES["2b"])
+    lock, _ = quality_gates.load_prereg_lock(lock_path, expected_phase="2b")
+    active_lock = lock if lock is not None and lock.get("active") is True else None
+    registered = {
+        hypothesis["hypothesis_id"]
+        for hypothesis in (active_lock.get("hypotheses", []) if active_lock is not None else [])
+        if isinstance(hypothesis, dict) and isinstance(hypothesis.get("hypothesis_id"), str)
+    }
+    if not registered:
+        return 1.0
+    outcomes, _ = quality_gates._load_prereg_outcomes()
+    reported = sum(
+        1
+        for hid in registered
+        if isinstance(outcomes.get(hid), dict)
+        and outcomes[hid].get("outcome") in quality_gates.TERMINAL_HYPOTHESIS_OUTCOMES
+    )
+    return reported / len(registered)
 
 
 def build_report(*, coverage: list[str], release_perimeter: dict, drills: dict, ratio: float) -> dict:

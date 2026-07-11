@@ -22,6 +22,13 @@ from runtime_test_utils import chdir, load_quality_gates_module  # noqa: E402
 quality_gates = load_quality_gates_module()
 
 
+_PROVENANCE = {
+    "seeded_defect_catch_rate_min": "firm invariant",
+    "human_review_hours_per_artifact_max": "provisional",
+    "token_dollar_ceiling_usd": "provisional",
+    "unresolved_fabrication_findings_max": "firm invariant",
+    "registered_vs_reported_hypothesis_ratio": "firm invariant",
+}
 _VALID_BAR = {
     "schema_version": "research_swarm.bt2_bar.v1",
     "rehearsal_report": "reports/status/bt2a/rehearsal.json",
@@ -32,6 +39,7 @@ _VALID_BAR = {
         "unresolved_fabrication_findings_max": 0,
         "registered_vs_reported_hypothesis_ratio": 1,
     },
+    "number_provenance": dict(_PROVENANCE),
     "stage_b_abort_clause": {
         "triggers": ["a", "b", "c", "d"],
         "required_artifact": "event-journal closure + negative-result report",
@@ -40,7 +48,11 @@ _VALID_BAR = {
 _VALID_REPORT = {
     "schema_version": "research_swarm.bt2a_rehearsal.v1",
     "all_known_answers_reproduced": True,
-    "release_perimeter": {"registry_all_failing": True, "release_blocked_as_expected": True},
+    "release_perimeter": {
+        "registry_all_failing": True,
+        "release_blocked_as_expected": True,
+        "blocked_by_registry": True,
+    },
     "drills": [{"drill_id": "D", "defect_class": "x", "blocking_gate": "g", "caught": True}],
     "seeded_defect_catch_rate": 1.0,
     "registered_vs_reported_hypothesis_ratio": 1,
@@ -84,7 +96,12 @@ class GoldenBt2aTests(unittest.TestCase):
         # must fail the gate (the bar has teeth).
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            report = {**_VALID_REPORT, "seeded_defect_catch_rate": 0.8}
+            # a drill list GENUINELY consistent with a below-threshold rate (4/5)
+            drills = [
+                {"drill_id": f"D{i}", "defect_class": "x", "blocking_gate": "g", "caught": i < 4}
+                for i in range(5)
+            ]
+            report = {**_VALID_REPORT, "drills": drills, "seeded_defect_catch_rate": 0.8}
             _write_bar_and_report(root, bar=_VALID_BAR, report=report)
             with chdir(root):
                 result = quality_gates.gate_bt2_bar()
@@ -133,6 +150,74 @@ class GoldenBt2aTests(unittest.TestCase):
                 result = quality_gates.gate_bt2_bar()
             self.assertFalse(result.ok)
             self.assertIn("bt2_bar_abort_clause_malformed", _reasons(result))
+
+    def test_bt2_bar_gate_reconciles_catch_rate_against_drill_list(self) -> None:
+        # A summary claiming 1.0 with a drill marked caught:false must NOT pass —
+        # the gate recomputes the rate from the drill list.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = {
+                **_VALID_REPORT,
+                "drills": [{"drill_id": "D", "defect_class": "x", "blocking_gate": "g", "caught": False}],
+                "seeded_defect_catch_rate": 1.0,
+            }
+            _write_bar_and_report(root, bar=_VALID_BAR, report=report)
+            with chdir(root):
+                result = quality_gates.gate_bt2_bar()
+            self.assertFalse(result.ok)
+            self.assertIn("bt2_bar_catch_rate_inconsistent_with_drills", _reasons(result))
+
+    def test_bt2_bar_gate_fails_on_out_of_range_bar_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bar = {
+                **_VALID_BAR,
+                "pass_fail_bar": {**_VALID_BAR["pass_fail_bar"], "registered_vs_reported_hypothesis_ratio": 2},
+            }
+            _write_bar_and_report(root, bar=bar, report=_VALID_REPORT)
+            with chdir(root):
+                result = quality_gates.gate_bt2_bar()
+            self.assertFalse(result.ok)
+            self.assertIn("bt2_bar_hypothesis_ratio_invariant_not_one", _reasons(result))
+
+    def test_bt2_bar_gate_fails_on_null_abort_triggers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bar = {**_VALID_BAR, "stage_b_abort_clause": {"triggers": [None, None, None, None], "required_artifact": "x"}}
+            _write_bar_and_report(root, bar=bar, report=_VALID_REPORT)
+            with chdir(root):
+                result = quality_gates.gate_bt2_bar()
+            self.assertFalse(result.ok)
+            self.assertIn("bt2_bar_abort_clause_malformed", _reasons(result))
+
+    def test_bt2_bar_gate_fails_on_missing_number_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bar = {**_VALID_BAR, "number_provenance": {}}
+            _write_bar_and_report(root, bar=bar, report=_VALID_REPORT)
+            with chdir(root):
+                result = quality_gates.gate_bt2_bar()
+            self.assertFalse(result.ok)
+            self.assertIn(
+                "bt2_bar_number_provenance_missing:seeded_defect_catch_rate_min", _reasons(result)
+            )
+
+    def test_bt2_bar_gate_fails_when_block_not_attributed_to_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = {
+                **_VALID_REPORT,
+                "release_perimeter": {
+                    "registry_all_failing": True,
+                    "release_blocked_as_expected": True,
+                    "blocked_by_registry": False,
+                },
+            }
+            _write_bar_and_report(root, bar=_VALID_BAR, report=report)
+            with chdir(root):
+                result = quality_gates.gate_bt2_bar()
+            self.assertFalse(result.ok)
+            self.assertIn("bt2_bar_release_perimeter_not_exercised", _reasons(result))
 
     def test_rehearsal_release_perimeter_blocks_all_failing_registry(self) -> None:
         # On the real STR repo the all-failing registry blocks release; the
