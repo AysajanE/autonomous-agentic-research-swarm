@@ -1,0 +1,21 @@
+{
+  "package_members": [
+    "modeling",
+    "bridge"
+  ],
+  "reproduction_bars": [
+    {
+      "path": "modeling/instance_manifest.json",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "path": "modeling/convergence.jsonl",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "path": "bridge/experiment_output.json",
+      "verification_bar": "byte_identity"
+    }
+  ],
+  "profile": "hybrid"
+}

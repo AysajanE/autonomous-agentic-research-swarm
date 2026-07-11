@@ -1,0 +1,10 @@
+{
+  "as_of_utc_date": "2026-01-01",
+  "outputs": [
+    {
+      "path": "data/processed/toy.csv",
+      "sha256": "toy-processed-content-v1"
+    }
+  ]
+}
+

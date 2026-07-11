@@ -1,0 +1,9 @@
+{
+  "license_class": "open_source",
+  "open_instance_subset": [
+    "toy-hybrid-1"
+  ],
+  "solver": "fixture_enumeration_solver",
+  "version": "1"
+}
+

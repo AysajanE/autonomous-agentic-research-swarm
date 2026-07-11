@@ -1,0 +1,14 @@
+{
+  "budget": {
+    "max_iterations": 25,
+    "max_seconds": 2
+  },
+  "content_equivalence_tolerances": {
+    "absolute": 1e-09,
+    "relative": 1e-09
+  },
+  "seeds": [
+    23
+  ]
+}
+

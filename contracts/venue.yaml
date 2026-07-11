@@ -1,0 +1,49 @@
+{
+  "ai_policy": {
+    "ai_as_author": "prohibited",
+    "ai_native_submission": "not_consented",
+    "allowed_release_modes": [
+      "mainstream"
+    ],
+    "disclosed_ai_assistance": "permitted_for_reference_distribution",
+    "evidence_pointer": "contracts/venue.yaml#reference_scope"
+  },
+  "format": {
+    "anonymization": "not_applicable_reference_only",
+    "latex_document_class": "article",
+    "page_limit": null,
+    "reference_style": "author_date",
+    "source_engine": "quarto",
+    "template": "default",
+    "word_limit": null
+  },
+  "reference_scope": "Reference implementation only; this is not a real submission or a claim of acceptance by an external venue.",
+  "release": {
+    "mode": "mainstream",
+    "submission_declared": false,
+    "submission_package_requested": false,
+    "supported_modes": [
+      "mainstream",
+      "ai_native"
+    ]
+  },
+  "required_statements": [
+    "ai_use_disclosure",
+    "data_availability",
+    "code_availability",
+    "authorship_contributions"
+  ],
+  "schema_version": "research_swarm.venue.v1",
+  "status": "reference_implementation",
+  "target_venue": {
+    "kind": "working_paper_preprint",
+    "name": "Self-hosted working paper / preprint reference surface",
+    "real_submission": false
+  },
+  "venue_consent": {
+    "consent_compatible": true,
+    "evidence_pointer": "contracts/venue.yaml#reference_scope",
+    "real_submission_authorized": false,
+    "status": "reference_distribution_only"
+  }
+}

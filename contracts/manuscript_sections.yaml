@@ -1,0 +1,33 @@
+{
+  "canonical_section_ids": [
+    "section_abstract",
+    "section_research_question",
+    "section_data_and_protocol",
+    "section_validation",
+    "section_results",
+    "section_evidence_table",
+    "section_alternative_explanations_considered",
+    "section_uncertainty_statement",
+    "section_provenance_and_limitations"
+  ],
+  "policy": "Every canonical section requires its own failing-first paper-registry entry and per-section referee evidence before passing.",
+  "required_statement_bindings": {
+    "ai_use_disclosure": {
+      "path": "reports/paper/disclosure.md"
+    },
+    "authorship_contributions": {
+      "path": "contracts/authorship.yaml",
+      "selector": "credit_contributions"
+    },
+    "code_availability": {
+      "path": "contracts/authorship.yaml",
+      "selector": "availability.code"
+    },
+    "data_availability": {
+      "path": "contracts/authorship.yaml",
+      "selector": "availability.data"
+    }
+  },
+  "schema_version": "research_swarm.manuscript_sections.v1",
+  "status": "pinned"
+}

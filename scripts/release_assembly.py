@@ -86,6 +86,9 @@ ALL_STAGE4_GATE_NAMES = (
     "recall_audit",
     "prompt_surface",
     "integrity_audit",
+    "replication_package_audit",
+    "raw_retention",
+    "venue_compliance",
 )
 REQUIRED_RELEASE_GATE_NAMES = ALL_STAGE4_GATE_NAMES
 
@@ -407,7 +410,7 @@ def _collect_stage4_gate_results(repo_root: Path) -> dict[str, dict[str, Any]]:
             func = getattr(quality_gates, f"gate_{gate_name}")
             if gate_name == "citation_integrity":
                 result = func(require_literature_corpus=True)
-            elif gate_name in {"paper_registry", "program_conformance"}:
+            elif gate_name in {"paper_registry", "program_conformance", "replication_package_audit"}:
                 result = func(release_perimeter=True)
             else:
                 result = func()
@@ -602,7 +605,7 @@ def assemble_release_manifest(
         }
     )
     release_perimeter_hard_failures = sorted(
-        set(required_gate_failures) & {"paper_registry", "program_conformance"}
+        set(required_gate_failures) & {"paper_registry", "program_conformance", "venue_compliance"}
     )
     release_perimeter_failure_reasons = _dedupe_preserve(
         str(failure.get("reason"))
@@ -1359,6 +1362,15 @@ def write_release(
         )
 
     sync_catalog(repo_root)
+    replication_manifest = None
+    if (repo_root / "scripts/replication_package.py").is_file():
+        quality_gates = _load_quality_gates_module()
+        package_dir = repo_root / "build/replication_package"
+        replication_manifest = quality_gates.replication_package.generate_package(
+            repo_root,
+            package_dir,
+            profile=quality_gates._parse_project_mode(repo_root / "contracts/project.yaml") or "empirical",
+        )
     integrity = check_release_integrity(
         repo_root, enforce_required_gates=not allow_gate_failures
     )
@@ -1373,6 +1385,15 @@ def write_release(
         "catalog_path": CATALOG_PATH.as_posix(),
         "required_gates_ok": manifest["quality_gates"]["all_required_ok"],
         "paper_status": manifest["artifacts"]["paper"]["status"],
+        "replication_package": (
+            {
+                "path": "build/replication_package",
+                "schema_version": replication_manifest.get("schema_version"),
+                "reproduced_level": replication_manifest.get("levels", {}).get("Reproduced"),
+            }
+            if isinstance(replication_manifest, dict)
+            else None
+        ),
     }
 
 
