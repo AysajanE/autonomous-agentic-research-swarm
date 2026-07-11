@@ -1,0 +1,27 @@
+{
+  "mode": "modeling",
+  "program_template": "research_swarm.program_template.v1",
+  "programs": [
+    {
+      "nodes": [
+        {"depends_on": [], "node_id": "formalization", "produces": "formal_model", "required": true, "role": "Worker", "task_kind": "model"},
+        {"depends_on": ["formalization"], "node_id": "proposition_registration", "produces": "proposition_registry", "required": true, "role": "Worker", "task_kind": "model"},
+        {"depends_on": ["proposition_registration"], "node_id": "proof", "produces": "proof_artifact", "required": true, "role": "Worker", "task_kind": "proof"},
+        {"depends_on": ["proof"], "node_id": "derivation_check", "produces": "derivation_validation", "required": true, "role": "Worker", "task_kind": "validation"},
+        {"depends_on": ["derivation_check"], "node_id": "results", "produces": "theory_results", "required": true, "role": "Worker", "task_kind": "writing"}
+      ],
+      "program_id": "theory",
+      "workstream": "W8"
+    },
+    {
+      "nodes": [
+        {"depends_on": [], "node_id": "experiment_plan", "produces": "experiment_plan", "required": true, "role": "Worker", "task_kind": "model"},
+        {"depends_on": ["experiment_plan"], "node_id": "runs", "produces": "experiment_runs", "required": true, "role": "Worker", "task_kind": "model"},
+        {"depends_on": ["runs"], "node_id": "sweep", "produces": "sweep_artifact", "required": true, "role": "Worker", "task_kind": "model"},
+        {"depends_on": ["sweep"], "node_id": "exhibits", "produces": "exhibits_manifest", "required": true, "role": "Worker", "task_kind": "analysis"}
+      ],
+      "program_id": "computational_experiment",
+      "workstream": "W8"
+    }
+  ]
+}

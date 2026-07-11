@@ -14,6 +14,7 @@ if str(_TESTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_TESTS_ROOT))
 
 from runtime_test_utils import (
+    instantiate_program_fixture,
     scaffold_runtime_repo,
     write_json,
     write_review_log,
@@ -114,6 +115,13 @@ def scaffold_release_ready_repo(root: Path) -> None:
         outputs=[validation_output],
         state="done",
         slug="validation",
+    )
+    instantiate_program_fixture(
+        root,
+        task_path,
+        task_kind="validation",
+        role="Worker",
+        workstream="W5",
     )
     run_manifest_path = write_run_manifest(
         root,

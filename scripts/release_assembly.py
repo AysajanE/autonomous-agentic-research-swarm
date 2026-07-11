@@ -78,6 +78,9 @@ ALL_STAGE4_GATE_NAMES = (
     "referee_report_validity",
     "referee_calibration",
     "referee_release_evidence",
+    "program_conformance",
+    "exhibits_manifest",
+    "paper_registry",
     "citation_integrity",
     "literature_corpus",
     "recall_audit",
@@ -402,11 +405,12 @@ def _collect_stage4_gate_results(repo_root: Path) -> dict[str, dict[str, Any]]:
     with _pushd(repo_root):
         for gate_name in ALL_STAGE4_GATE_NAMES:
             func = getattr(quality_gates, f"gate_{gate_name}")
-            result = (
-                func(require_literature_corpus=True)
-                if gate_name == "citation_integrity"
-                else func()
-            )
+            if gate_name == "citation_integrity":
+                result = func(require_literature_corpus=True)
+            elif gate_name in {"paper_registry", "program_conformance"}:
+                result = func(release_perimeter=True)
+            else:
+                result = func()
             results[gate_name] = {
                 "ok": bool(result.ok),
                 "details": _json_safe(result.details),
@@ -597,7 +601,16 @@ def assemble_release_manifest(
             "referee_release_evidence",
         }
     )
-    if referee_hard_failures or missing_release_perimeter or render_perimeter_failures or stale_render_failures or (
+    release_perimeter_hard_failures = sorted(
+        set(required_gate_failures) & {"paper_registry", "program_conformance"}
+    )
+    release_perimeter_failure_reasons = _dedupe_preserve(
+        str(failure.get("reason"))
+        for gate_name in release_perimeter_hard_failures
+        for failure in gate_results.get(gate_name, {}).get("details", {}).get("failures", [])
+        if isinstance(failure, dict) and isinstance(failure.get("reason"), str)
+    )
+    if referee_hard_failures or release_perimeter_hard_failures or missing_release_perimeter or render_perimeter_failures or stale_render_failures or (
         (missing_required_inputs or required_gate_failures) and not allow_gate_failures
     ):
         failure_parts: list[str] = []
@@ -609,6 +622,7 @@ def assemble_release_manifest(
             failure_parts.append(
                 "failed_gates=" + ",".join(sorted(required_gate_failures))
             )
+        failure_parts.extend(release_perimeter_failure_reasons)
         if missing_release_perimeter:
             failure_parts.extend(
                 f"release_perimeter_artifact_missing={path}"

@@ -1,0 +1,29 @@
+{
+  "mode": "empirical",
+  "program_template": "research_swarm.program_template.v1",
+  "programs": [
+    {
+      "nodes": [
+        {"depends_on": [], "node_id": "estimation_plan", "produces": "estimation_plan", "required": true, "role": "Worker", "task_kind": "analysis"},
+        {"depends_on": ["estimation_plan"], "node_id": "estimation", "produces": "estimation_results", "required": true, "role": "Worker", "task_kind": "analysis"},
+        {"depends_on": ["estimation"], "node_id": "robustness", "produces": "robustness_results", "required": true, "role": "Worker", "task_kind": "analysis"},
+        {"depends_on": ["robustness"], "node_id": "exhibits", "produces": "exhibits_manifest", "required": true, "role": "Worker", "task_kind": "analysis"}
+      ],
+      "program_id": "w6_analysis",
+      "workstream": "W6"
+    },
+    {
+      "nodes": [
+        {"depends_on": [], "node_id": "claims_map", "produces": "claims_map", "required": true, "role": "Worker", "task_kind": "writing"},
+        {"depends_on": ["claims_map"], "node_id": "outline_lock", "produces": "locked_outline", "required": true, "role": "Worker", "task_kind": "writing"},
+        {"depends_on": ["outline_lock"], "node_id": "section_draft", "produces": "required_manuscript_sections", "required": true, "role": "Worker", "task_kind": "writing"},
+        {"depends_on": ["section_draft"], "node_id": "integration", "produces": "integrated_manuscript", "required": true, "role": "Worker", "task_kind": "writing"},
+        {"depends_on": ["integration"], "node_id": "referee_panel", "produces": "referee_reports", "required": true, "role": "Judge", "task_kind": "writing"},
+        {"depends_on": ["referee_panel"], "node_id": "revision_cycle", "produces": "revision_tasks", "required": true, "role": "Worker", "task_kind": "repair"},
+        {"depends_on": ["revision_cycle"], "node_id": "compliance_package", "produces": "paper_compliance_package", "required": true, "role": "Operator", "task_kind": "ops"}
+      ],
+      "program_id": "w7_writing",
+      "workstream": "W7"
+    }
+  ]
+}

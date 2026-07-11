@@ -5,6 +5,8 @@ task_id: T___  # replace with T###
 title: "<concise task title>"
 workstream: W__  # replace with a declared workstream
 task_kind: analysis  # etl|analysis|validation|writing|lit_review|model|proof|bridge|ops|integrity_audit|repair
+# program_id: w6_analysis  # required when instantiating a contracts/program_templates node
+# program_node: estimation_plan  # exact node_id from the selected mode template
 complexity_tier: S  # S|M|L; L requires progress_file
 success_criteria:
   - id: SC1

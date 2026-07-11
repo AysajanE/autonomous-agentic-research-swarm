@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "research_swarm.program_template.v1.schema",
+  "title": "Research swarm program template v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["program_template", "mode", "programs"],
+  "properties": {
+    "program_template": {"const": "research_swarm.program_template.v1"},
+    "mode": {"enum": ["empirical", "modeling", "hybrid"]},
+    "programs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["program_id", "workstream", "nodes"],
+        "properties": {
+          "program_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+          "workstream": {"type": "string", "minLength": 1},
+          "nodes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["node_id", "task_kind", "role", "produces", "depends_on", "required"],
+              "properties": {
+                "node_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+                "task_kind": {"enum": ["etl", "analysis", "validation", "writing", "lit_review", "model", "proof", "bridge", "ops", "integrity_audit", "repair"]},
+                "role": {"enum": ["Planner", "Worker", "Judge", "Operator"]},
+                "produces": {"type": "string", "minLength": 1},
+                "depends_on": {
+                  "type": "array",
+                  "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+                  "uniqueItems": true
+                },
+                "required": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

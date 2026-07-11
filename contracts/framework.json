@@ -92,6 +92,8 @@
     ],
     "optional": [
       "task_kind",
+      "program_id",
+      "program_node",
       "allow_network",
       "integration_ready_dependencies",
       "requires_tools",

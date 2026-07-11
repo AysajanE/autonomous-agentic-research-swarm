@@ -33,6 +33,7 @@ BYTE_IDENTICAL_OUTPUTS = (
     Path("reports/tables/str_regime_summary.csv"),
     Path("reports/tables/str_regime_summary.md"),
     Path("reports/paper/paper_values.json"),
+    Path("reports/exhibits/manifest.json"),
 )
 CONTENT_EQUIVALENT_OUTPUTS = (
     Path("reports/figures/str_ecosystem_timeseries.data.json"),
