@@ -47,7 +47,7 @@
       "citation_key": "protocol_lock",
       "type": "methodological",
       "statement": "Blob-fee-floor runs are the protocol-locked post-Dencun stretches of at least 7 consecutive days where the blob base fee stays within 1.05 x the post-Dencun minimum.",
-      "manuscript_numeric_literals": ["1.05 x"],
+      "manuscript_numeric_literals": ["1.05 x", "7 days"],
       "supporting_artifacts": [
         {"path": "docs/protocol.md", "sha256": "ff925b900f59476213b5924f2e07aac43e45b8d1973ba4124ddbf97e5da8f1ea"}
       ],

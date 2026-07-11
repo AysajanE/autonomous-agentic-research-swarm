@@ -60,6 +60,16 @@ def scaffold_release_ready_repo(
     write_text(root, "reports/AGENTS.md", "# reports\n")
     write_text(root, "reports/status/README.md", "# status\n")
     write_text(root, "reports/status/releases/README.md", "# releases\n")
+    write_text(root, "reports/paper/index.qmd", "# Paper\n")
+    write_text(root, "reports/paper/references.bib", "@misc{paper}\n")
+    write_text(root, "reports/paper/_quarto.yml", "project: default\n")
+    write_json(root, "reports/paper/paper_values.json", {"values": {}})
+    write_text(root, "data/processed/panels/daily_rollup_panel.csv", "date_utc,rollup_id\n")
+    write_text(
+        root,
+        "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
+        "date_utc,l1_total_rent_eth\n",
+    )
 
     write_json(
         root,
@@ -167,6 +177,69 @@ def scaffold_release_ready_repo(
 
 
 class ReleaseAssemblyTest(unittest.TestCase):
+    def test_required_release_perimeter_member_removed_from_inventory_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_release_ready_repo(root, include_paper=False)
+            payload = release_assembly.assemble_release_manifest(
+                root,
+                date(2026, 3, 31),
+                allow_gate_failures=True,
+            )
+            payload["artifacts"]["release_perimeter"] = [
+                item
+                for item in payload["artifacts"]["release_perimeter"]
+                if item["path"] != "reports/paper/paper_values.json"
+            ]
+            manifest_path = write_json(
+                root,
+                "reports/status/releases/release_2026-03-31.json",
+                payload,
+            )
+            failures = release_assembly.validate_release_manifest(manifest_path, root)
+            self.assertIn(
+                "reports/status/releases/release_2026-03-31.json:"
+                "release_perimeter_artifact_missing:reports/paper/paper_values.json",
+                failures,
+            )
+
+    def test_missing_required_release_perimeter_artifact_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_release_ready_repo(root, include_paper=False)
+            missing = root / "reports/paper/paper_values.json"
+            missing.unlink()
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "release_perimeter_artifact_missing=reports/paper/paper_values.json",
+            ):
+                release_assembly.assemble_release_manifest(
+                    root,
+                    date(2026, 3, 31),
+                    allow_gate_failures=True,
+                )
+
+    def test_rendered_paper_without_sources_fails_closed(self) -> None:
+        # Codex F2 (BLOCKER): if the canonical rendered outputs exist but BOTH manuscript
+        # source surfaces are deleted, assembly must fail rather than ship stale renders
+        # whose F14 perimeter would otherwise be suppressed.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_release_ready_repo(root, include_paper=True)
+            (root / "reports/paper/index.qmd").unlink()
+            (root / "reports/paper/paper_values.json").unlink()
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "release_rendered_paper_without_sources",
+            ):
+                release_assembly.assemble_release_manifest(
+                    root,
+                    date(2026, 3, 31),
+                    allow_gate_failures=True,
+                )
+
     def test_write_generates_canonical_release_manifest_and_catalog_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

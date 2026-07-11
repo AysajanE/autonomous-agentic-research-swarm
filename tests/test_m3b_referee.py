@@ -125,20 +125,42 @@ def _write_bound_calibration(root: Path) -> dict[str, object]:
 
 
 def _materialize_release_surface(fixture: "RefereeFixture") -> None:
+    # A COMPLETE, coherent release surface: manuscript sources + processed panels (the F14
+    # perimeter) AND the rendered build outputs whose render_manifest the referee-release
+    # gate reads to locate the paper. Rendered outputs are never materialized WITHOUT their
+    # sources — that is the invalid state the release assembler now fails closed on (Codex
+    # F2) — and the render_manifest declares all six perimeter inputs with real hashes so
+    # the render-perimeter verification passes.
+    root = fixture.root
+    write_text(root, "reports/paper/index.qmd", "# Paper\n\nThe validated result.\n")
+    write_text(root, "reports/paper/references.bib", "@misc{fixture}\n")
+    write_text(root, "reports/paper/_quarto.yml", "project: default\n")
+    write_json(root, "reports/paper/paper_values.json", {"values": {}})
+    write_text(root, "data/processed/panels/daily_rollup_panel.csv", "date_utc,rollup_id\n")
     write_text(
-        fixture.root,
-        "reports/paper/build/l2_l1_rent_working_paper.html",
-        "<html>fixture</html>\n",
+        root,
+        "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
+        "date_utc,l1_total_rent_eth\n",
     )
-    write_text(
-        fixture.root,
-        "reports/paper/build/l2_l1_rent_working_paper.pdf",
-        "%PDF-1.4\n",
-    )
+    write_text(root, "reports/paper/build/l2_l1_rent_working_paper.html", "<html>fixture</html>\n")
+    write_text(root, "reports/paper/build/l2_l1_rent_working_paper.pdf", "%PDF-1.4\n")
+    perimeter_inputs = []
+    for rel in (
+        "reports/paper/index.qmd",
+        "reports/paper/references.bib",
+        "reports/paper/_quarto.yml",
+        "reports/paper/paper_values.json",
+        "data/processed/panels/daily_rollup_panel.csv",
+        "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
+    ):
+        data = (root / rel).read_bytes()
+        perimeter_inputs.append(
+            {"path": rel, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+        )
     write_json(
-        fixture.root,
+        root,
         "reports/paper/build/render_manifest.json",
-        {"entrypoint": fixture.output, "outputs": []},
+        {"entrypoint": fixture.output, "inputs": perimeter_inputs, "outputs": []},
     )
 
 

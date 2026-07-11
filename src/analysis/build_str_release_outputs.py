@@ -23,8 +23,10 @@ Run:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
+import re
 
 import matplotlib
 
@@ -51,9 +53,15 @@ SAMPLE_DECOMP_PATH = REPO_ROOT / "data" / "samples" / "l1_rent" / "daily_l1_rent
 PANEL_MANIFEST_DIR = REPO_ROOT / "data" / "processed_manifest"
 ECOSYSTEM_FIGURE_PATH = REPO_ROOT / "reports" / "figures" / "str_ecosystem_timeseries.svg"
 REGIME_FIGURE_PATH = REPO_ROOT / "reports" / "figures" / "str_post_dencun_regimes.svg"
+ECOSYSTEM_FIGURE_DATA_PATH = REPO_ROOT / "reports" / "figures" / "str_ecosystem_timeseries.data.json"
+REGIME_FIGURE_DATA_PATH = REPO_ROOT / "reports" / "figures" / "str_post_dencun_regimes.data.json"
 REGIME_TABLE_CSV_PATH = REPO_ROOT / "reports" / "tables" / "str_regime_summary.csv"
 REGIME_TABLE_MD_PATH = REPO_ROOT / "reports" / "tables" / "str_regime_summary.md"
+PAPER_VALUES_PATH = REPO_ROOT / "reports" / "paper" / "paper_values.json"
+CLAIMS_PATH = REPO_ROOT / "contracts" / "claims.yaml"
+PROTOCOL_PATH = REPO_ROOT / "docs" / "protocol.md"
 DENCUN_DATE = pd.Timestamp("2024-03-13")
+SIDECAR_DECIMAL_PLACES = 12
 
 plt.rcParams["font.family"] = "DejaVu Sans"
 plt.rcParams["svg.hashsalt"] = "t060_str_release_outputs"
@@ -98,12 +106,19 @@ def main() -> int:
 
     write_ecosystem_figure(ecosystem, as_of_label=as_of_label, sample_mode=args.sample)
     write_post_dencun_regime_figure(ecosystem, as_of_label=as_of_label, sample_mode=args.sample)
+    write_figure_data_sidecars(ecosystem, as_of_label=as_of_label, sample_mode=args.sample)
     write_regime_tables(regime_table)
+    if not args.sample:
+        write_paper_values(regime_table, as_of_label=as_of_label)
 
     print(f"Wrote {ECOSYSTEM_FIGURE_PATH.relative_to(REPO_ROOT)}")
     print(f"Wrote {REGIME_FIGURE_PATH.relative_to(REPO_ROOT)}")
+    print(f"Wrote {ECOSYSTEM_FIGURE_DATA_PATH.relative_to(REPO_ROOT)}")
+    print(f"Wrote {REGIME_FIGURE_DATA_PATH.relative_to(REPO_ROOT)}")
     print(f"Wrote {REGIME_TABLE_CSV_PATH.relative_to(REPO_ROOT)}")
     print(f"Wrote {REGIME_TABLE_MD_PATH.relative_to(REPO_ROOT)}")
+    if not args.sample:
+        print(f"Wrote {PAPER_VALUES_PATH.relative_to(REPO_ROOT)}")
     return 0
 
 
@@ -353,6 +368,319 @@ def contiguous_true_spans(frame: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Ti
         if bool(run["blob_floor_regime"].iloc[0]):
             spans.append((run["date_utc"].min(), run["date_utc"].max()))
     return spans
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _rounded_values(series: pd.Series) -> list[float | None]:
+    values: list[float | None] = []
+    for value in series:
+        if pd.isna(value):
+            values.append(None)
+        else:
+            values.append(round(float(value), SIDECAR_DECIMAL_PLACES))
+    return values
+
+
+def _iso_dates(series: pd.Series) -> list[str]:
+    return [pd.Timestamp(value).date().isoformat() for value in series]
+
+
+def write_figure_data_sidecars(
+    ecosystem: pd.DataFrame,
+    *,
+    as_of_label: str,
+    sample_mode: bool,
+) -> None:
+    common = {
+        "schema_version": "research_swarm.figure_data.v1",
+        "generated_by": "src/analysis/build_str_release_outputs.py",
+        "as_of": as_of_label,
+        "mode": "sample" if sample_mode else "live",
+        "value_precision_decimal_places": SIDECAR_DECIMAL_PLACES,
+    }
+    ecosystem_payload: dict[str, object] = {
+        **common,
+        "figure": "reports/figures/str_ecosystem_timeseries.svg",
+        "dates": _iso_dates(ecosystem["date_utc"]),
+        "series": {
+            "l2_fees_14d": {"unit": "eth_per_day", "values": _rounded_values(ecosystem["l2_fees_14d"])},
+            "rent_paid_14d": {"unit": "eth_per_day", "values": _rounded_values(ecosystem["rent_paid_14d"])},
+            "str": {"unit": "ratio", "values": _rounded_values(ecosystem["str"])},
+            "str_30d": {"unit": "ratio", "values": _rounded_values(ecosystem["str_30d"])},
+        },
+        "reference_lines": [
+            {"axis": "x", "value": DENCUN_DATE.date().isoformat(), "label": "Dencun"},
+            {"axis": "y", "value": 1.0, "unit": "ratio", "label": "full settlement"},
+        ],
+        "shaded_spans": [],
+    }
+
+    post = ecosystem.loc[ecosystem["post_dencun"]].copy()
+    if post.empty:
+        raise SystemExit("post-Dencun slice is empty; cannot build deterministic figure sidecar")
+    threshold = (
+        round(float(post["l1_blob_base_fee_gwei"].min() * 1.05), SIDECAR_DECIMAL_PLACES)
+        if post["l1_blob_base_fee_gwei"].notna().any()
+        else None
+    )
+    regime_payload: dict[str, object] = {
+        **common,
+        "figure": "reports/figures/str_post_dencun_regimes.svg",
+        "dates": _iso_dates(post["date_utc"]),
+        "series": {
+            "l1_blob_base_fee_gwei": {"unit": "gwei", "values": _rounded_values(post["l1_blob_base_fee_gwei"])},
+            "str": {"unit": "ratio", "values": _rounded_values(post["str"])},
+            "str_14d": {"unit": "ratio", "values": _rounded_values(post["str_14d"])},
+        },
+        "reference_lines": [
+            {"axis": "y", "value": threshold, "unit": "gwei", "label": "blob fee floor threshold"},
+            {"axis": "y", "value": 1.0, "unit": "ratio", "label": "full settlement"},
+        ],
+        "shaded_spans": [
+            {
+                "start_date": start.date().isoformat(),
+                "end_date": end.date().isoformat(),
+                "label": "blob fee floor",
+            }
+            for start, end in contiguous_true_spans(post.loc[:, ["date_utc", "blob_floor_regime"]])
+        ],
+    }
+    _write_json(ECOSYSTEM_FIGURE_DATA_PATH, ecosystem_payload)
+    _write_json(REGIME_FIGURE_DATA_PATH, regime_payload)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _load_json_object(path: Path) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SystemExit(f"expected JSON object: {path.relative_to(REPO_ROOT)}")
+    return payload
+
+
+def _claim_for_citation(citation_key: str) -> dict[str, object]:
+    payload = _load_json_object(CLAIMS_PATH)
+    claims = payload.get("claims")
+    if not isinstance(claims, list):
+        raise SystemExit("contracts/claims.yaml claims must be a list")
+    for claim in claims:
+        if isinstance(claim, dict) and claim.get("citation_key") == citation_key:
+            return claim
+    raise SystemExit(f"missing registered claim for citation key {citation_key}")
+
+
+def _uncertainty_for_claim(claim: dict[str, object], kind: str) -> dict[str, object]:
+    uncertainty: dict[str, object] = {"kind": kind}
+    artifact = claim.get("uncertainty_artifact")
+    if isinstance(artifact, dict) and isinstance(artifact.get("path"), str):
+        uncertainty["justification_artifact"] = artifact["path"]
+    else:
+        justification = claim.get("uncertainty_justification")
+        if not isinstance(justification, str) or not justification.strip():
+            raise SystemExit(f"claim {claim.get('claim_id')} lacks uncertainty justification")
+        uncertainty["justification"] = justification
+    return uncertainty
+
+
+def _protocol_constants() -> tuple[float, int]:
+    text = PROTOCOL_PATH.read_text(encoding="utf-8")
+    match = re.search(
+        r"contiguous runs of ≥(?P<days>\d+) days where `l1_blob_base_fee_gwei <= (?P<multiplier>\d+(?:\.\d+)?) × min",
+        text,
+    )
+    if match is None:
+        raise SystemExit("protocol blob-fee-floor constants could not be parsed")
+    return float(match.group("multiplier")), int(match.group("days"))
+
+
+def write_paper_values(regime_table: pd.DataFrame, *, as_of_label: str) -> None:
+    panel_validation_path = REPO_ROOT / "reports" / "validation" / "rollup_panel_validation.json"
+    reconciliation_path = REPO_ROOT / "reports" / "validation" / "cross_source_reconciliation.json"
+    panel_validation = _load_json_object(panel_validation_path)
+    reconciliation = _load_json_object(reconciliation_path)
+    panel_summary = panel_validation.get("summary")
+    checks = reconciliation.get("checks")
+    if not isinstance(panel_summary, dict) or not isinstance(checks, list) or len(checks) <= 5:
+        raise SystemExit("validation artifact schema does not expose locked paper values")
+    reconciliation_details = checks[5].get("details") if isinstance(checks[5], dict) else None
+    if not isinstance(reconciliation_details, dict):
+        raise SystemExit("cross-source reconciliation details are missing")
+    monthly = reconciliation_details.get("unexplained_monthly_aggregate")
+    if not isinstance(monthly, list):
+        raise SystemExit("cross-source monthly reconciliation values are missing")
+    may_2025 = next(
+        (row for row in monthly if isinstance(row, dict) and row.get("month_utc") == "2025-05"),
+        None,
+    )
+    if not isinstance(may_2025, dict):
+        raise SystemExit("cross-source reconciliation lacks the registered 2025-05 residual")
+
+    rows = {str(row["regime_id"]): row for _, row in regime_table.iterrows()}
+    multiplier, minimum_days = _protocol_constants()
+    source_paths = {
+        "table": REGIME_TABLE_CSV_PATH,
+        "panel": panel_validation_path,
+        "reconciliation": reconciliation_path,
+        "protocol": PROTOCOL_PATH,
+    }
+    source_relpaths = {key: path.relative_to(REPO_ROOT).as_posix() for key, path in source_paths.items()}
+    source_hashes = {key: _sha256(path) for key, path in source_paths.items()}
+
+    regime_claim = _claim_for_citation("str_regime_summary")
+    panel_claim = _claim_for_citation("rollup_panel_validation")
+    reconciliation_claim = _claim_for_citation("cross_source_reconciliation")
+    protocol_claim = _claim_for_citation("protocol_lock")
+
+    values: dict[str, dict[str, object]] = {}
+
+    def add(
+        key: str,
+        *,
+        value: int | float,
+        unit: str,
+        display: str,
+        citation_key: str,
+        source: str,
+        selector: str,
+        claim: dict[str, object],
+        uncertainty_kind: str,
+    ) -> None:
+        values[key] = {
+            "value": value,
+            "unit": unit,
+            "type": claim["type"],
+            "display": display,
+            "citation_key": citation_key,
+            "source_artifact": source_relpaths[source],
+            "source_sha256": source_hashes[source],
+            "source_selector": selector,
+            "uncertainty": _uncertainty_for_claim(claim, uncertainty_kind),
+        }
+
+    for key, regime_id, column, unit, decimals, display_suffix in (
+        ("pre_dencun_mean_str_pct", "pre_dencun", "mean_str_pct", "percent", 2, "%"),
+        ("post_dencun_mean_str_pct", "post_dencun", "mean_str_pct", "percent", 2, "%"),
+        ("post_dencun_blob_floor_mean_str_pct", "post_dencun_blob_floor", "mean_str_pct", "percent", 2, "%"),
+        ("post_dencun_non_floor_mean_str_pct", "post_dencun_non_floor", "mean_str_pct", "percent", 2, "%"),
+        ("pre_dencun_mean_rent_paid_eth", "pre_dencun", "mean_rent_paid_eth", "eth", 3, " ETH"),
+        ("post_dencun_mean_rent_paid_eth", "post_dencun", "mean_rent_paid_eth", "eth", 3, " ETH"),
+    ):
+        raw_value = float(rows[regime_id][column])
+        value = round(raw_value, decimals)
+        add(
+            key,
+            value=value,
+            unit=unit,
+            display=f"{value:.{decimals}f}{display_suffix}",
+            citation_key="str_regime_summary",
+            source="table",
+            selector=f"regime_id={regime_id};column={column}",
+            claim=regime_claim,
+            uncertainty_kind="descriptive_no_sampling_band",
+        )
+
+    for key, field, display in (
+        ("panel_row_count", "row_count", f"{int(panel_summary['row_count']):,}"),
+        ("panel_rollup_count", "rollup_count", f"{int(panel_summary['rollup_count']):,}"),
+        ("panel_date_count", "date_count", f"{int(panel_summary['date_count']):,}"),
+        ("rent_component_row_count", "rent_component_row_count", f"{int(panel_summary['rent_component_row_count']):,}"),
+    ):
+        add(
+            key,
+            value=int(panel_summary[field]),
+            unit="count",
+            display=display,
+            citation_key="rollup_panel_validation",
+            source="panel",
+            selector=f"json_path=summary.{field}",
+            claim=panel_claim,
+            uncertainty_kind="methodological_exact",
+        )
+
+    reconciliation_specs = (
+        (
+            "reconciliation_aggregate_rent_difference_pct",
+            round(float(reconciliation_details["overall_aggregate_pct_difference"]) * 100, 2),
+            "percent",
+            "0.02%",
+            "json_path=checks[5].details.overall_aggregate_pct_difference;scale=100",
+        ),
+        (
+            "reconciliation_2025_05_pct_difference",
+            round(float(may_2025["pct_difference"]) * 100, 2),
+            "percent",
+            "12.37%",
+            "json_path=checks[5].details.unexplained_monthly_aggregate;match=month_utc=2025-05;column=pct_difference;scale=100",
+        ),
+        (
+            "reconciliation_2025_05_authoritative_rent_eth",
+            round(float(may_2025["rent_paid_eth_authoritative"]), 2),
+            "eth",
+            "148.42 ETH",
+            "json_path=checks[5].details.unexplained_monthly_aggregate;match=month_utc=2025-05;column=rent_paid_eth_authoritative",
+        ),
+        (
+            "reconciliation_2025_05_vendor_rent_eth",
+            round(float(may_2025["rent_paid_eth_vendor"]), 2),
+            "eth",
+            "166.78 ETH",
+            "json_path=checks[5].details.unexplained_monthly_aggregate;match=month_utc=2025-05;column=rent_paid_eth_vendor",
+        ),
+    )
+    for key, value, unit, display, selector in reconciliation_specs:
+        add(
+            key,
+            value=value,
+            unit=unit,
+            display=display,
+            citation_key="cross_source_reconciliation",
+            source="reconciliation",
+            selector=selector,
+            claim=reconciliation_claim,
+            uncertainty_kind="methodological_exact",
+        )
+
+    add(
+        "blob_fee_floor_threshold_multiplier",
+        value=multiplier,
+        unit="multiplier",
+        display=f"{multiplier:.2f} x",
+        citation_key="protocol_lock",
+        source="protocol",
+        selector="protocol_constant=blob_fee_floor_threshold_multiplier",
+        claim=protocol_claim,
+        uncertainty_kind="protocol_constant",
+    )
+    add(
+        "blob_fee_floor_min_consecutive_days",
+        value=minimum_days,
+        unit="days",
+        display=str(minimum_days),
+        citation_key="protocol_lock",
+        source="protocol",
+        selector="protocol_constant=blob_fee_floor_min_consecutive_days",
+        claim=protocol_claim,
+        uncertainty_kind="protocol_constant",
+    )
+
+    _write_json(
+        PAPER_VALUES_PATH,
+        {
+            "schema_version": "research_swarm.paper_values.v1",
+            "generated_by": "src/analysis/build_str_release_outputs.py",
+            "as_of": as_of_label,
+            "values": values,
+        },
+    )
 
 
 def write_regime_tables(regime_table: pd.DataFrame) -> None:

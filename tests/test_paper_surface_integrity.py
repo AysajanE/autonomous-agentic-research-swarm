@@ -45,6 +45,7 @@ class PaperSurfaceIntegrityTest(unittest.TestCase):
             "reports/paper/README.md",
             "reports/paper/_quarto.yml",
             "reports/paper/index.qmd",
+            "reports/paper/paper_values.json",
             "reports/paper/references.bib",
             "reports/paper/build/README.md",
         ]
@@ -116,7 +117,7 @@ class PaperSurfaceIntegrityTest(unittest.TestCase):
             with self.subTest(filename=filename):
                 self.assertIn(
                     filename,
-                    {"README.md", *CANONICAL_PAPER_BUILD_ARTIFACTS},
+                    {"README.md", "index.resolved.qmd", *CANONICAL_PAPER_BUILD_ARTIFACTS},
                 )
 
 

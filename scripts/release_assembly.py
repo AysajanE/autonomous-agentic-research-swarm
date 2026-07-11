@@ -49,6 +49,14 @@ CANONICAL_PAPER_BUILD_REL_PATHS = (
     "reports/paper/build/l2_l1_rent_working_paper.pdf",
     "reports/paper/build/render_manifest.json",
 )
+REQUIRED_RELEASE_PERIMETER_PATHS = (
+    "reports/paper/index.qmd",
+    "reports/paper/references.bib",
+    "reports/paper/_quarto.yml",
+    "reports/paper/paper_values.json",
+    "data/processed/panels/daily_rollup_panel.csv",
+    "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
+)
 RELEASE_MANIFEST_FILENAME_RE = re.compile(r"^release_(\d{4}-\d{2}-\d{2})\.json$")
 
 ALL_STAGE4_GATE_NAMES = (
@@ -242,6 +250,27 @@ def _collect_explicit_artifacts(
     return artifacts, missing
 
 
+def _manuscript_surface_present(repo_root: Path) -> bool:
+    """A manuscript program is in play iff EITHER computed-paper surface exists on
+    disk — the manuscript source (`index.qmd`) or the computed values
+    (`paper_values.json`). This is the single activation signal shared by every F14
+    perimeter site AND by `gate_manuscript_computed_paper`, so the release perimeter
+    and the science gate can never disagree (a partial deletion — one surface present,
+    the other gone — fails BOTH: the perimeter reports the missing member and the gate
+    reports the missing surface). A manuscript-free repo (both absent) has no
+    manuscript perimeter to enforce, keeping empty modeling/hybrid fixtures green.
+    NOTE (bounded residual, owned by M4-C release-stage + a BT2 drill): this cannot
+    distinguish "empirical project that deleted its ENTIRE manuscript" from "project
+    that has not written it yet" — both surfaces absent reads as no-manuscript, so a
+    total-manuscript-deletion at continuous-gate time is not caught here. Closing that
+    requires a release-stage "declared paper submission" signal, which the scaffold
+    fixtures' unconditional `features.paper: true` makes unavailable at this layer."""
+    return (
+        (repo_root / "reports/paper/index.qmd").is_file()
+        or (repo_root / "reports/paper/paper_values.json").is_file()
+    )
+
+
 def _collect_dir_artifacts(
     repo_root: Path,
     rel_dir: str,
@@ -263,6 +292,39 @@ def _collect_dir_artifacts(
         artifacts.append(_artifact_record(repo_root, path))
     artifacts.sort(key=lambda item: str(item["path"]))
     return artifacts
+
+
+def _render_manifest_perimeter_failures(repo_root: Path) -> list[str]:
+    render_manifest_path = repo_root / "reports/paper/build/render_manifest.json"
+    if not render_manifest_path.is_file():
+        return []
+    try:
+        payload = _load_json_object(render_manifest_path)
+    except ValueError as exc:
+        return [f"release_perimeter_render_manifest_invalid:{exc}"]
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, list):
+        return ["release_perimeter_render_manifest_inputs_not_list"]
+    by_path = {
+        item.get("path"): item
+        for item in inputs
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    failures: list[str] = []
+    for relpath in REQUIRED_RELEASE_PERIMETER_PATHS:
+        entry = by_path.get(relpath)
+        if entry is None:
+            failures.append(f"release_perimeter_artifact_missing:render_manifest.inputs:{relpath}")
+            continue
+        failures.extend(
+            f"release_perimeter_render_manifest:{failure}"
+            for failure in _validate_artifact_entry(
+                entry,
+                repo_root,
+                f"render_manifest.inputs[{relpath}]",
+            )
+        )
+    return failures
 
 
 def _dedupe_preserve(items: Iterable[str]) -> list[str]:
@@ -451,9 +513,42 @@ def assemble_release_manifest(
     paper_artifacts, missing_paper_artifacts = _collect_explicit_artifacts(
         repo_root, CANONICAL_PAPER_BUILD_REL_PATHS
     )
+    release_perimeter, missing_release_perimeter = _collect_explicit_artifacts(
+        repo_root, REQUIRED_RELEASE_PERIMETER_PATHS
+    )
+    # F14: the manuscript-source + processed-panel perimeter is enforced fail-closed
+    # ONLY for releases that actually ship a manuscript (either computed-paper surface
+    # present — see _manuscript_surface_present). A modeling-only profile or a minimal
+    # fixture that carries no manuscript has no manuscript perimeter to enforce, so its
+    # absence is structural, not a dropped artifact. When a manuscript IS present, a
+    # MISSING declared member still fails closed — the F14 intent (a declared-but-absent
+    # artifact never silently skips) is preserved, and this is the SAME activation
+    # signal gate_manuscript_computed_paper uses, so the two never disagree.
+    # (Per-profile panel membership for the modeling/hybrid replication profiles is
+    # refined in M4-C.)
+    manuscript_present = _manuscript_surface_present(repo_root)
+    if not manuscript_present:
+        missing_release_perimeter = []
 
     task_status = _collect_task_status(repo_root)
     paper_status = "present" if not missing_paper_artifacts else "pending_stage2"
+    render_perimeter_failures = (
+        _render_manifest_perimeter_failures(repo_root)
+        if paper_status == "present" and manuscript_present
+        else []
+    )
+    # F2 (Codex cross-vendor): a rendered paper must never ship without its sources. If the
+    # canonical HTML/PDF/render-manifest exist (paper_status present) but BOTH computed-paper
+    # source surfaces are gone, the release would carry stale renders whose provenance the
+    # F14 perimeter suppression would otherwise hide — fail closed. A project that has simply
+    # not built its paper yet has no rendered outputs (paper_status pending_stage2), so this
+    # never fires; the not-yet-written-manuscript activation residual is owned by the M4-C
+    # release-stage/venue contract.
+    stale_render_failures = (
+        ["release_rendered_paper_without_sources"]
+        if paper_status == "present" and not manuscript_present
+        else []
+    )
 
     missing_required_inputs = sorted(missing_contracts + missing_registry)
     notes: list[str] = []
@@ -461,6 +556,16 @@ def assemble_release_manifest(
     if missing_required_inputs:
         notes.append(
             "Missing required release inputs: " + ", ".join(missing_required_inputs)
+        )
+    if missing_release_perimeter:
+        notes.append(
+            "Missing required release-perimeter artifacts: "
+            + ", ".join(missing_release_perimeter)
+        )
+    if render_perimeter_failures:
+        notes.append(
+            "Paper render-manifest perimeter verification failed: "
+            + ", ".join(render_perimeter_failures)
         )
     if required_gate_failures:
         notes.append(
@@ -492,7 +597,7 @@ def assemble_release_manifest(
             "referee_release_evidence",
         }
     )
-    if referee_hard_failures or (
+    if referee_hard_failures or missing_release_perimeter or render_perimeter_failures or stale_render_failures or (
         (missing_required_inputs or required_gate_failures) and not allow_gate_failures
     ):
         failure_parts: list[str] = []
@@ -504,6 +609,13 @@ def assemble_release_manifest(
             failure_parts.append(
                 "failed_gates=" + ",".join(sorted(required_gate_failures))
             )
+        if missing_release_perimeter:
+            failure_parts.extend(
+                f"release_perimeter_artifact_missing={path}"
+                for path in missing_release_perimeter
+            )
+        failure_parts.extend(render_perimeter_failures)
+        failure_parts.extend(stale_render_failures)
         raise SystemExit("release_assembly_blocked:" + ";".join(failure_parts))
 
     manifest_relpath = _release_manifest_relpath(release_date).as_posix()
@@ -522,6 +634,7 @@ def assemble_release_manifest(
         "validation": validation,
         "figures": figures,
         "tables": tables,
+        "release_perimeter": release_perimeter,
         "paper": {
             "status": paper_status,
             "expected_namespace": PAPER_BUILD_NAMESPACE,
@@ -861,6 +974,34 @@ def validate_release_manifest(path: Path, repo_root: Path) -> list[str]:
                         f"artifacts.{section_name}[{index}]",
                     )
                 )
+
+        release_perimeter = artifacts.get("release_perimeter")
+        if release_perimeter is not None:
+            if not isinstance(release_perimeter, list):
+                failures.append(f"{relpath}:artifact_section_not_list:release_perimeter")
+            else:
+                perimeter_paths: set[str] = set()
+                for index, entry in enumerate(release_perimeter):
+                    failures.extend(
+                        f"{relpath}:{failure}"
+                        for failure in _validate_artifact_entry(
+                            entry,
+                            repo_root,
+                            f"artifacts.release_perimeter[{index}]",
+                        )
+                    )
+                    if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                        perimeter_paths.add(str(entry["path"]))
+                # F14 (validator side): mirror assemble_release_manifest — require the
+                # full manuscript perimeter only for releases that actually ship a
+                # manuscript (either computed-paper surface present). A modeling-only or
+                # manuscript-free release legitimately carries an empty perimeter section.
+                if _manuscript_surface_present(repo_root):
+                    for required_path in REQUIRED_RELEASE_PERIMETER_PATHS:
+                        if required_path not in perimeter_paths:
+                            failures.append(
+                                f"{relpath}:release_perimeter_artifact_missing:{required_path}"
+                            )
 
         paper = artifacts.get("paper")
         failures.extend(
