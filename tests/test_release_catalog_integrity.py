@@ -41,17 +41,9 @@ release_assembly = load_release_assembly_module()
 def scaffold_release_ready_repo(root: Path) -> None:
     scaffold_runtime_repo(root, mode="empirical")
 
-    write_text(
-        root,
-        "contracts/schemas/release_manifest_v1.yaml",
-        "\n".join(
-            [
-                "version: 1",
-                "artifact: release_manifest",
-                "schema_version: research_swarm.release_manifest.v1",
-                "",
-            ]
-        ),
+    shutil.copyfile(
+        _TESTS_ROOT.parent / "contracts/schemas/release_manifest_v1.yaml",
+        root / "contracts/schemas/release_manifest_v1.yaml",
     )
     write_text(root, "reports/AGENTS.md", "# reports\n")
     write_text(root, "reports/status/README.md", "# status\n")

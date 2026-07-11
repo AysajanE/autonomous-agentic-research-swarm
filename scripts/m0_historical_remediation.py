@@ -21,21 +21,15 @@ from pathlib import Path
 import re
 import sys
 
+from pack_config import load_pack_config, pack_value
+
 REPO = Path(__file__).resolve().parents[1]
 
 PROVENANCE_ANNOTATION_SCHEMA = "research_swarm.provenance_annotation.v1"
 REBASELINE_SCHEMA = "research_swarm.manifest_rebaseline.v1"
 EXEMPTIONS_SCHEMA = "research_swarm.historical_exemptions.v1"
 
-SUPERSEDED = {
-    # stale manifest -> accurate successor covering the same output surface
-    "daily_l1_rent_decomposition_2026-04-01.json": "daily_l1_rent_decomposition_2026-04-09.json",
-    "daily_l1_rent_decomposition_2026-04-08.json": "daily_l1_rent_decomposition_2026-04-09.json",
-    "daily_rollup_panel_2026-04-01.json": "daily_rollup_panel_2026-04-09.json",
-    "daily_rollup_panel_2026-04-08.json": "daily_rollup_panel_2026-04-09.json",
-    "vendor_daily_rollup_panel_2026-04-01.json": "vendor_daily_rollup_panel_2026-04-09.json",
-    "vendor_daily_rollup_panel_2026-04-08.json": "vendor_daily_rollup_panel_2026-04-09.json",
-}
+SUPERSEDED = pack_value(load_pack_config(REPO), "historical_manifest_replacements", dict)
 
 SUPERSEDED_NOTE = (
     "Honest re-baseline of the battle-test record (plan §4.0 #11): this manifest's "

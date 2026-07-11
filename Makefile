@@ -1,30 +1,37 @@
+PYTHON ?= python3.11
+
 .PHONY: gate reproduce-analysis paper
 
 gate:
-	python scripts/quality_gates.py
+	$(PYTHON) scripts/quality_gates.py
 
 reproduce-analysis:
-	python scripts/reproduce_analysis.py
+	$(PYTHON) scripts/reproduce_analysis.py
 
 paper:
-	python scripts/render_paper.py
+	$(PYTHON) scripts/render_paper.py
 
 .PHONY: test
 
 test:
-	python -m unittest discover -s tests
+	$(PYTHON) -m unittest discover -s tests
 
 .PHONY: swarm-plan
 
 swarm-plan:
-	python scripts/swarm.py plan
+	$(PYTHON) scripts/swarm.py plan
 
 .PHONY: swarm-tick
 
 swarm-tick:
-	python scripts/swarm.py tick
+	$(PYTHON) scripts/swarm.py tick
 
 .PHONY: sweep
 
 sweep:
-	python scripts/sweep_tasks.py
+	$(PYTHON) scripts/sweep_tasks.py
+
+.PHONY: swarm-init
+
+swarm-init:
+	$(PYTHON) scripts/swarm_init.py --mode $(MODE) --output $(OUTPUT)

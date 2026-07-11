@@ -2,19 +2,7 @@
 """
 Build release STR figures and tables from validated local artifacts.
 
-Inputs:
-- reports/validation/rollup_panel_validation.json
-- reports/validation/l1_rent_decomposition_validation.json
-- reports/validation/cross_source_reconciliation.json
-- data/processed/panels/daily_rollup_panel.csv
-- data/processed/l1_rent/daily_l1_rent_decomposition.csv
-
-Outputs:
-- reports/figures/str_ecosystem_timeseries.svg
-- reports/figures/str_post_dencun_regimes.svg
-- reports/tables/str_regime_summary.csv
-- reports/tables/str_regime_summary.md
-- reports/exhibits/manifest.json
+Inputs and outputs are declared by ``contracts/pack.json``.
 
 Run:
 - python src/analysis/build_str_release_outputs.py --sample
@@ -28,6 +16,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 
 import matplotlib
 
@@ -42,24 +31,28 @@ from metrics_str import compute_ecosystem_str
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VALIDATION_BUNDLE = (
-    REPO_ROOT / "reports" / "validation" / "rollup_panel_validation.json",
-    REPO_ROOT / "reports" / "validation" / "l1_rent_decomposition_validation.json",
-    REPO_ROOT / "reports" / "validation" / "cross_source_reconciliation.json",
-)
-LIVE_PANEL_PATH = REPO_ROOT / "data" / "processed" / "panels" / "daily_rollup_panel.csv"
-LIVE_DECOMP_PATH = REPO_ROOT / "data" / "processed" / "l1_rent" / "daily_l1_rent_decomposition.csv"
-SAMPLE_PANEL_PATH = REPO_ROOT / "data" / "samples" / "panels" / "daily_rollup_panel_sample.csv"
-SAMPLE_DECOMP_PATH = REPO_ROOT / "data" / "samples" / "l1_rent" / "daily_l1_rent_decomposition_sample.csv"
-PANEL_MANIFEST_DIR = REPO_ROOT / "data" / "processed_manifest"
-ECOSYSTEM_FIGURE_PATH = REPO_ROOT / "reports" / "figures" / "str_ecosystem_timeseries.svg"
-REGIME_FIGURE_PATH = REPO_ROOT / "reports" / "figures" / "str_post_dencun_regimes.svg"
-ECOSYSTEM_FIGURE_DATA_PATH = REPO_ROOT / "reports" / "figures" / "str_ecosystem_timeseries.data.json"
-REGIME_FIGURE_DATA_PATH = REPO_ROOT / "reports" / "figures" / "str_post_dencun_regimes.data.json"
-REGIME_TABLE_CSV_PATH = REPO_ROOT / "reports" / "tables" / "str_regime_summary.csv"
-REGIME_TABLE_MD_PATH = REPO_ROOT / "reports" / "tables" / "str_regime_summary.md"
-PAPER_VALUES_PATH = REPO_ROOT / "reports" / "paper" / "paper_values.json"
-EXHIBITS_MANIFEST_PATH = REPO_ROOT / "reports" / "exhibits" / "manifest.json"
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from pack_config import load_pack_config, pack_value  # noqa: E402
+
+
+PACK = load_pack_config(REPO_ROOT)
+VALIDATION_BUNDLE = tuple(REPO_ROOT / path for path in pack_value(PACK, "analysis.validation_bundle", list))
+LIVE_PANEL_PATH = REPO_ROOT / pack_value(PACK, "paths.primary_panel")
+LIVE_DECOMP_PATH = REPO_ROOT / pack_value(PACK, "paths.decomposition")
+SAMPLE_PANEL_PATH = REPO_ROOT / pack_value(PACK, "paths.primary_panel_sample")
+SAMPLE_DECOMP_PATH = REPO_ROOT / pack_value(PACK, "paths.decomposition_sample")
+PANEL_MANIFEST_GLOB = pack_value(PACK, "paths.primary_panel_manifest_glob")
+ECOSYSTEM_FIGURE_PATH = REPO_ROOT / pack_value(PACK, "analysis.outputs.ecosystem_figure")
+REGIME_FIGURE_PATH = REPO_ROOT / pack_value(PACK, "analysis.outputs.regime_figure")
+ECOSYSTEM_FIGURE_DATA_PATH = REPO_ROOT / pack_value(PACK, "analysis.outputs.ecosystem_figure_data")
+REGIME_FIGURE_DATA_PATH = REPO_ROOT / pack_value(PACK, "analysis.outputs.regime_figure_data")
+REGIME_TABLE_CSV_PATH = REPO_ROOT / pack_value(PACK, "analysis.outputs.regime_table_csv")
+REGIME_TABLE_MD_PATH = REPO_ROOT / pack_value(PACK, "analysis.outputs.regime_table_markdown")
+PAPER_VALUES_PATH = REPO_ROOT / pack_value(PACK, "analysis.outputs.paper_values")
+EXHIBITS_MANIFEST_PATH = REPO_ROOT / pack_value(PACK, "analysis.outputs.exhibits_manifest")
 CLAIMS_PATH = REPO_ROOT / "contracts" / "claims.yaml"
 PROTOCOL_PATH = REPO_ROOT / "docs" / "protocol.md"
 DENCUN_DATE = pd.Timestamp("2024-03-13")
@@ -134,11 +127,13 @@ def main() -> int:
 
 
 def latest_manifest_as_of() -> str:
-    candidates = sorted(PANEL_MANIFEST_DIR.glob("daily_rollup_panel_*.json"))
+    pattern = Path(PANEL_MANIFEST_GLOB)
+    candidates = sorted((REPO_ROOT / pattern.parent).glob(pattern.name))
     if not candidates:
         raise SystemExit("no processed panel manifests found under data/processed_manifest/")
     stem = candidates[-1].stem
-    return stem.removeprefix("daily_rollup_panel_")
+    prefix = pattern.stem.split("*", 1)[0]
+    return stem.removeprefix(prefix)
 
 
 def ensure_validation_bundle_passes() -> None:
@@ -475,7 +470,7 @@ def write_figure_data_sidecars(
     }
     ecosystem_payload: dict[str, object] = {
         **common,
-        "figure": "reports/figures/str_ecosystem_timeseries.svg",
+        "figure": ECOSYSTEM_FIGURE_PATH.relative_to(REPO_ROOT).as_posix(),
         "dates": _iso_dates(ecosystem["date_utc"]),
         "series": {
             "l2_fees_14d": {"unit": "eth_per_day", "values": _rounded_values(ecosystem["l2_fees_14d"])},
@@ -500,7 +495,7 @@ def write_figure_data_sidecars(
     )
     regime_payload: dict[str, object] = {
         **common,
-        "figure": "reports/figures/str_post_dencun_regimes.svg",
+        "figure": REGIME_FIGURE_PATH.relative_to(REPO_ROOT).as_posix(),
         "dates": _iso_dates(post["date_utc"]),
         "series": {
             "l1_blob_base_fee_gwei": {"unit": "gwei", "values": _rounded_values(post["l1_blob_base_fee_gwei"])},
@@ -603,7 +598,7 @@ def write_paper_values(regime_table: pd.DataFrame, *, as_of_label: str) -> None:
     source_relpaths = {key: path.relative_to(REPO_ROOT).as_posix() for key, path in source_paths.items()}
     source_hashes = {key: _sha256(path) for key, path in source_paths.items()}
 
-    regime_claim = _claim_for_citation("str_regime_summary")
+    regime_claim = _claim_for_citation(pack_value(PACK, "analysis.exhibits.regime_summary"))
     panel_claim = _claim_for_citation("rollup_panel_validation")
     reconciliation_claim = _claim_for_citation("cross_source_reconciliation")
     protocol_claim = _claim_for_citation("protocol_lock")
@@ -649,7 +644,7 @@ def write_paper_values(regime_table: pd.DataFrame, *, as_of_label: str) -> None:
             value=value,
             unit=unit,
             display=f"{value:.{decimals}f}{display_suffix}",
-            citation_key="str_regime_summary",
+            citation_key=pack_value(PACK, "analysis.exhibits.regime_summary"),
             source="table",
             selector=f"regime_id={regime_id};column={column}",
             claim=regime_claim,
@@ -777,28 +772,28 @@ def write_exhibits_manifest(
     ]
     exhibits = [
         {
-            "exhibit_id": "str_ecosystem_timeseries",
+            "exhibit_id": pack_value(PACK, "analysis.exhibits.ecosystem_timeseries"),
             "builder": "src/analysis/build_str_release_outputs.py",
             "inputs": inputs,
-            "output": "reports/figures/str_ecosystem_timeseries.svg",
+            "output": ECOSYSTEM_FIGURE_PATH.relative_to(REPO_ROOT).as_posix(),
             "caption": "Settlement Take Rate ecosystem time series through the validated as-of date.",
             "notes": "Two-panel multi-series figure; plotted values are bound by the matching .data.json sidecar.",
             "self_qa": ecosystem_figure_qa,
         },
         {
-            "exhibit_id": "str_post_dencun_regimes",
+            "exhibit_id": pack_value(PACK, "analysis.exhibits.post_regime_figure"),
             "builder": "src/analysis/build_str_release_outputs.py",
             "inputs": inputs,
-            "output": "reports/figures/str_post_dencun_regimes.svg",
+            "output": REGIME_FIGURE_PATH.relative_to(REPO_ROOT).as_posix(),
             "caption": "Post-Dencun STR regimes with protocol-defined blob-fee-floor runs.",
             "notes": "Two-panel multi-series figure; plotted values are bound by the matching .data.json sidecar.",
             "self_qa": regime_figure_qa,
         },
         {
-            "exhibit_id": "str_regime_summary",
+            "exhibit_id": pack_value(PACK, "analysis.exhibits.regime_summary"),
             "builder": "src/analysis/build_str_release_outputs.py",
             "inputs": inputs,
-            "output": "reports/tables/str_regime_summary.md",
+            "output": REGIME_TABLE_MD_PATH.relative_to(REPO_ROOT).as_posix(),
             "caption": "STR and rent summaries for the full, Dencun, and blob-fee regimes.",
             "notes": "The Markdown include and same-stem CSV are emitted from one in-memory table; paper_values binds numeric cells to the CSV.",
             "self_qa": {

@@ -13,8 +13,7 @@ import subprocess
 import sys
 from typing import Iterable
 
-
-PROCESSED_MANIFEST_SCHEMA_VERSION = "research_swarm.processed_manifest.v2"
+from pack_config import manifest_schema_version
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -81,10 +80,9 @@ def _declared_dependencies(repo: Path) -> tuple[str, ...]:
     return ("pandas", "matplotlib")
 
 
-def write_processed_manifest(
+def build_processed_manifest(
     *,
     repo: Path,
-    manifest_path: str | Path,
     as_of_utc_date: str,
     inputs: Iterable[str | Path],
     script_path: str | Path,
@@ -136,7 +134,7 @@ def write_processed_manifest(
 
     normalized_inputs = [_repo_path(repo, input_path)[0] for input_path in inputs]
     payload: dict[str, object] = {
-        "schema_version": PROCESSED_MANIFEST_SCHEMA_VERSION,
+        "schema_version": manifest_schema_version("processed", repo),
         "as_of_utc_date": as_of_utc_date,
         "inputs": normalized_inputs,
         "transform": transform,
@@ -147,7 +145,30 @@ def write_processed_manifest(
         },
     }
 
-    _, manifest_disk_path = _repo_path(repo, manifest_path)
+    return payload
+
+
+def write_processed_manifest(
+    *,
+    repo: Path,
+    manifest_path: str | Path,
+    as_of_utc_date: str,
+    inputs: Iterable[str | Path],
+    script_path: str | Path,
+    command: str,
+    outputs: Iterable[str | Path],
+    allow_dirty_with_diff: bool = False,
+) -> dict[str, object]:
+    payload = build_processed_manifest(
+        repo=repo,
+        as_of_utc_date=as_of_utc_date,
+        inputs=inputs,
+        script_path=script_path,
+        command=command,
+        outputs=outputs,
+        allow_dirty_with_diff=allow_dirty_with_diff,
+    )
+    _, manifest_disk_path = _repo_path(repo.resolve(), manifest_path)
     manifest_disk_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_disk_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",

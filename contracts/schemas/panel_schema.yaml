@@ -1,5 +1,7 @@
-version: 1
-description: "Schema entrypoints (use versioned schema files for canonical field lists)."
-schemas:
-  str: "contracts/schemas/panel_schema_str_v1.yaml"
-  decomposition: "contracts/schemas/panel_schema_decomp_v1.yaml"
+{
+  "schema_version": "research_swarm.panel_schema_index.v1",
+  "schemas": {
+    "primary": "contracts/schemas/panel_schema_str_v1.yaml",
+    "decomposition": "contracts/schemas/panel_schema_decomp_v1.yaml"
+  }
+}

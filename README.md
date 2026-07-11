@@ -47,12 +47,16 @@ Relevant surfaces:
 The framework separates framework policy from project policy.
 
 - [`contracts/framework.json`](contracts/framework.json) defines framework capabilities, roles, states, task semantics, execution engines, and release policy.
+- [`contracts/pack.json`](contracts/pack.json) defines project-owned names, paths, workstream meanings, and the compatible kernel range.
+- [`contracts/kernel_interface.json`](contracts/kernel_interface.json) versions the kernel surfaces consumed by packs.
 - [`contracts/project.yaml`](contracts/project.yaml) defines the currently instantiated research project.
 - [`docs/protocol.md`](docs/protocol.md) locks empirical definitions when the current project is empirical.
 - [`contracts/model_spec.md`](contracts/model_spec.md) is the modeling specification surface.
 - [`contracts/hybrid_interface_v1.yaml`](contracts/hybrid_interface_v1.yaml) defines the only allowed empirical-to-modeling bridge.
 
 That separation is deliberate. The framework is meant to be reusable across projects; the current project contract is only one instantiation.
+
+The Python distribution metadata in `pyproject.toml` names the reusable kernel. Pack identity is separate and is validated from `project.package_name` in `contracts/pack.json`; a new pack does not rename the kernel distribution.
 
 ### Explicit role separation
 
@@ -153,10 +157,10 @@ The key rule is that modeling work consumes declared instance manifests, not arb
 
 This repository currently contains both:
 
-- the framework itself
-- one active reference project instance
+- the reusable operational kernel under `scripts/`
+- one active reference pack whose project science body lives under `src/`
 
-The current project instance, defined in [`contracts/project.yaml`](contracts/project.yaml), is an empirical research project on L2-to-L1 rent. It should be understood as a real end-to-end validation of the framework's empirical path, not as the definition of the framework.
+The current project instance, defined in [`contracts/project.yaml`](contracts/project.yaml), is an empirical research project on L2-to-L1 rent. Its `src/` analysis, ETL, and validation code is STR-specific pack science and is replaced—not generalized—when starting another project. It should be understood as a real end-to-end validation of the framework's empirical path, not as the definition of the framework.
 
 At the current state of this repository, the strongest operational evidence is:
 
@@ -179,7 +183,7 @@ That distinction matters. The framework supports empirical, modeling, and hybrid
 - [`contracts/`](contracts/): framework policy, project contract, model spec, hybrid interface, schemas, instances, and experiments
 - [`docs/`](docs/): runbooks, prompts, and protocol documents
 - [`scripts/`](scripts/): swarm runtime, quality gates, lifecycle sweep, and release assembly
-- [`src/`](src/): implementation surfaces for ETL, validation, analysis, and modeling
+- [`src/`](src/): pack-owned science implementations for ETL, validation, analysis, and modeling
 - [`registry/`](registry/): registry surfaces for empirical projects
 - [`data/`](data/): raw, processed, sample, and manifest-backed datasets
 - [`reports/`](reports/): validation outputs, figures, tables, models, paper artifacts, release manifests, and review logs
@@ -195,12 +199,23 @@ Use the repo as-is to inspect or extend the current empirical project that has b
 
 ### 2. Use the framework for a different research project
 
-Reuse the framework structure and replace the project-specific contract surfaces with a different project instance:
+Generate a compatible inactive pack scaffold, then replace its project-specific contract surfaces:
 
+```sh
+python3.11 scripts/swarm_init.py --mode empirical --output ../my-empirical-pack
+make -C ../my-empirical-pack gate
+```
+
+- update `contracts/pack.json`
 - update [`contracts/project.yaml`](contracts/project.yaml)
 - update the relevant empirical, modeling, or hybrid contracts
+- replace the documented `src/analysis/project_analysis.py` placeholder with the new pack's science body
 - define the task queue under [`.orchestrator/`](.orchestrator/)
 - keep the same role, state, gate, and review semantics
+
+Use `--mode modeling` or `--mode hybrid` for the other program templates. The generated Makefile points at this repo-native kernel for M5a; physical installable packaging remains the separate M5b decision.
+
+`swarm_init` provides a contract-valid, orchestration-testable scaffold. It intentionally does not generate a runnable scientific analysis pipeline: each new pack must author its own `src/` science body. Reusing the operational kernel means no edits to `scripts/`; it does not mean copying the STR implementation from this repository.
 
 The framework is intended to generalize. The current empirical project is only one concrete instantiation.
 

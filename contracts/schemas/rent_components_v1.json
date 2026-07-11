@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "research_swarm.rent_components.v1.schema",
+  "schema_version": "research_swarm.dataframe_schema.v1",
+  "dataset": "rent_components",
+  "description": "Authoritative field order and required-column contract for the STR pack's rent-component table.",
+  "fields": [
+    {"name": "date_utc", "nullable": false},
+    {"name": "rollup_id", "nullable": false},
+    {"name": "batch_submissions_eth", "nullable": false},
+    {"name": "proof_submissions_eth", "nullable": false},
+    {"name": "state_updates_eth", "nullable": false},
+    {"name": "execution_base_fee_burn_eth", "nullable": false},
+    {"name": "execution_priority_fee_eth", "nullable": false},
+    {"name": "blob_fee_burn_eth", "nullable": false},
+    {"name": "rent_paid_eth", "nullable": false}
+  ]
+}

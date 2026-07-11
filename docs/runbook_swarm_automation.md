@@ -35,7 +35,7 @@ This is the Operator-facing guide for the default local swarm layer. Use it for 
 - `State:` inside the task file is authoritative.
 - `dependencies` are satisfied only by `done`, except explicit `integration_ready_dependencies`.
 - `integration_ready` is only for interface/export tasks in the allowlisted categories.
-- `allow_network: true` is valid only for workstreams allowlisted by `contracts/framework.json` (`W1`, `W2`, `W3`).
+- `allow_network: true` is valid only for workstreams allowlisted by the active `contracts/pack.json` workflow configuration.
 - Worker tasks do not own `reports/catalog.yaml`, paper build outputs, or release manifests.
 
 ## Start with a dry run

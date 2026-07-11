@@ -28,7 +28,7 @@ __all__ = [
 
 
 def compute_rollup_str(panel: pd.DataFrame) -> pd.DataFrame:
-    """Compute rollup-day STR for complete rows in a daily_rollup_panel."""
+    """Compute rollup-day STR for complete rows in the configured primary panel."""
     complete_rows = _complete_metric_rows(panel)
     result = complete_rows.copy()
     result[STR_COLUMN] = _safe_ratio(result[RENT_PAID_COLUMN], result[L2_FEES_COLUMN])

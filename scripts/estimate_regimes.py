@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Estimate and manifest structural breaks from the committed rollup panel.
+"""Estimate and manifest structural breaks from the committed primary panel.
 
-Input: data/processed/panels/daily_rollup_panel.csv plus its processed manifest.
+Input: the active pack's primary panel plus its processed manifest.
 Output: reports/analysis/regime_breaks.json.
 
 Run: python scripts/estimate_regimes.py
@@ -20,18 +20,24 @@ import pandas as pd
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ANALYSIS_DIR = REPO_ROOT / "src" / "analysis"
-if str(ANALYSIS_DIR) not in sys.path:
-    sys.path.insert(0, str(ANALYSIS_DIR))
-
 from inference import bai_perron_breaks  # noqa: E402
-from metrics_str import compute_ecosystem_str  # noqa: E402
 from spec_curve import statistical_config_from_lock  # noqa: E402
 from swarm_taskfile import load_prereg_lock  # noqa: E402
+from pack_config import load_pack_config, pack_value  # noqa: E402
 
 
-DEFAULT_PANEL = Path("data/processed/panels/daily_rollup_panel.csv")
+PACK = load_pack_config(REPO_ROOT)
+DEFAULT_PANEL = Path(pack_value(PACK, "paths.primary_panel"))
 DEFAULT_OUTPUT = Path("reports/analysis/regime_breaks.json")
+
+
+def _panel_columns(pack: dict[str, object] = PACK) -> dict[str, str]:
+    columns = pack_value(pack, "analysis.panel_columns", dict)
+    return {key: str(columns[key]) for key in ("date", "denominator", "numerator", "metric")}
+
+
+def _regime_series(pack: dict[str, object] = PACK) -> tuple[str, ...]:
+    return tuple(pack_value(pack, "analysis.regime_series", list))
 
 
 def _sha256_and_bytes(path: Path) -> tuple[str, int]:
@@ -105,30 +111,38 @@ def estimate_regime_manifest(
     imposed_date: str | None,
     prereg_lock_sha256: str | None = None,
     parameter_source: str = "explicit_arguments",
+    panel_columns: dict[str, str] | None = None,
+    allowed_series: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     """Create a content-bound regime-break manifest without writing it."""
 
     _verify_panel_claim(panel_path, panel_manifest_path)
+    columns = panel_columns or _panel_columns()
     panel = pd.read_csv(panel_path)
-    panel["date_utc"] = pd.to_datetime(panel["date_utc"], errors="raise")
-    for column in ("l2_fees_eth", "rent_paid_eth"):
+    panel[columns["date"]] = pd.to_datetime(panel[columns["date"]], errors="raise")
+    for column in (columns["denominator"], columns["numerator"]):
         panel[column] = pd.to_numeric(panel[column], errors="coerce")
-    ecosystem = compute_ecosystem_str(panel).sort_values("date_utc", kind="stable")
-    series_columns = {
-        "str": "str",
-        "rent_paid_eth": "rent_paid_eth",
-        "l2_fees_eth": "l2_fees_eth",
-    }
-    if series_name not in series_columns:
+    ecosystem = (
+        panel.groupby(columns["date"], as_index=False, sort=True)[
+            [columns["denominator"], columns["numerator"]]
+        ]
+        .sum(min_count=1)
+        .sort_values(columns["date"], kind="stable")
+    )
+    ecosystem[columns["metric"]] = ecosystem[columns["numerator"]] / ecosystem[columns["denominator"]]
+    ecosystem.loc[ecosystem[columns["denominator"]] == 0.0, columns["metric"]] = float("nan")
+    if series_name not in set(allowed_series or _regime_series()):
         raise ValueError(f"unsupported series: {series_name}")
-    column = series_columns[series_name]
-    complete = ecosystem.loc[ecosystem[column].notna(), ["date_utc", column]].reset_index(drop=True)
+    complete = ecosystem.loc[
+        ecosystem[series_name].notna(),
+        [columns["date"], series_name],
+    ].reset_index(drop=True)
     breaks, ssr = bai_perron_breaks(
-        complete[column].to_numpy(dtype=float),
+        complete[series_name].to_numpy(dtype=float),
         max_breaks=max_breaks,
         min_segment=min_segment,
     )
-    break_dates = [complete.loc[index, "date_utc"].date().isoformat() for index in breaks]
+    break_dates = [complete.loc[index, columns["date"]].date().isoformat() for index in breaks]
     panel_sha, panel_bytes = _sha256_and_bytes(panel_path)
     comparison: dict[str, object] | None = None
     if imposed_date is not None:
@@ -184,7 +198,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
         "--series",
-        choices=("str", "rent_paid_eth", "l2_fees_eth"),
+        choices=_regime_series(),
         default=None,
     )
     parser.add_argument("--max-breaks", type=int, default=None)
@@ -224,11 +238,12 @@ def _resolved_parameters(args: argparse.Namespace) -> tuple[str, int, int, str |
                     f"--{name.replace('_', '-')}={requested_value} conflicts with locked value {locked_value}"
                 )
         return (*locked, lock_sha, "active_analysis_lock")
+    defaults = pack_value(PACK, "analysis.regime_defaults", dict)
     return (
-        args.series or "str",
-        args.max_breaks if args.max_breaks is not None else 3,
-        args.min_segment if args.min_segment is not None else 90,
-        args.imposed_date or "2024-03-13",
+        args.series or str(defaults["series"]),
+        args.max_breaks if args.max_breaks is not None else int(defaults["max_breaks"]),
+        args.min_segment if args.min_segment is not None else int(defaults["min_segment"]),
+        args.imposed_date or str(defaults["imposed_date"]),
         None,
         "draft_lock_cli_or_documented_defaults",
     )

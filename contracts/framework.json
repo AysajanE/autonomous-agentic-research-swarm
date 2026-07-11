@@ -1,5 +1,5 @@
 {
-  "framework_version": "v2",
+  "framework_version": "v3",
   "features": {
     "registry": true,
     "etl": true,
@@ -128,12 +128,6 @@
       "owner_role": "Operator"
     }
   },
-  "network_workstreams": [
-    "W1",
-    "W2",
-    "W3",
-    "W-Lit"
-  ],
   "prompt_templates": {
     "planner": "contracts/prompts/planner.md",
     "worker": "contracts/prompts/worker.md",
@@ -144,12 +138,6 @@
     "require_explicit_downstream_allowlist": true,
     "require_interface_outputs": true,
     "default_dependency_state": "done",
-    "eligible_workstreams": [
-      "W0",
-      "W3",
-      "W8",
-      "W9"
-    ],
     "eligible_task_kinds": [
       "protocol",
       "registry",
@@ -168,7 +156,6 @@
     ],
     "empirical": [
       "docs/protocol.md",
-      "registry/rollup_registry_v1.csv",
       "data/raw_manifest/",
       "data/processed_manifest/",
       "reports/validation/",
@@ -184,7 +171,6 @@
     ],
     "hybrid": [
       "docs/protocol.md",
-      "registry/rollup_registry_v1.csv",
       "contracts/model_spec.md",
       "contracts/hybrid_interface_v1.yaml",
       "contracts/instances/",
@@ -228,8 +214,6 @@
   },
   "release_policy": {
     "paper_substrate": "quarto_markdown",
-    "paper_entrypoint": "reports/paper/index.qmd",
-    "paper_build_dir": "reports/paper/build/",
     "catalog_compiler_role": "Operator",
     "release_manifest_pattern": "reports/status/releases/release_<YYYY-MM-DD>.json",
     "release_assembly_command": "python scripts/release_assembly.py --release-date <YYYY-MM-DD> --check"

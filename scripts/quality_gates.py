@@ -31,6 +31,7 @@ from typing import Any
 
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
+_EXECUTING_KERNEL_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
@@ -52,23 +53,24 @@ from calibrate_referee import calibration_report_failures
 import literature
 import generate_disclosure
 import replication_package
+from pack_config import load_pack_config, manifest_schema_version, pack_value
 
 
-SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION = manifest_schema_version("run", Path(__file__).resolve().parents[1])
 SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
-JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
+JUDGE_REVIEW_LOG_SCHEMA_VERSION = manifest_schema_version("judge_review", Path(__file__).resolve().parents[1])
 JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1 = "research_swarm.judge_review_log.v1"
-PROCESSED_MANIFEST_SCHEMA_VERSION = "research_swarm.processed_manifest.v2"
+PROCESSED_MANIFEST_SCHEMA_VERSION = manifest_schema_version("processed", Path(__file__).resolve().parents[1])
 MANIFEST_REBASELINE_SCHEMA_VERSION = "research_swarm.manifest_rebaseline.v1"
 VALIDATION_REPORT_SCHEMA_VERSION = "research_swarm.validation_report.v2"
-INSTANCE_MANIFEST_SCHEMA_VERSION = "research_swarm.instance_manifest.v1"
+INSTANCE_MANIFEST_SCHEMA_VERSION = manifest_schema_version("instance", Path(__file__).resolve().parents[1])
 EXPERIMENT_SPEC_SCHEMA_VERSION = "research_swarm.experiment_spec.v1"
-EXPERIMENT_MANIFEST_SCHEMA_VERSION = "research_swarm.experiment_manifest.v1"
+EXPERIMENT_MANIFEST_SCHEMA_VERSION = manifest_schema_version("experiment", Path(__file__).resolve().parents[1])
 SWEEP_ARTIFACT_SCHEMA_VERSION = "research_swarm.sweep_artifact.v1"
 REGIME_BREAKS_SCHEMA_VERSION = "research_swarm.regime_breaks.v1"
 SPEC_CURVE_SCHEMA_VERSION = "research_swarm.spec_curve.v1"
 HEADLINE_UNCERTAINTY_SCHEMA_VERSION = "research_swarm.headline_uncertainty.v1"
-REFEREE_REPORT_SCHEMA_VERSION = "research_swarm.referee_report.v1"
+REFEREE_REPORT_SCHEMA_VERSION = manifest_schema_version("referee", Path(__file__).resolve().parents[1])
 REFEREE_CALIBRATION_SCHEMA_VERSION = "research_swarm.referee_calibration.v1"
 REFEREE_RUBRIC_SCHEMA_VERSION = "research_swarm.rubric.v1"
 REFEREE_GOLD_KEY_SCHEMA_VERSION = "research_swarm.referee_gold_key.v1"
@@ -76,8 +78,8 @@ REFEREE_VERDICTS = {"supported", "not_supported", "cannot_verify"}
 REFEREE_REPORT_DIR = Path("reports/status/referee_reports")
 REFEREE_CALIBRATION_REPORT = Path("reports/status/referee_calibration.json")
 REFEREE_WAIVER_EMITTER = "swarm.py referee-waiver"
-INTEGRITY_AUDIT_SCHEMA_VERSION = "research_swarm.integrity_audit.v1"
-LITERATURE_MANIFEST_SCHEMA_VERSION = "research_swarm.literature_manifest.v1"
+INTEGRITY_AUDIT_SCHEMA_VERSION = manifest_schema_version("integrity_audit", Path(__file__).resolve().parents[1])
+LITERATURE_MANIFEST_SCHEMA_VERSION = manifest_schema_version("literature", Path(__file__).resolve().parents[1])
 RECALL_AUDIT_SCHEMA_VERSION = "research_swarm.recall_audit.v1"
 PROMPT_SURFACE_SCHEMA_VERSION = "research_swarm.prompt_surface.v1"
 PROGRAM_TEMPLATE_SCHEMA_VERSION = "research_swarm.program_template.v1"
@@ -105,14 +107,14 @@ DEFAULT_ALLOWED_STATES = (
 DEFAULT_ALLOWED_ROLES = ("Planner", "Worker", "Judge", "Operator")
 DEFAULT_TASK_EXECUTION_ROLES = ("Worker", "Operator")
 DEFAULT_SCIENTIFIC_REVIEW_ROLE = "Judge"
-DEFAULT_NETWORK_WORKSTREAMS = ("W1", "W2", "W3")
+DEFAULT_NETWORK_WORKSTREAMS: tuple[str, ...] = ()
 DEFAULT_PROMPT_TEMPLATES = {
     "planner": "docs/prompts/planner.md",
     "worker": "docs/prompts/worker.md",
     "judge": "docs/prompts/judge.md",
     "operator": "docs/prompts/operator.md",
 }
-DEFAULT_INTEGRATION_READY_ELIGIBLE_WORKSTREAMS = ("W0", "W3", "W8", "W9")
+DEFAULT_INTEGRATION_READY_ELIGIBLE_WORKSTREAMS: tuple[str, ...] = ()
 DEFAULT_INTEGRATION_READY_ELIGIBLE_TASK_KINDS = (
     "protocol",
     "registry",
@@ -150,7 +152,7 @@ REQUIRED_TASK_HEADINGS = (
     "## Notes / Decisions",
 )
 VALID_TASK_PRIORITIES = {"low", "medium", "high"}
-CLAIMS_SCHEMA_VERSION = "research_swarm.claims.v1"
+CLAIMS_SCHEMA_VERSION = manifest_schema_version("claims", Path(__file__).resolve().parents[1])
 CITATION_SNAPSHOT_SCHEMA_VERSION = "research_swarm.citation_snapshot.v1"
 CLAIM_TYPES = {
     "descriptive",
@@ -213,6 +215,8 @@ class FrameworkContract:
     projection_dirs: tuple[str, ...]
     prompt_templates: dict[str, str]
     network_workstreams: tuple[str, ...]
+    local_etl_workstreams: tuple[str, ...]
+    operator_workstream: str
     integration_ready_eligible_workstreams: tuple[str, ...]
     integration_ready_eligible_task_kinds: tuple[str, ...]
     forbid_unvalidated_empirical_data_outputs: bool
@@ -221,6 +225,7 @@ class FrameworkContract:
     judge_review_dir: str
     release_manifest_pattern: str | None
     required_paths: tuple[str, ...]
+    pack_config: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -385,6 +390,11 @@ def load_framework_contract(repo: Path = Path(".")) -> FrameworkContract:
     if not isinstance(raw, dict):
         raise ValueError("framework_top_level_not_object")
 
+    pack = load_pack_config(repo)
+    workflow = pack.get("workflow")
+    if not isinstance(workflow, dict):
+        raise ValueError("pack_config_workflow_not_object")
+
     roles = raw.get("roles")
     states = raw.get("states")
     review_bundle = raw.get("review_bundle")
@@ -419,16 +429,11 @@ def load_framework_contract(repo: Path = Path(".")) -> FrameworkContract:
             if isinstance(key, str) and isinstance(value, str) and value.strip():
                 prompt_templates[key] = _normalize_repo_relative_path(value)
 
-    network_workstreams = tuple(_coerce_str_list(raw.get("network_workstreams")) or list(DEFAULT_NETWORK_WORKSTREAMS))
+    network_workstreams = tuple(_coerce_str_list(workflow.get("network_workstreams")))
+    local_etl_workstreams = tuple(_coerce_str_list(workflow.get("local_etl_workstreams")))
+    operator_workstream = str(workflow.get("operator_workstream", "")).strip()
 
-    eligible_workstreams = tuple(
-        _coerce_str_list(
-            integration_ready_policy.get("eligible_workstreams")
-            if isinstance(integration_ready_policy, dict)
-            else None
-        )
-        or list(DEFAULT_INTEGRATION_READY_ELIGIBLE_WORKSTREAMS)
-    )
+    eligible_workstreams = tuple(_coerce_str_list(workflow.get("integration_ready_eligible_workstreams")))
     eligible_task_kinds = tuple(
         _coerce_str_list(
             integration_ready_policy.get("eligible_task_kinds")
@@ -476,6 +481,8 @@ def load_framework_contract(repo: Path = Path(".")) -> FrameworkContract:
         projection_dirs=projection_dirs,
         prompt_templates=prompt_templates,
         network_workstreams=network_workstreams,
+        local_etl_workstreams=local_etl_workstreams,
+        operator_workstream=operator_workstream,
         integration_ready_eligible_workstreams=eligible_workstreams,
         integration_ready_eligible_task_kinds=eligible_task_kinds,
         forbid_unvalidated_empirical_data_outputs=forbid_unvalidated_empirical_data_outputs,
@@ -484,6 +491,7 @@ def load_framework_contract(repo: Path = Path(".")) -> FrameworkContract:
         judge_review_dir=judge_review_dir,
         release_manifest_pattern=release_manifest_pattern,
         required_paths=required_paths,
+        pack_config=pack,
     )
 
 
@@ -736,7 +744,11 @@ def _check_declared_outputs_exist(task: Task, repo: Path = Path(".")) -> tuple[b
 
 
 def _task_uses_manifest_backed_local_etl_outputs(task: Task) -> bool:
-    return task.task_kind == "etl" and task.workstream in {"W1", "W2"}
+    workflow = load_pack_config().get("workflow")
+    workstreams = _coerce_str_list(
+        workflow.get("local_etl_workstreams") if isinstance(workflow, dict) else None
+    )
+    return task.task_kind == "etl" and task.workstream in set(workstreams)
 
 
 def _output_is_manifest_backed_local_etl_output(task: Task, output: str) -> bool:
@@ -934,7 +946,9 @@ def _validate_json_schema(
                     "best_variant_failures": best,
                 }
             )
-        return failures
+        # Continue with the surrounding schema after evaluating the composition
+        # keyword; pack schemas use oneOf for mode-specific requirements plus
+        # common top-level constraints.
 
     expected_type = schema.get("type")
     if isinstance(expected_type, str):
@@ -1063,6 +1077,168 @@ def _validate_required_keys(data: object, required_keys: set[str], prefix: str) 
         if key not in data:
             failures.append(f"{prefix}:missing_key:{key}")
     return failures
+
+
+def _configured_regime_series(repo: Path = Path(".")) -> tuple[str, ...]:
+    return tuple(pack_value(load_pack_config(repo), "analysis.regime_series", list))
+
+
+def _semver_tuple(value: object) -> tuple[int, int, int] | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", value)
+    if match is None:
+        return None
+    return tuple(int(component) for component in match.groups())
+
+
+def check_pack_compat(
+    repo: Path = Path("."),
+    *,
+    executing_kernel_root: Path | None = None,
+) -> GateResult:
+    """Validate the versioned kernel/pack boundary before any other work."""
+
+    repo = repo.resolve()
+    kernel_root = (executing_kernel_root or _EXECUTING_KERNEL_ROOT).resolve()
+    pack, pack_error = _load_json_file(repo / "contracts" / "pack.json")
+    descriptor_path = kernel_root / "contracts" / "kernel_interface.json"
+    descriptor, descriptor_error = _load_json_file(descriptor_path)
+    failures: list[object] = []
+    if pack_error is not None or pack is None:
+        failures.append(f"pack_config_unreadable:{pack_error}")
+    else:
+        failures.extend(
+            {"schema": "pack", **issue}
+            for issue in _schema_failures(
+                pack,
+                kernel_root / "contracts" / "schemas" / "pack_config_v1.json",
+            )
+        )
+    if descriptor_error is not None or descriptor is None:
+        failures.append(f"kernel_interface_unreadable:{descriptor_error}")
+    else:
+        failures.extend(
+            {"schema": "kernel_interface", **issue}
+            for issue in _schema_failures(
+                descriptor,
+                kernel_root / "contracts" / "schemas" / "kernel_interface_v1.json",
+            )
+        )
+    required = pack.get("kernel_requires") if isinstance(pack, dict) else None
+    version = descriptor.get("kernel_version") if isinstance(descriptor, dict) else None
+    requirement_match = (
+        re.fullmatch(r">=(\d+\.\d+\.\d+),<(\d+\.\d+\.\d+)", required)
+        if isinstance(required, str)
+        else None
+    )
+    parsed_version = _semver_tuple(version)
+    compatible = False
+    if requirement_match is None:
+        if isinstance(pack, dict):
+            failures.append(f"kernel_requires_invalid:{required}")
+    elif parsed_version is None:
+        if isinstance(descriptor, dict):
+            failures.append(f"kernel_version_invalid:{version}")
+    else:
+        lower = _semver_tuple(requirement_match.group(1))
+        upper = _semver_tuple(requirement_match.group(2))
+        compatible = bool(lower is not None and upper is not None and lower <= parsed_version < upper)
+        if not compatible:
+            failures.append(f"kernel_version_mismatch:{version}:requires:{required}")
+    return GateResult(
+        ok=not failures,
+        details={
+            "kernel_version": version,
+            "kernel_requires": required,
+            "compatible": compatible,
+            "descriptor_source": descriptor_path.as_posix(),
+            "failures": failures,
+        },
+    )
+
+
+def gate_pack_compat() -> GateResult:
+    return check_pack_compat(Path("."))
+
+
+def _scaffold_instantiation_evidence(repo: Path) -> list[str]:
+    """Return mechanically observable evidence that a pack has been instantiated.
+
+    README files and placeholder markers are ignored. Any claim, computed paper value,
+    processed artifact, run manifest, non-scaffold paper-registry entry, or built report
+    output makes the scaffold assertion ineligible.
+    """
+
+    repo = repo.resolve()
+    evidence: list[str] = []
+    claims, claims_error = _load_json_file(repo / "contracts" / "claims.yaml")
+    if claims_error is not None:
+        evidence.append(f"contracts/claims.yaml:unreadable:{claims_error}")
+    elif isinstance(claims, dict) and claims.get("claims"):
+        evidence.append("contracts/claims.yaml:claims_present")
+
+    if (repo / "reports" / "paper" / "paper_values.json").is_file():
+        evidence.append("reports/paper/paper_values.json")
+
+    ignored_names = {"README.md", ".gitkeep"}
+    processed_root = repo / "data" / "processed"
+    if processed_root.is_dir():
+        evidence.extend(
+            path.relative_to(repo).as_posix()
+            for path in sorted(processed_root.rglob("*"))
+            if path.is_file() and path.name not in ignored_names
+        )
+
+    run_root = repo / "reports" / "status" / "swarm_runs"
+    if run_root.is_dir():
+        evidence.extend(
+            path.relative_to(repo).as_posix()
+            for path in sorted(run_root.rglob("*"))
+            if path.is_file() and path.name not in ignored_names
+        )
+
+    registry_path = repo / "reports" / "paper" / "registry.json"
+    if registry_path.is_file():
+        registry, registry_error = _load_json_file(registry_path)
+        entries = registry.get("entries") if registry_error is None and isinstance(registry, dict) else None
+        if registry_error is not None or not isinstance(entries, list):
+            evidence.append(f"reports/paper/registry.json:unreadable:{registry_error}")
+        elif any(not isinstance(item, dict) or item.get("status") != "scaffold" for item in entries):
+            evidence.append("reports/paper/registry.json:non_scaffold_entries")
+
+    for relroot in ("reports/figures", "reports/tables", "reports/models", "reports/exhibits"):
+        output_root = repo / relroot
+        if not output_root.is_dir():
+            continue
+        evidence.extend(
+            path.relative_to(repo).as_posix()
+            for path in sorted(output_root.rglob("*"))
+            if path.is_file() and path.name not in ignored_names
+        )
+    return sorted(set(evidence))
+
+
+def check_scaffold_safety(repo: Path = Path(".")) -> GateResult:
+    repo = repo.resolve()
+    pack, pack_error = _load_json_file(repo / "contracts" / "pack.json")
+    asserted = isinstance(pack, dict) and pack.get("scaffold") is True
+    evidence = _scaffold_instantiation_evidence(repo) if asserted else []
+    failures = ["scaffold_asserted_on_instantiated_repo"] if asserted and evidence else []
+    return GateResult(
+        ok=not failures,
+        details={
+            "scaffold_asserted": asserted,
+            "scaffold_eligible": asserted and not evidence,
+            "instantiation_evidence": evidence,
+            "pack_error": pack_error,
+            "failures": failures,
+        },
+    )
+
+
+def gate_scaffold_safety() -> GateResult:
+    return check_scaffold_safety(Path("."))
 
 
 HISTORICAL_EXEMPTIONS_PATH = Path("contracts/historical_exemptions.json")
@@ -1606,6 +1782,16 @@ def _validate_swarm_run_manifest(path: Path, contract: FrameworkContract) -> lis
         failures.append(f"{path}:invalid_schema_version:{payload.get('schema_version')}")
     elif schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 and path.as_posix() not in _historical_exemption_entries("run_manifests"):
         failures.append(f"{path}:unexempted_v1_schema")
+    if schema_version in {SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1, SWARM_RUN_MANIFEST_SCHEMA_VERSION}:
+        schema_name = (
+            "swarm_run_manifest_v1.yaml"
+            if schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1
+            else "swarm_run_manifest_v2.json"
+        )
+        failures.extend(
+            f"{path}:schema:{issue}"
+            for issue in _schema_failures(payload, Path("contracts/schemas") / schema_name)
+        )
 
     if schema_version == SWARM_RUN_MANIFEST_SCHEMA_VERSION:
         provenance_class = payload.get("provenance_class")
@@ -1730,6 +1916,16 @@ def _validate_judge_review_log(path: Path, contract: FrameworkContract) -> list[
         failures.append(f"{path}:invalid_schema_version:{payload.get('schema_version')}")
     elif schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1 and path.as_posix() not in _historical_exemption_entries("review_logs"):
         failures.append(f"{path}:unexempted_v1_schema")
+    if schema_version in {JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1, JUDGE_REVIEW_LOG_SCHEMA_VERSION}:
+        schema_name = (
+            "judge_review_log_v1.yaml"
+            if schema_version == JUDGE_REVIEW_LOG_SCHEMA_VERSION_V1
+            else "judge_review_log_v2.json"
+        )
+        failures.extend(
+            f"{path}:schema:{issue}"
+            for issue in _schema_failures(payload, Path("contracts/schemas") / schema_name)
+        )
 
     reviewer = payload.get("reviewer")
     reviewer_keys = {"role"}
@@ -1791,6 +1987,13 @@ def gate_framework_contract() -> GateResult:
         return GateResult(ok=False, details={"failures": [str(exc)]})
 
     failures: list[str] = []
+    failures.extend(
+        f"pack_config_schema:{issue}"
+        for issue in _schema_failures(
+            contract.pack_config,
+            Path("contracts/schemas/pack_config_v1.json"),
+        )
+    )
 
     for role in DEFAULT_ALLOWED_ROLES:
         if role not in set(contract.allowed_roles):
@@ -1811,6 +2014,18 @@ def gate_framework_contract() -> GateResult:
     for workstream in DEFAULT_NETWORK_WORKSTREAMS:
         if workstream not in set(contract.network_workstreams):
             failures.append(f"missing_network_workstream:{workstream}")
+
+    if not contract.network_workstreams:
+        failures.append("pack_workflow_network_workstreams_empty")
+    if contract.project_mode in {"empirical", "hybrid"} and not contract.local_etl_workstreams:
+        failures.append("pack_workflow_local_etl_workstreams_empty")
+    if not contract.operator_workstream:
+        failures.append("pack_workflow_operator_workstream_empty")
+    if not contract.integration_ready_eligible_workstreams:
+        failures.append("pack_workflow_integration_ready_eligible_workstreams_empty")
+    pack_mode = contract.pack_config.get("project", {}).get("mode") if isinstance(contract.pack_config.get("project"), dict) else None
+    if pack_mode != contract.project_mode:
+        failures.append(f"pack_project_mode_mismatch:{pack_mode}:{contract.project_mode}")
 
     if contract.scientific_review_role != DEFAULT_SCIENTIFIC_REVIEW_ROLE:
         failures.append(f"invalid_scientific_review_role:{contract.scientific_review_role}")
@@ -1857,6 +2072,7 @@ def gate_framework_contract() -> GateResult:
         ok=len(failures) == 0,
         details={
             "project_mode": contract.project_mode,
+            "pack_schema_version": contract.pack_config.get("schema_version"),
             "failures": failures,
         },
     )
@@ -1869,6 +2085,41 @@ def gate_repo_structure() -> GateResult:
         return GateResult(ok=False, details={"failures": [str(exc)]})
 
     registry_enabled = _coerce_bool(contract.features.get("registry"), default=(contract.project_mode != "modeling"))
+    scaffold = (
+        contract.pack_config.get("scaffold") is True
+        and not _scaffold_instantiation_evidence(Path("."))
+    )
+    if scaffold:
+        required_paths = [
+            "README.md",
+            "Makefile",
+            ".orchestrator/README.md",
+            ".orchestrator/workstreams.md",
+            "contracts/framework.json",
+            "contracts/kernel_interface.json",
+            "contracts/pack.json",
+            "contracts/project.yaml",
+            "contracts/claims.yaml",
+            "contracts/authorship.yaml",
+            "contracts/venue.yaml",
+            "contracts/manuscript_sections.yaml",
+            "contracts/model_spec.md",
+            "contracts/program_template.yaml",
+            "docs/prereg/data_construction.lock.md",
+            "docs/prereg/analysis_plan.lock.md",
+            "reports/status/README.md",
+        ]
+        missing = sorted(path for path in required_paths if not Path(path).exists())
+        return GateResult(
+            ok=not missing,
+            details={
+                "project_mode": contract.project_mode,
+                "scaffold": True,
+                "registry_enabled": registry_enabled,
+                "missing": missing,
+                "deferred_paths": [],
+            },
+        )
     required_paths = [
         "AGENTS.md",
         "README.md",
@@ -1877,6 +2128,8 @@ def gate_repo_structure() -> GateResult:
         ".orchestrator/workstreams.md",
         "contracts/project.yaml",
         "contracts/framework.json",
+        "contracts/kernel_interface.json",
+        "contracts/pack.json",
         "contracts/claims.yaml",
         "contracts/README.md",
         "contracts/data_dictionary.md",
@@ -1887,13 +2140,16 @@ def gate_repo_structure() -> GateResult:
         "contracts/experiments/README.md",
         "contracts/schemas/README.md",
         "contracts/schemas/instance_manifest_v1.json",
+        "contracts/schemas/kernel_interface_v1.json",
+        "contracts/schemas/pack_config_v1.json",
         "contracts/schemas/experiment_spec_v1.json",
         "contracts/schemas/experiment_manifest_v1.json",
-        "contracts/schemas/panel_schema.yaml",
-        "contracts/schemas/panel_schema_str_v1.yaml",
-        "contracts/schemas/panel_schema_decomp_v1.yaml",
+        "contracts/schemas/raw_manifest_v1.json",
+        "contracts/schemas/processed_manifest_v2.json",
         "contracts/schemas/swarm_run_manifest_v1.yaml",
+        "contracts/schemas/swarm_run_manifest_v2.json",
         "contracts/schemas/judge_review_log_v1.yaml",
+        "contracts/schemas/judge_review_log_v2.json",
         "contracts/schemas/claims_v1.yaml",
         "contracts/schemas/integrity_audit_v1.json",
         "contracts/schemas/literature_manifest_v1.json",
@@ -1928,12 +2184,22 @@ def gate_repo_structure() -> GateResult:
 
     required_paths.extend(contract.prompt_templates.values())
 
+    if contract.project_mode in {"empirical", "hybrid"}:
+        required_paths.extend(
+            [
+                pack_value(contract.pack_config, "paths.panel_schema_index"),
+                pack_value(contract.pack_config, "paths.primary_panel_schema"),
+                pack_value(contract.pack_config, "paths.decomposition_panel_schema"),
+                pack_value(contract.pack_config, "paths.rent_components_schema"),
+            ]
+        )
+
     if registry_enabled:
         required_paths.extend(
             [
                 "registry/README.md",
                 "registry/CHANGELOG.md",
-                "registry/rollup_registry_v1.csv",
+                pack_value(contract.pack_config, "paths.registry"),
             ]
         )
 
@@ -1996,12 +2262,12 @@ def gate_protocol_complete() -> GateResult:
     elif mode is not None and mode_match.group(1).strip().lower() != mode:
         failures.append(f"mode_mismatch:{mode_match.group(1).strip().lower()}!={mode}")
 
-    for heading in (
-        "## Rollup inclusion criteria",
-        "## Data source priority",
-        "## Known regime dates",
-        "## Validation tolerances",
-    ):
+    pack = load_pack_config()
+    protocol = pack.get("protocol")
+    headings = _coerce_str_list(
+        protocol.get("required_headings") if isinstance(protocol, dict) else None
+    )
+    for heading in headings:
         if heading not in text or not _section_has_content(text, heading):
             failures.append(f"missing_or_empty_section:{heading}")
 
@@ -2194,7 +2460,7 @@ def gate_operator_surface_ownership() -> GateResult:
             failures.append(f"{task.path}:network_workstream_not_allowlisted:{task.workstream}")
 
         if task.role == "Operator":
-            if task.workstream != "W9" and task.task_kind != "ops":
+            if task.workstream != contract.operator_workstream and task.task_kind != "ops":
                 failures.append(f"{task.path}:operator_role_outside_ops_boundary")
             continue
 
@@ -2226,6 +2492,15 @@ def gate_raw_manifest_validity() -> GateResult:
         command = payload.get("command", payload.get("access_instruction"))
         if not isinstance(command, str) or not command.strip():
             failures.append(f"{path}:command_blank")
+        if payload.get("schema_version") == manifest_schema_version(
+            "raw", Path(__file__).resolve().parents[1]
+        ):
+            failures.extend(
+                f"{path}:schema:{issue}"
+                for issue in _schema_failures(
+                    payload, Path("contracts/schemas/raw_manifest_v1.json")
+                )
+            )
 
         files = payload.get("files")
         if not isinstance(files, list):
@@ -2273,6 +2548,12 @@ def gate_processed_manifest_validity() -> GateResult:
             failures.append(f"{path}:unexempted_legacy_processed_manifest")
 
         if payload.get("schema_version") == PROCESSED_MANIFEST_SCHEMA_VERSION:
+            failures.extend(
+                f"{path}:schema:{issue}"
+                for issue in _schema_failures(
+                    payload, Path("contracts/schemas/processed_manifest_v2.json")
+                )
+            )
             failures.extend(
                 f"{path}:{failure}"
                 for failure in _validate_required_keys(
@@ -3055,10 +3336,13 @@ def _referee_release_verdict_severity(
 
 
 def gate_referee_release_evidence() -> GateResult:
+    pack = load_pack_config()
+    build_dir = Path(pack_value(pack, "paper.build_dir"))
+    basename = pack_value(pack, "paper.artifact_basename")
     paper_paths = (
-        Path("reports/paper/build/l2_l1_rent_working_paper.html"),
-        Path("reports/paper/build/l2_l1_rent_working_paper.pdf"),
-        Path("reports/paper/build/render_manifest.json"),
+        build_dir / f"{basename}.html",
+        build_dir / f"{basename}.pdf",
+        build_dir / pack_value(pack, "paper.render_manifest"),
     )
     if not all(path.is_file() for path in paper_paths):
         return GateResult(ok=True, details={"skipped": True, "reason": "no_materialized_manuscript_release"})
@@ -3628,6 +3912,15 @@ def _load_claim_ledger() -> tuple[list[dict[str, object]], list[dict[str, object
         ]
 
     failures: list[dict[str, object]] = []
+    failures.extend(
+        _science_failure(
+            "claims_schema_violation",
+            subject=path.as_posix(),
+            field=str(issue.get("path")),
+            actual=issue,
+        )
+        for issue in _schema_failures(payload, Path("contracts/schemas/claims_v1.yaml"))
+    )
     if payload.get("schema_version") != CLAIMS_SCHEMA_VERSION:
         failures.append(
             _science_failure(
@@ -4222,7 +4515,11 @@ def _active_statistical_config() -> tuple[
                     actual=regime.get("method"),
                 )
             )
-        if regime.get("series") not in {"str", "rent_paid_eth", "l2_fees_eth"}:
+        try:
+            allowed_regime_series = set(_configured_regime_series())
+        except ValueError:
+            allowed_regime_series = set()
+        if regime.get("series") not in allowed_regime_series:
             failures.append(
                 _science_failure(
                     "invalid_prereg_regime_series",
@@ -5943,8 +6240,17 @@ PAPER_VALUE_DISPLAY_UNIT_SUFFIX = {"%": "percent", " ETH": "eth", " x": "multipl
 # NOT a reproduce-analysis-verified artifact could smuggle unchecked reportable numbers
 # past the bare-numeric scanner. Only these byte/content-reproduced artifacts may be
 # included. (This set grows with the M4-B exhibits manifest.)
-REPRODUCE_VERIFIED_INCLUDE_TARGETS = {"reports/tables/str_regime_summary.md"}
 MANUSCRIPT_INCLUDE_RE = re.compile(r"\{\{<\s*include\s+([^\s>]+)")
+
+
+def _reproduce_verified_include_targets() -> set[str]:
+    pack = load_pack_config()
+    paper = pack.get("paper")
+    return set(
+        _coerce_str_list(
+            paper.get("verified_include_targets") if isinstance(paper, dict) else None
+        )
+    )
 
 
 def _paper_value_failure(code: str, *, subject: str, actual: object | None = None) -> str:
@@ -6333,7 +6639,7 @@ def gate_manuscript_computed_paper() -> GateResult:
     for match in MANUSCRIPT_INCLUDE_RE.finditer(manuscript_text):
         raw_target = match.group(1)
         normalized = os.path.normpath((manuscript.parent / raw_target).as_posix())
-        if normalized not in REPRODUCE_VERIFIED_INCLUDE_TARGETS:
+        if normalized not in _reproduce_verified_include_targets():
             failures.append(
                 _paper_value_failure(
                     "manuscript_unverified_include_target",
@@ -6598,11 +6904,23 @@ def gate_recall_audit() -> GateResult:
             for claim in claims if isinstance(claims, list)
         )
         if corpus_entries or has_literature_claim:
+            try:
+                literature_workstream = pack_value(
+                    load_pack_config(),
+                    "workflow.literature_workstream",
+                )
+            except ValueError:
+                literature_workstream = "literature"
             return GateResult(
                 ok=False,
                 details={
                     "status": "missing",
-                    "failures": [_science_failure("recall_audit_required", subject="W-Lit")],
+                    "failures": [
+                        _science_failure(
+                            "recall_audit_required",
+                            subject=literature_workstream,
+                        )
+                    ],
                 },
             )
         return GateResult(
@@ -10272,6 +10590,77 @@ def _statement_binding_resolves(
     return value is not None and value != "" and value != [] and value != {}
 
 
+def check_manuscript_section_profile(
+    repo: Path = Path("."),
+    *,
+    sections: dict[str, object] | None = None,
+) -> GateResult:
+    """Validate the configured paper entrypoint against its venue section profile."""
+
+    repo = repo.resolve()
+    failures: list[dict[str, object]] = []
+    if sections is None:
+        sections, sections_error = _load_yaml_object(repo / "contracts" / "manuscript_sections.yaml")
+        if sections_error is not None or sections is None:
+            failures.append(
+                _m4c_failure(
+                    "venue_compliance_sections_contract_invalid",
+                    subject="contracts/manuscript_sections.yaml",
+                    actual=sections_error,
+                )
+            )
+            sections = {}
+    try:
+        pack = load_pack_config(repo)
+        manuscript_rel = pack_value(pack, "paper.entrypoint")
+    except ValueError as exc:
+        failures.append(_m4c_failure("venue_compliance_pack_invalid", actual=str(exc)))
+        manuscript_rel = "reports/paper/index.qmd"
+    manuscript_path = repo / manuscript_rel
+    manuscript_text = manuscript_path.read_text(encoding="utf-8") if manuscript_path.is_file() else ""
+    actual_headings = {
+        match.group(0).strip()
+        for match in re.finditer(r"^##\s+.+?\s*$", manuscript_text, flags=re.MULTILINE)
+    }
+    canonical = sections.get("canonical_section_ids")
+    heading_map = sections.get("section_headings")
+    canonical_ids = [str(item) for item in canonical] if isinstance(canonical, list) else []
+    matched: set[str] = set()
+    if not canonical_ids or not isinstance(heading_map, dict):
+        failures.append(_m4c_failure("venue_compliance_section_profile_invalid"))
+    else:
+        for section_id in canonical_ids:
+            expected = heading_map.get(section_id)
+            if not isinstance(expected, str) or not expected.startswith("## "):
+                failures.append(
+                    _m4c_failure(
+                        "venue_compliance_section_heading_invalid",
+                        subject=section_id,
+                        actual=expected,
+                    )
+                )
+            elif expected not in actual_headings:
+                failures.append(
+                    _m4c_failure(
+                        "venue_compliance_required_section_missing",
+                        subject=section_id,
+                        expected=expected,
+                    )
+                )
+            else:
+                matched.add(section_id)
+    return GateResult(
+        ok=not failures,
+        details={
+            "paper_entrypoint": manuscript_rel,
+            "canonical_section_ids": canonical_ids,
+            "matched_section_ids": sorted(matched),
+            "actual_headings": sorted(actual_headings),
+            "failures": failures,
+        },
+    )
+
+
 def check_venue_compliance(
     repo: Path = Path("."),
     *,
@@ -10307,7 +10696,9 @@ def check_venue_compliance(
     consent = venue.get("venue_consent") if isinstance(venue.get("venue_consent"), dict) else {}
     author = authorship.get("human_author_of_record")
     author_consent = authorship.get("human_author_consent") if isinstance(authorship.get("human_author_consent"), dict) else {}
-    manuscript_path = repo / "reports/paper/index.qmd"
+    section_profile = check_manuscript_section_profile(repo, sections=sections)
+    failures.extend(section_profile.details["failures"])
+    manuscript_path = repo / str(section_profile.details["paper_entrypoint"])
     manuscript_text = manuscript_path.read_text(encoding="utf-8") if manuscript_path.is_file() else ""
     front_matter_author = re.search(r"(?m)^author:\s*(.*?)\s*$", manuscript_text)
     expected_author = "null" if author is None else json.dumps(str(author), ensure_ascii=False)
@@ -10348,7 +10739,7 @@ def check_venue_compliance(
 
     canonical = sections.get("canonical_section_ids")
     canonical_ids = {str(item) for item in canonical} if isinstance(canonical, list) else set()
-    manuscript_ids = _paper_section_registry_ids(repo / "reports/paper/index.qmd")
+    manuscript_ids = set(section_profile.details["matched_section_ids"])
     if not canonical_ids or manuscript_ids != canonical_ids:
         failures.append(_m4c_failure("venue_compliance_canonical_sections_mismatch", expected=sorted(canonical_ids), actual=sorted(manuscript_ids)))
     registry, registry_error = _load_json_file(repo / "reports/paper/registry.json")
@@ -10456,6 +10847,8 @@ def gate_replication_package_audit(*, release_perimeter: bool = False) -> GateRe
 
 
 _CORE_GATE_NAMES = (
+    "pack_compat",
+    "scaffold_safety",
     "framework_contract",
     "repo_structure",
     "project_contract",
@@ -10551,6 +10944,13 @@ _ALL_GATE_NAMES = _CORE_GATE_NAMES + (
 
 def _active_gates(mode: str, task_kind: str | None = None) -> tuple[str, ...]:
     """Select the §5.2 gate form for a project mode and optional task kind."""
+    try:
+        scaffold = load_pack_config().get("scaffold") is True
+    except ValueError:
+        scaffold = False
+    if scaffold and not _scaffold_instantiation_evidence(Path(".")):
+        staged = {"pack_compat", "scaffold_safety", "framework_contract", "repo_structure", "project_contract", "program_conformance"}
+        return tuple(name for name in _ALL_GATE_NAMES if name in staged)
     active = set(_CORE_GATE_NAMES) | set(_MODE_INDEPENDENT_SCIENCE_GATES)
     if mode == "empirical":
         active.update(_EMPIRICAL_SCIENCE_GATES)
@@ -10576,6 +10976,8 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
     mode = _parse_project_mode(Path("contracts/project.yaml")) or "empirical"
     active = set(_active_gates(mode, task_kind))
     functions = {
+        "pack_compat": gate_pack_compat,
+        "scaffold_safety": gate_scaffold_safety,
         "framework_contract": gate_framework_contract,
         "repo_structure": gate_repo_structure,
         "project_contract": gate_project_contract,
@@ -10669,13 +11071,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="quality_gates.py", allow_abbrev=False)
     parser.add_argument("--json", action="store_true", help="Print machine-readable output")
     parser.add_argument(
+        "--repo",
+        type=Path,
+        default=Path("."),
+        help="Project pack root; defaults to the current repository.",
+    )
+    parser.add_argument(
         "--task-kind",
         choices=["etl", "analysis", "validation", "writing", "lit_review", "model", "proof", "bridge", "ops", "integrity_audit", "repair"],
         help="Apply hybrid composition at one task-kind boundary; omitted means writing/release union",
     )
     args = parser.parse_args(argv)
 
-    results = _collect_gate_results(task_kind=args.task_kind)
+    previous_cwd = Path.cwd()
+    try:
+        os.chdir(args.repo.resolve())
+        results = _collect_gate_results(task_kind=args.task_kind)
+    finally:
+        os.chdir(previous_cwd)
     overall_ok = all(result.ok for result in results.values())
 
     if args.json:

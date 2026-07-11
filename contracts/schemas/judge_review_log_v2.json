@@ -1,19 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "research_swarm.judge_review_log.v1.schema",
+  "$id": "research_swarm.judge_review_log.v2.schema",
   "type": "object",
   "required": ["schema_version", "review_id", "generated_at_utc", "reviewer", "task", "checks", "decision"],
   "properties": {
-    "schema_version": {"const": "research_swarm.judge_review_log.v1"},
+    "schema_version": {"const": "research_swarm.judge_review_log.v2"},
     "review_id": {"type": "string", "minLength": 1},
     "generated_at_utc": {"type": "string", "format": "date-time"},
-    "reviewer": {"type": "object", "required": ["role"]},
+    "reviewer": {"type": "object", "required": ["role", "session_id", "recorded_at_utc"]},
     "task": {"type": "object", "required": ["task_id", "task_path", "role", "state_before", "state_after", "run_manifest_path"]},
     "checks": {"type": "object", "required": ["gates_ok", "outputs_ok", "required_manifests_ok", "review_bundle_ok", "failures"]},
-    "decision": {
-      "type": "object",
-      "required": ["outcome", "note"],
-      "properties": {"outcome": {"enum": ["approve", "revise", "block"]}, "note": {"type": "string"}}
-    }
+    "decision": {"type": "object", "required": ["outcome", "note"], "properties": {"outcome": {"enum": ["approve", "revise", "block"]}, "note": {"type": "string"}}}
   }
 }

@@ -29,21 +29,23 @@ import tempfile
 
 import generate_disclosure
 import replication_package
+from pack_config import load_pack_config, pack_value
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PACK = load_pack_config(REPO_ROOT)
 BYTE_IDENTICAL_OUTPUTS = (
-    Path("reports/tables/str_regime_summary.csv"),
-    Path("reports/tables/str_regime_summary.md"),
-    Path("reports/paper/paper_values.json"),
-    Path("reports/exhibits/manifest.json"),
+    Path(pack_value(PACK, "analysis.outputs.regime_table_csv")),
+    Path(pack_value(PACK, "analysis.outputs.regime_table_markdown")),
+    Path(pack_value(PACK, "analysis.outputs.paper_values")),
+    Path(pack_value(PACK, "analysis.outputs.exhibits_manifest")),
     Path("reports/paper/disclosure.md"),
     Path("reports/replication/README.md"),
     Path("reports/replication/package_manifest.json"),
 )
 CONTENT_EQUIVALENT_OUTPUTS = (
-    Path("reports/figures/str_ecosystem_timeseries.data.json"),
-    Path("reports/figures/str_post_dencun_regimes.data.json"),
+    Path(pack_value(PACK, "analysis.outputs.ecosystem_figure_data")),
+    Path(pack_value(PACK, "analysis.outputs.regime_figure_data")),
 )
 ALL_OUTPUTS = BYTE_IDENTICAL_OUTPUTS + CONTENT_EQUIVALENT_OUTPUTS
 
@@ -98,7 +100,7 @@ def main() -> int:
         path: json.loads((REPO_ROOT / path).read_text(encoding="utf-8"))
         for path in CONTENT_EQUIVALENT_OUTPUTS
     }
-    paper_values = json.loads((REPO_ROOT / "reports/paper/paper_values.json").read_text(encoding="utf-8"))
+    paper_values = json.loads((REPO_ROOT / pack_value(PACK, "analysis.outputs.paper_values")).read_text(encoding="utf-8"))
     as_of = paper_values.get("as_of") if isinstance(paper_values, dict) else None
     if not isinstance(as_of, str):
         raise SystemExit("reproduce_analysis_as_of_missing")

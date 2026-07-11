@@ -22,6 +22,15 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
+SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from pack_config import dataframe_schema_field_names, load_pack_config, pack_value  # noqa: E402
+from manifest_tools import build_processed_manifest as build_executable_processed_manifest  # noqa: E402
+from pack_config import manifest_schema_version  # noqa: E402
+
+
 getcontext().prec = 50
 
 PROTOCOL_START = date(2022, 1, 1)
@@ -85,35 +94,19 @@ RECEIPT_FALLBACK_PROGRESS_LOG_INTERVAL = 1000
 PARTITION_CHECKPOINT_SCHEMA_VERSION = 1
 PARTITION_CHECKPOINT_COMPAT_VERSION = 4
 
-PANEL_HEADERS = [
-    "date_utc",
-    "rollup_id",
-    "l2_fees_eth",
-    "rent_paid_eth",
-    "profit_eth",
-    "txcount",
-]
-DECOMP_HEADERS = [
-    "date_utc",
-    "l1_base_fee_burn_eth",
-    "l1_blob_fee_burn_eth",
-    "l1_priority_fee_eth",
-    "l1_total_rent_eth",
-    "l1_blob_gas_used",
-    "l1_calldata_gas_used",
-    "l1_blob_base_fee_gwei",
-]
-COMPONENT_HEADERS = [
-    "date_utc",
-    "rollup_id",
-    "batch_submissions_eth",
-    "proof_submissions_eth",
-    "state_updates_eth",
-    "execution_base_fee_burn_eth",
-    "execution_priority_fee_eth",
-    "blob_fee_burn_eth",
-    "rent_paid_eth",
-]
+PANEL_HEADERS = list(
+    dataframe_schema_field_names(Path(__file__).resolve().parents[2], "paths.primary_panel_schema")
+)
+DECOMP_HEADERS = list(
+    dataframe_schema_field_names(
+        Path(__file__).resolve().parents[2], "paths.decomposition_panel_schema"
+    )
+)
+COMPONENT_HEADERS = list(
+    dataframe_schema_field_names(
+        Path(__file__).resolve().parents[2], "paths.rent_components_schema"
+    )
+)
 SAMPLE_ROLLUPS = ("arbitrum", "base", "optimism")
 SAMPLE_DATES = ("2024-03-13", "2024-03-14", "2024-03-15")
 ROLLUPS_WITHOUT_BATCHER_ADDRESSES = {"scroll"}
@@ -1612,7 +1605,8 @@ def backfill_blobscan_window_from_blockscout_receipts(
             }
         ]
     elif rollup_filter is not None:
-        registry_path = repo_root() / "registry" / "rollup_registry_v1.csv"
+        root = repo_root()
+        registry_path = root / pack_value(load_pack_config(root), "paths.registry")
         registry_rollups = {row.rollup_id: row for row in load_registry(registry_path)}
         registry_rollup = registry_rollups.get(rollup_id)
         if registry_rollup is None:
@@ -5520,9 +5514,10 @@ def build_raw_manifest(
         )
 
     return {
+        "schema_version": manifest_schema_version("raw", repo_root()),
         "source": source,
         "as_of_utc_date": as_of.isoformat(),
-        "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
+        "fetched_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "command": command,
         "files": files,
         "environment": {
@@ -5635,23 +5630,15 @@ def build_processed_manifest(
     command: str,
     output_paths: list[Path],
 ) -> dict[str, Any]:
-    return {
-        "as_of_utc_date": run_date.isoformat(),
-        "inputs": inputs,
-        "transform": {
-            "script_path": script_path,
-            "git_sha": git_sha(root),
-            "command": command,
-        },
-        "outputs": [
-            {
-                "path": str(path.relative_to(root)),
-                "sha256": sha256_file(path),
-                "bytes": path.stat().st_size,
-            }
-            for path in sorted(output_paths)
-        ],
-    }
+    return build_executable_processed_manifest(
+        repo=root,
+        as_of_utc_date=run_date.isoformat(),
+        inputs=inputs,
+        script_path=script_path,
+        command=command,
+        outputs=output_paths,
+        allow_dirty_with_diff=True,
+    )
 
 
 def coerce_int(value: str | int | None) -> int:
@@ -5721,6 +5708,7 @@ def main(argv: list[str]) -> int:
         args.rpc_batch_size = RPC_BATCH_SIZE
 
     root = repo_root()
+    pack = load_pack_config(root)
     run_date = args.run_date
     observed_end = observed_end_date(run_date)
     if observed_end < PROTOCOL_START:
@@ -5728,25 +5716,21 @@ def main(argv: list[str]) -> int:
 
     snapshot_dir = root / "data" / "raw" / "l1_rent" / run_date.isoformat()
     raw_manifest_path = root / "data" / "raw_manifest" / f"l1_rent_{run_date.isoformat()}.json"
-    decomp_path = root / "data" / "processed" / "l1_rent" / "daily_l1_rent_decomposition.csv"
-    component_path = root / "data" / "processed" / "l1_rent" / "daily_rollup_rent_components.csv"
-    panel_path = root / "data" / "processed" / "panels" / "daily_rollup_panel.csv"
-    decomp_sample_path = root / "data" / "samples" / "l1_rent" / "daily_l1_rent_decomposition_sample.csv"
-    component_sample_path = root / "data" / "samples" / "l1_rent" / "daily_rollup_rent_components_sample.csv"
-    panel_sample_path = root / "data" / "samples" / "panels" / "daily_rollup_panel_sample.csv"
-    decomp_manifest_path = (
-        root / "data" / "processed_manifest" / f"daily_l1_rent_decomposition_{run_date.isoformat()}.json"
-    )
-    component_manifest_path = (
-        root / "data" / "processed_manifest" / f"daily_rollup_rent_components_{run_date.isoformat()}.json"
-    )
-    panel_manifest_path = root / "data" / "processed_manifest" / f"daily_rollup_panel_{run_date.isoformat()}.json"
+    decomp_path = root / pack_value(pack, "paths.decomposition")
+    component_path = root / pack_value(pack, "paths.rent_components")
+    panel_path = root / pack_value(pack, "paths.primary_panel")
+    decomp_sample_path = root / pack_value(pack, "paths.decomposition_sample")
+    component_sample_path = root / pack_value(pack, "paths.rent_components_sample")
+    panel_sample_path = root / pack_value(pack, "paths.primary_panel_sample")
+    decomp_manifest_path = root / pack_value(pack, "paths.decomposition_manifest_pattern").format(date=run_date.isoformat())
+    component_manifest_path = root / pack_value(pack, "paths.rent_components_manifest_pattern").format(date=run_date.isoformat())
+    panel_manifest_path = root / pack_value(pack, "paths.primary_panel_manifest_pattern").format(date=run_date.isoformat())
 
-    registry_path = root / "registry" / "rollup_registry_v1.csv"
+    registry_path = root / pack_value(pack, "paths.registry")
     growthepie_raw_manifest_path = root / "data" / "raw_manifest" / f"growthepie_{run_date.isoformat()}.json"
     if not growthepie_raw_manifest_path.exists():
         raise SystemExit(f"required growthepie raw manifest is missing: {growthepie_raw_manifest_path}")
-    vendor_panel_path = root / "data" / "processed" / "growthepie" / "vendor_daily_rollup_panel.csv"
+    vendor_panel_path = root / pack_value(pack, "paths.vendor_panel")
 
     if args.resume_manifested_run:
         if not snapshot_dir.exists():
@@ -6493,7 +6477,7 @@ def main(argv: list[str]) -> int:
         inputs=[
             str(growthepie_raw_manifest_path.relative_to(root)),
             str(raw_manifest_path.relative_to(root)),
-            "data/processed/growthepie/vendor_daily_rollup_panel.csv",
+            vendor_panel_path.relative_to(root).as_posix(),
         ],
         script_path="src/etl/build_l1_rent_panel.py",
         command=command_string(args),
@@ -6507,7 +6491,7 @@ def main(argv: list[str]) -> int:
         inputs=[
             str(growthepie_raw_manifest_path.relative_to(root)),
             str(raw_manifest_path.relative_to(root)),
-            "data/processed/growthepie/vendor_daily_rollup_panel.csv",
+            vendor_panel_path.relative_to(root).as_posix(),
         ],
         script_path="src/etl/build_l1_rent_panel.py",
         command=command_string(args),

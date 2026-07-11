@@ -40,9 +40,11 @@ from inference import (  # noqa: E402
     two_way_clustered_se,
 )
 from swarm_taskfile import load_prereg_lock  # noqa: E402
+from pack_config import load_pack_config, pack_value  # noqa: E402
 
 
-DEFAULT_PANEL = Path("data/processed/panels/daily_rollup_panel.csv")
+PACK = load_pack_config(REPO_ROOT)
+DEFAULT_PANEL = Path(pack_value(PACK, "paths.primary_panel"))
 DEFAULT_LOCK = Path("docs/prereg/analysis_plan.lock.md")
 _JSON_FENCE_RE = re.compile(r"```json\s*(\{.*?\})\s*```", flags=re.DOTALL | re.IGNORECASE)
 
@@ -75,7 +77,20 @@ def statistical_config_from_lock(lock_path: Path) -> tuple[dict[str, Any], str]:
     return config, str(lock["body_sha256"])
 
 
-def _validate_config(config: dict[str, Any]) -> None:
+def _regime_series(pack: dict[str, Any] = PACK) -> tuple[str, ...]:
+    return tuple(pack_value(pack, "analysis.regime_series", list))
+
+
+def _panel_columns(pack: dict[str, Any] = PACK) -> dict[str, str]:
+    columns = pack_value(pack, "analysis.panel_columns", dict)
+    return {key: str(columns[key]) for key in ("date", "entity", "denominator", "numerator", "metric")}
+
+
+def _validate_config(
+    config: dict[str, Any],
+    *,
+    allowed_regime_series: tuple[str, ...] | None = None,
+) -> None:
     vce = config.get("vce")
     if vce not in {"newey_west", "driscoll_kraay", "clustered", "two_way_clustered"}:
         raise ValueError("statistical_reporting.vce is unsupported")
@@ -84,7 +99,7 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise ValueError("statistical_reporting.regime_breaks must be an object")
     if regime.get("method") != "bai_perron_dynamic_programming_piecewise_constant":
         raise ValueError("regime_breaks.method is unsupported")
-    if regime.get("series") not in {"str", "rent_paid_eth", "l2_fees_eth"}:
+    if regime.get("series") not in set(allowed_regime_series or _regime_series()):
         raise ValueError("regime_breaks.series is unsupported")
     for field in ("max_breaks", "min_segment"):
         if not isinstance(regime.get(field), int) or isinstance(regime.get(field), bool) or regime[field] < 1:
@@ -121,42 +136,56 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise ValueError("survival_threshold must be an integer within the grid size")
 
 
-def _construct_panel(panel: pd.DataFrame, keying: str, missingness: str) -> pd.DataFrame:
-    required = {"date_utc", "rollup_id", "l2_fees_eth", "rent_paid_eth"}
+def _construct_panel(
+    panel: pd.DataFrame,
+    keying: str,
+    missingness: str,
+    *,
+    panel_columns: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    columns = panel_columns or _panel_columns()
+    required = {columns["date"], columns["entity"], columns["denominator"], columns["numerator"]}
     missing = sorted(required - set(panel.columns))
     if missing:
         raise ValueError(f"panel missing required columns: {missing}")
-    frame = panel.loc[:, sorted(required)].copy()
-    frame["date_utc"] = pd.to_datetime(frame["date_utc"], errors="raise")
-    for column in ("l2_fees_eth", "rent_paid_eth"):
+    frame = panel.loc[:, sorted(required)].copy().rename(
+        columns={
+            columns["date"]: "_date",
+            columns["entity"]: "_entity",
+            columns["denominator"]: "_denominator",
+            columns["numerator"]: "_numerator",
+        }
+    )
+    frame["_date"] = pd.to_datetime(frame["_date"], errors="raise")
+    for column in ("_denominator", "_numerator"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     if missingness == "drop":
-        frame = frame.dropna(subset=["l2_fees_eth", "rent_paid_eth"])
+        frame = frame.dropna(subset=["_denominator", "_numerator"])
     elif missingness == "zero_fill":
-        frame[["l2_fees_eth", "rent_paid_eth"]] = frame[
-            ["l2_fees_eth", "rent_paid_eth"]
+        frame[["_denominator", "_numerator"]] = frame[
+            ["_denominator", "_numerator"]
         ].fillna(0.0)
     else:
         raise ValueError(f"unsupported missingness variant: {missingness}")
 
     if keying == "rollup_day":
         grouped = (
-            frame.groupby(["date_utc", "rollup_id"], as_index=False, sort=True)[
-                ["l2_fees_eth", "rent_paid_eth"]
+            frame.groupby(["_date", "_entity"], as_index=False, sort=True)[
+                ["_denominator", "_numerator"]
             ]
             .sum(min_count=1)
-            .sort_values(["date_utc", "rollup_id"], kind="stable")
+            .sort_values(["_date", "_entity"], kind="stable")
         )
     elif keying == "date_aggregate":
-        grouped = frame.groupby("date_utc", as_index=False, sort=True)[
-            ["l2_fees_eth", "rent_paid_eth"]
+        grouped = frame.groupby("_date", as_index=False, sort=True)[
+            ["_denominator", "_numerator"]
         ].sum(min_count=1)
-        grouped["rollup_id"] = "ecosystem"
+        grouped["_entity"] = "aggregate"
     else:
         raise ValueError(f"unsupported keying variant: {keying}")
-    grouped["str"] = grouped["rent_paid_eth"] / grouped["l2_fees_eth"]
-    grouped.loc[grouped["l2_fees_eth"] == 0.0, "str"] = np.nan
-    return grouped.dropna(subset=["str"]).reset_index(drop=True)
+    grouped["_metric"] = grouped["_numerator"] / grouped["_denominator"]
+    grouped.loc[grouped["_denominator"] == 0.0, "_metric"] = np.nan
+    return grouped.dropna(subset=["_metric"]).reset_index(drop=True)
 
 
 def _run_variant(
@@ -170,14 +199,14 @@ def _run_variant(
     regime_date = pd.Timestamp(str(variant.get("regime_date")))
     subset = frame.copy()
     if variant.get("start_date") is not None:
-        subset = subset.loc[subset["date_utc"] >= pd.Timestamp(str(variant["start_date"]))]
+        subset = subset.loc[subset["_date"] >= pd.Timestamp(str(variant["start_date"]))]
     if variant.get("end_date") is not None:
-        subset = subset.loc[subset["date_utc"] <= pd.Timestamp(str(variant["end_date"]))]
-    post = (subset["date_utc"] >= regime_date).astype(float).to_numpy()
+        subset = subset.loc[subset["_date"] <= pd.Timestamp(str(variant["end_date"]))]
+    post = (subset["_date"] >= regime_date).astype(float).to_numpy()
     if len(subset) < 3 or len(np.unique(post)) != 2:
         raise ValueError(f"analysis variant {variant['id']} must contain both regimes")
     design = np.column_stack([np.ones(len(subset)), post])
-    outcome = subset["str"].to_numpy(dtype=float)
+    outcome = subset["_metric"].to_numpy(dtype=float)
     coefficients = np.linalg.lstsq(design, outcome, rcond=None)[0]
     residuals = outcome - design @ coefficients
     lags = int(variant.get("lags", default_lags))
@@ -187,18 +216,18 @@ def _run_variant(
         standard_errors = driscoll_kraay_se(
             residuals,
             design,
-            subset["date_utc"].dt.date.to_numpy(dtype=object),
+            subset["_date"].dt.date.to_numpy(dtype=object),
             lags,
             min_time_periods=dk_min_time_periods,
         )
     elif vce == "clustered":
-        standard_errors = clustered_se(design, residuals, subset["rollup_id"].to_numpy())
+        standard_errors = clustered_se(design, residuals, subset["_entity"].to_numpy())
     else:
         standard_errors = two_way_clustered_se(
             design,
             residuals,
-            subset["rollup_id"].to_numpy(),
-            subset["date_utc"].dt.date.to_numpy(dtype=object),
+            subset["_entity"].to_numpy(),
+            subset["_date"].dt.date.to_numpy(dtype=object),
         )
     estimate = float(coefficients[1])
     se = float(standard_errors[1])
@@ -222,10 +251,12 @@ def build_spec_curve(
     config: dict[str, Any],
     prereg_lock_sha256: str,
     input_entry: dict[str, object] | None = None,
+    panel_columns: dict[str, str] | None = None,
+    allowed_regime_series: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     """Run every Cartesian grid cell and return the manifested curve."""
 
-    _validate_config(config)
+    _validate_config(config, allowed_regime_series=allowed_regime_series)
     curve = config["specification_curve"]
     construction = curve["construction_variants"]
     specs: list[dict[str, object]] = []
@@ -236,7 +267,12 @@ def build_spec_curve(
         construction["missingness"],
         curve["analysis_variants"],
     ):
-        constructed = _construct_panel(panel, keying, missingness)
+        constructed = _construct_panel(
+            panel,
+            keying,
+            missingness,
+            panel_columns=panel_columns,
+        )
         result = _run_variant(
             constructed,
             variant,

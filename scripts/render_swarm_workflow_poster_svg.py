@@ -6,7 +6,19 @@ from __future__ import annotations
 import argparse
 from html import escape
 from pathlib import Path
+import sys
 import textwrap
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from pack_config import load_pack_config, pack_value  # noqa: E402
+
+
+PACK = load_pack_config(REPO_ROOT)
+POSTER = pack_value(PACK, "presentation.workflow_poster", dict)
 
 
 WIDTH = 1600
@@ -577,10 +589,8 @@ def render(out_path: Path) -> None:
     slice_gap_x = 74
     slice_gap_y = 18
     slice_cards = [
-        ("T030", COLORS["teal"], "ETL Snapshot + Golden Sample", "Fetch growthepie exports, write raw snapshots and manifests, then commit the small tracked panel sample."),
-        ("T040", COLORS["rust"], "Metric Module + Tests", "Compute Settlement Take Rate from the sample only, with explicit handling for missingness and zero denominators."),
-        ("T050", COLORS["slate"], "Validation Checks", "Coverage, accounting identity, non-negativity, and STR sanity get audited before analysis."),
-        ("T060", COLORS["green"], "Public Figure", "The final deterministic output becomes a figure under reports/figures/."),
+        (item["task_id"], COLORS[item["accent"]], item["title"], item["description"])
+        for item in POSTER["vertical_slice"]
     ]
     positions = [
         (slice_x, slice_y),
@@ -604,8 +614,8 @@ def render(out_path: Path) -> None:
     info_w = 560
     info_h = 132
     info_cards = [
-        ("Primary Research Question", "Is Ethereum L1's settlement take rate on rollup economics rising, stable, or decaying as L2 usage scales?"),
-        ("Primary Metric", "STR_t = (Sum_i RentPaid_i,t) / (Sum_i L2Fees_i,t)"),
+        ("Primary Research Question", POSTER["research_question"]),
+        ("Primary Metric", POSTER["metric_definition"]),
         ("Public Message", "This is not 'AI agents chatting.' It is a reproducible workflow where the repo behaves like a disciplined research operating system."),
     ]
     for idx, (title, body) in enumerate(info_cards):

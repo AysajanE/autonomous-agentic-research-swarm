@@ -19,6 +19,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from swarm_taskfile import lint_task_files
 from swarm_taskfile import parse_task_frontmatter
+from pack_config import load_pack_config, pack_value
 
 
 BLOCKING_VERDICTS = {"not_supported", "cannot_verify"}
@@ -256,11 +257,12 @@ def _render_revision_task(
     fingerprint: str,
     artifacts: list[str],
     required_locks: list[str],
+    operator_workstream: str,
 ) -> str:
     finding_id = _finding_identifier(finding)
     verdict = str(finding.get("verdict", "cannot_verify"))
     note = str(finding.get("note", "Referee supplied no note.")).strip()
-    workstream = source.get("workstream") if isinstance(source.get("workstream"), str) else "W9"
+    workstream = source.get("workstream") if isinstance(source.get("workstream"), str) else operator_workstream
     source_gates = [
         item for item in source.get("gates", []) if isinstance(item, str) and item.strip()
     ] if isinstance(source.get("gates"), list) else []
@@ -375,6 +377,12 @@ def generate_revision_tasks(
     dry_run: bool = False,
 ) -> list[Path]:
     repo = repo.resolve()
+    pack = load_pack_config(repo)
+    workflow = pack_value(pack, "workflow", dict)
+    operator_workstream = pack_value(pack, "workflow.operator_workstream")
+    network_workstreams = tuple(
+        item for item in workflow.get("network_workstreams", []) if isinstance(item, str)
+    )
     report_path = report_path.resolve()
     report = _read_json(report_path)
     if report.get("schema_version") != REPORT_SCHEMA_VERSION:
@@ -429,12 +437,13 @@ def generate_revision_tasks(
             fingerprint=fingerprint,
             artifacts=artifacts,
             required_locks=required_locks,
+            operator_workstream=operator_workstream,
         )
         all_paths = _task_paths(repo) + [path]
         diagnostics = lint_task_files(
             all_paths,
             repo_root=repo,
-            network_workstreams=("W1", "W2", "W3"),
+            network_workstreams=network_workstreams,
             v1_exemptions=_v1_exemptions(repo),
             task_texts={path: text},
         )
