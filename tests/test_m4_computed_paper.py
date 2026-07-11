@@ -33,6 +33,19 @@ def _load_render_paper_module():
 render_paper = _load_render_paper_module()
 
 
+def _load_reproduce_analysis_module():
+    path = ROOT / "scripts" / "reproduce_analysis.py"
+    spec = importlib.util.spec_from_file_location("m4_reproduce_analysis", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+reproduce_analysis = _load_reproduce_analysis_module()
+
+
 FIXTURE_PATHS = (
     "reports/paper/index.qmd",
     "reports/paper/paper_values.json",
@@ -199,6 +212,34 @@ class M4ComputedPaperTest(unittest.TestCase):
             bad_result = _run(2.68, "2.68")
             self.assertFalse(bad_result.ok)
             self.assertIn("paper_value_mismatch_source", _failure_text(bad_result))
+
+
+class ReproduceAnalysisContentCheckTest(unittest.TestCase):
+    # The figure sidecars are content-equivalence-checked (not byte-identity) because
+    # float64 reductions differ in their last ULPs across platforms. The comparator must
+    # tolerate that round-off while still catching genuine drift and structural changes.
+    def _eq(self, a, b):
+        return reproduce_analysis._content_equivalent(a, b, "root")
+
+    def test_cross_platform_float_noise_is_tolerated(self) -> None:
+        base = {"series": [69.143000000001, 147.014432999998], "label": "STR"}
+        noisy = {"series": [69.143000000002, 147.014433000001], "label": "STR"}
+        self.assertEqual(self._eq(base, noisy), [])
+
+    def test_identical_payloads_match(self) -> None:
+        payload = {"series": [1.0, 2.5, 3.25], "dates": ["2024-03-13"], "n": 3}
+        self.assertEqual(self._eq(payload, json.loads(json.dumps(payload))), [])
+
+    def test_real_value_drift_is_caught(self) -> None:
+        base = {"series": [69.143, 11.68]}
+        drifted = {"series": [69.143, 11.69]}  # 0.01 change — far above float noise
+        self.assertTrue(self._eq(base, drifted))
+
+    def test_structural_and_string_differences_are_caught(self) -> None:
+        self.assertTrue(self._eq({"series": [1.0, 2.0]}, {"series": [1.0]}))  # length
+        self.assertTrue(self._eq({"a": 1.0}, {"b": 1.0}))  # keys
+        self.assertTrue(self._eq({"label": "STR"}, {"label": "str"}))  # string exact
+        self.assertTrue(self._eq({"post_dencun": True}, {"post_dencun": 1}))  # bool vs int
 
 
 if __name__ == "__main__":
