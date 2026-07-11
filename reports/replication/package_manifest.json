@@ -324,9 +324,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 7350,
+      "bytes": 7352,
       "path": "contracts/schemas/integrity_audit_v1.json",
-      "sha256": "d2de0e49796a6137b7732c5e7f1bf4d81f6564a602b8ffa82c218f8395879237",
+      "sha256": "5f037ef29b63e63e9e29dcc5d90c4a263c656085d796b41f0766a5d956685fe7",
       "verification_bar": "byte_identity"
     },
     {
@@ -786,9 +786,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 83233,
+      "bytes": 86460,
       "path": "docs/first_class_swarm_execution_log.md",
-      "sha256": "c367938a6be8377ee40e4c8306c7e623f8ba69ffa9eeadbf768c020287357651",
+      "sha256": "2cdef8f1f83c21d3c16b0d0848c2bc3e66f5cfaf0613f5d2fb3defb54d3cf454",
       "verification_bar": "byte_identity"
     },
     {
@@ -798,9 +798,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 9975,
+      "bytes": 11495,
       "path": "docs/operator_runbook.md",
-      "sha256": "b8f58627e9d6d414bdfa2e8f066d966d79eed9fd35ee7a079b660852f340f47c",
+      "sha256": "53b675342bac659604c12efc44c93eda49c6517dca951ec6c3cf52bb6746d21d",
       "verification_bar": "byte_identity"
     },
     {
@@ -1628,9 +1628,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 10543,
+      "bytes": 10829,
       "path": "scripts/generate_disclosure.py",
-      "sha256": "d1c3a05b77e9d03706df2d2c2a33a71514d5e3f6f48b80faf9e6fd2368507fae",
+      "sha256": "afa2fb5025a8f2efddcfdc582249412e497fa778bbca4171b23d11be409009b9",
       "verification_bar": "byte_identity"
     },
     {
@@ -1640,9 +1640,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 43841,
+      "bytes": 44982,
       "path": "scripts/integrity_audit.py",
-      "sha256": "132caa4c3bcc9c55bde757dd38b7ca0948f0c3df33d373a908f396451314970f",
+      "sha256": "e68ce0b41af6ca0f895f8c2df35893b6bafd312ec8e60a90fd0231e8749b412a",
       "verification_bar": "byte_identity"
     },
     {
@@ -1682,9 +1682,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 476214,
+      "bytes": 477464,
       "path": "scripts/quality_gates.py",
-      "sha256": "359fec939c61f852a1c143a77d67afd565e5178f5a942ea8ac9ade89acbbea36",
+      "sha256": "3c196f03cdb8cb7a27ec6a94d8e62395c3971e08d10c5afc1dc4e13204868eaa",
       "verification_bar": "byte_identity"
     },
     {
@@ -1724,9 +1724,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 10784,
+      "bytes": 10993,
       "path": "scripts/seeded_drill.py",
-      "sha256": "7c7fa12dbb29d14e3d04852f81ad9878cf191d282a3b8fd391f1c61dc390ae3b",
+      "sha256": "2f2b5378965915d045b3fb151daa8e2b65dfc39169f819ebd1ea7fee0c7ff3e8",
       "verification_bar": "byte_identity"
     },
     {
@@ -1736,9 +1736,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 401684,
+      "bytes": 401905,
       "path": "scripts/swarm.py",
-      "sha256": "9894461238eb13ea6bbcab4fb69f3e72db0e12cfd002c8165c7bdc4141d700cf",
+      "sha256": "31ac2bbfdeaab0749faad7116e5546b13bdf414651140e56bf10548498fcf85e",
       "verification_bar": "byte_identity"
     },
     {

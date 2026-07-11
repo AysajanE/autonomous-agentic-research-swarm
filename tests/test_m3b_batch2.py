@@ -149,8 +149,10 @@ def _valid_report(root: Path, *, audited_sha: str = "a" * 40) -> dict[str, objec
             "effective_confinement": {
                 "capability_probe": "fixture_no_namespace",
                 "os_enforced": False,
-                "effective_network": "proxy_environment_only",
-                "credential_isolation": "environment_scrub_only",
+                # backend is "claude" (live) -> honest live tuple: vendor cred +
+                # unrestricted egress, not a mock-style scrub/proxy claim.
+                "effective_network": "unrestricted_process_egress",
+                "credential_isolation": "vendor_credential_retained",
                 "filesystem_isolation": "scratch_worktree_plus_mutation_detection",
             },
         },

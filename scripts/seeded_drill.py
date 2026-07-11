@@ -221,18 +221,22 @@ def run_rotation(
             events.append(run_one(spec, journal_root=journal_root, timestamp=timestamp))
     except MissedInjection:
         caught = sum(event.get("caught") is True for event in events)
-        # A missed injection aborts the rotation, so later specs never run.  Score
-        # the catch rate over the FULL intended rotation (unrun == uncaught): a
-        # conservative lower bound that never overstates the KPI on a red run.
-        injected = len(specs)
+        # A missed injection aborts the rotation, so later specs never run.
+        # `injected` names ONLY what was actually attempted (the caught ones plus
+        # the one that missed); `planned` names the full rotation.  The catch rate
+        # is scored over `planned` (unrun == uncaught) — a conservative lower
+        # bound that never overstates the KPI on a red run.
+        attempted = len(events) + 1
+        planned = len(specs)
         swarm_events.append_event(
             journal_root,
             {
                 "event": "seeded_drill_summary",
                 "timestamp": timestamp,
-                "injected": injected,
+                "injected": attempted,
+                "planned": planned,
                 "caught": caught,
-                "catch_rate": caught / injected if injected else 0.0,
+                "catch_rate": caught / planned if planned else 0.0,
                 "status": "red",
             },
             actor_session="seeded-drill-kernel",

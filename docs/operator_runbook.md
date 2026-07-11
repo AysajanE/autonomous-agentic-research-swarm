@@ -40,8 +40,22 @@ event that additionally carries an `escalation_class` is a *human* escalation on
 §5.4's standing channel — every such class MUST be one of the registered classes
 below, which `runbook_staleness` then forces to carry a playbook. A new
 human-escalation class therefore cannot ship without being registered in
-`swarm_events.ESCALATION_CLASSES` and documented here (`escalate()` rejects an
-unregistered class).
+`swarm_events.ESCALATION_CLASSES` and documented here: `escalate()` rejects an
+unregistered class at runtime, and the golden test
+`test_no_emitter_uses_an_unregistered_escalation_class` fails `make test` if any
+runtime emitter tags an unregistered class (real CI teeth, independent of the
+best-effort journal path).
+
+Of the five classes, three are **auto-emitted** by the runtime with their class
+tag — `blocked_with_human` (`plan_awaiting_human_approval` / `human_question` /
+`referee_owner_waiver`), `hypothesis_task_retirement`
+(`hypothesis_retirement_escalated`), and `budget_breach` (`budget_exceeded`).
+The remaining two — `judge_disagreement` and `unsatisfiable_constraints` — are
+**owner-raised** channels: the v1 runtime does not auto-detect conflicting
+reviews or an infeasible constraint set and emit the class (that automation is
+scheduled M1+ supervisor work); the operator invokes these playbooks when they
+observe the condition. Both remain registered + documented so a future automated
+emitter can adopt them without re-opening this contract.
 
 ### Judge disagreement
 
@@ -147,18 +161,26 @@ subprocesses**, per backend — it never claims a scrub or proxy it does not
 perform:
 
 - **mock backend** (CI default): the auditor transcript is read from a local
-  file (no auditor egress); the only subprocesses are offline rebuilds/recomputes
-  launched with credentials stripped from the environment and every proxy pointed
-  at a dead local port. Reported as `credential_isolation: environment_scrub_only`
-  and `effective_network: proxy_environment_only` — both true, because the offline
-  environment genuinely removes credential-named variables and dead-proxies the
-  network.
+  file (no auditor egress); EVERY audit subprocess — rebuilds/recomputes AND the
+  git worktree/inspection helpers — is launched from a benign-only environment
+  ALLOWLIST (credentials are dropped by construction, not by a leaky name
+  denylist) with every proxy pointed at a dead local port. Reported as
+  `credential_isolation: environment_scrub_only` and
+  `effective_network: proxy_environment_only` — both true.
 - **live backend**: the auditor subprocess must reach the vendor API, so it
-  necessarily retains outbound vendor transport and the vendor credential (every
-  *other* credential is still scrubbed). Reported honestly as
-  `credential_isolation: vendor_credential_retained` and
-  `effective_network: vendor_api_transport_only` — never a full-scrub/proxy-only
-  claim the live call cannot honour.
+  retains the vendor credential (re-added on top of the same benign allowlist —
+  every *other* credential stays dropped) and, because no namespace/proxy/
+  destination control is enforced at the process level, UNRESTRICTED process
+  egress. Reported honestly as `credential_isolation: vendor_credential_retained`
+  and `effective_network: unrestricted_process_egress` — never a full-scrub or
+  proxy-only claim the live call cannot honour. (The live `claude` auditor is
+  additionally restricted to `Read/Glob/Grep` with an empty MCP config, a
+  separate tool-level control, but the network label describes process egress.)
+
+The `integrity_audit` gate binds these labels to the report's backend and
+requires `os_enforced: false`, so a hash-bound but dishonest report (a live
+backend claiming proxy-only/full-scrub, or any report claiming OS enforcement)
+fails the gate.
 
 The executor config requests `network: off`; because no OS namespace enforces it
 here, the report records the honest `network: requested_off` (request made, not

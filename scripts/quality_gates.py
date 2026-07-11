@@ -7448,13 +7448,35 @@ def gate_integrity_audit() -> GateResult:
             executor.get("profile") != "scratch-worktree"
             or executor.get("network") != "requested_off"
             or not isinstance(confinement, dict)
-            or not isinstance(confinement.get("os_enforced"), bool)
-            or confinement.get("effective_network")
-            not in {"proxy_environment_only", "namespace_enforced_off", "vendor_api_transport_only"}
-            or confinement.get("credential_isolation")
-            not in {"environment_scrub_only", "os_enforced", "vendor_credential_retained"}
         ):
             failures.append(_science_failure("integrity_audit_profile_invalid", subject=subject))
+        else:
+            # Bind the confinement labels to the backend and pin os_enforced=false:
+            # a hash-bound but DISHONEST report (e.g. a live backend claiming
+            # proxy-only network / full scrub, or any report claiming OS
+            # enforcement this implementation never provides) must not pass the
+            # gate.  The mock backend confines every subprocess (scrub + dead
+            # proxy); the live backend honestly retains vendor cred + unrestricted
+            # egress.
+            report_backend = executor.get("backend")
+            configured_backend = configured_executor["backend"] if configured_executor else None
+            if report_backend == "mock":
+                expected_confinement = {
+                    "effective_network": "proxy_environment_only",
+                    "credential_isolation": "environment_scrub_only",
+                }
+            else:
+                expected_confinement = {
+                    "effective_network": "unrestricted_process_egress",
+                    "credential_isolation": "vendor_credential_retained",
+                }
+            if (
+                confinement.get("os_enforced") is not False
+                or confinement.get("effective_network") != expected_confinement["effective_network"]
+                or confinement.get("credential_isolation") != expected_confinement["credential_isolation"]
+                or (configured_backend is not None and report_backend != configured_backend)
+            ):
+                failures.append(_science_failure("integrity_audit_profile_invalid", subject=subject))
         if executor.get("commit_push_allowed") is not False:
             failures.append(_science_failure("integrity_audit_commit_push_enabled", subject=subject))
     inventory = payload.get("release_inventory")

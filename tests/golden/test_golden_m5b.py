@@ -128,34 +128,46 @@ class GoldenM5bTests(unittest.TestCase):
         self.assertEqual(mock["effective_network"], "proxy_environment_only")
         self.assertEqual(mock["credential_isolation"], "environment_scrub_only")
 
-        # live backend: honestly reports retained vendor transport + credential,
-        # never a scrub/proxy the live API call cannot honour.
+        # live backend: honestly reports retained vendor credential + UNRESTRICTED
+        # process egress, never a scrub/proxy-only claim the live call cannot honour.
         live = integrity_audit.effective_confinement("live_claude")
         self.assertFalse(live["os_enforced"])
-        self.assertEqual(live["effective_network"], "vendor_api_transport_only")
+        self.assertEqual(live["effective_network"], "unrestricted_process_egress")
         self.assertEqual(live["credential_isolation"], "vendor_credential_retained")
 
-        # the `environment_scrub_only` label is TRUE: the offline env strips
-        # credentials and dead-proxies the network.
-        os.environ["FAKE_SECRET_TOKEN"] = "sensitive"
-        os.environ["AWS_ACCESS_KEY_ID"] = "sensitive"
+        # `environment_scrub_only` is TRUE by ALLOWLIST construction: credentials
+        # are dropped even when their names match NO conventional secret marker
+        # (the exact denylist-leak class: DATABASE_URL, bare *_KEY, *_PASS), and
+        # the network is dead-proxied.
+        leaky = {
+            "DATABASE_URL": "postgres://u:pw@host/db",
+            "REDIS_URL": "redis://:pw@host:6379",
+            "ENCRYPTION_KEY": "s3cret",
+            "DB_PASS": "s3cret",
+            "CI_JOB_JWT": "s3cret",
+            "AWS_ACCESS_KEY_ID": "sensitive",
+        }
+        os.environ.update(leaky)
         try:
             offline_env = integrity_audit._offline_subprocess_env()
         finally:
-            del os.environ["FAKE_SECRET_TOKEN"], os.environ["AWS_ACCESS_KEY_ID"]
-        self.assertNotIn("FAKE_SECRET_TOKEN", offline_env)
-        self.assertNotIn("AWS_ACCESS_KEY_ID", offline_env)
+            for name in leaky:
+                del os.environ[name]
+        for name in leaky:
+            self.assertNotIn(name, offline_env)
+        self.assertIn("PATH", offline_env)  # benign vars survive
         self.assertEqual(offline_env["https_proxy"], "http://127.0.0.1:9")
 
-        # the live backend keeps ONLY the vendor credential, scrubbing the rest.
+        # the live backend keeps ONLY the vendor credential, scrubbing the rest
+        # (incl. non-marker credentials).
         os.environ["ANTHROPIC_API_KEY"] = "vendor"
-        os.environ["AWS_ACCESS_KEY_ID"] = "sensitive"
+        os.environ["DATABASE_URL"] = "postgres://u:pw@host/db"
         try:
             live_env = integrity_audit._live_backend_env()
         finally:
-            del os.environ["ANTHROPIC_API_KEY"], os.environ["AWS_ACCESS_KEY_ID"]
+            del os.environ["ANTHROPIC_API_KEY"], os.environ["DATABASE_URL"]
         self.assertIn("ANTHROPIC_API_KEY", live_env)
-        self.assertNotIn("AWS_ACCESS_KEY_ID", live_env)
+        self.assertNotIn("DATABASE_URL", live_env)
 
     def test_escalate_rejects_unregistered_human_escalation_class(self) -> None:
         # F3: a new *human* escalation cannot ship without a registered class
@@ -178,8 +190,41 @@ class GoldenM5bTests(unittest.TestCase):
                     {"event": "data_loss_detected", "escalation_class": "data_loss_detected"},
                 )
             # every class tagged on a real runtime emitter must be registered
-            for cls in ("blocked_with_human", "hypothesis_task_retirement"):
+            for cls in ("blocked_with_human", "hypothesis_task_retirement", "budget_breach"):
                 self.assertIn(cls, swarm_events.ESCALATION_CLASSES)
+
+    def test_no_emitter_uses_an_unregistered_escalation_class(self) -> None:
+        # F3 teeth (independent of the best-effort runtime swallow): a static scan
+        # of every `escalation_class` LITERAL emitted in the runtime must be a
+        # subset of ESCALATION_CLASSES. A new emitter that ships an unregistered
+        # human-escalation class fails `make test` at dev time — even though
+        # `_record_swarm_event` swallows the runtime ValueError.
+        import re
+
+        src = (ROOT / "scripts/swarm.py").read_text(encoding="utf-8")
+        literals = set(re.findall(r'"escalation_class"\s*:\s*"([a-z_]+)"', src))
+        self.assertTrue(literals, "scan found no tagged emitters — pattern drift?")
+        unregistered = literals - set(swarm_events.ESCALATION_CLASSES)
+        self.assertEqual(
+            unregistered, set(), f"unregistered escalation classes emitted: {sorted(unregistered)}"
+        )
+
+    def test_disclosure_fails_closed_on_drill_event_in_compliance_journal(self) -> None:
+        # Belt-and-suspenders teeth: if a seeded_drill event ever leaks into the
+        # compliance journal (a regression), the disclosure must FAIL CLOSED
+        # rather than hash-bind drill bytes as released provenance.
+        import generate_disclosure
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            journal = repo / "reports/status/events/events.jsonl"
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            journal.write_text(
+                json.dumps({"event": "seeded_drill", "actor_session": "seeded-drill-kernel"}) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                generate_disclosure.collect_disclosure_evidence(repo)
 
     def test_frozen_exemption_ledger_rejects_silent_new_task_exemption(self) -> None:
         # F4: task_lint honours anything on the exemption ledger, so a silently

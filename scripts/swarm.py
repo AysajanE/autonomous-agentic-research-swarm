@@ -8837,6 +8837,10 @@ def _step_account(args: argparse.Namespace) -> dict[str, object]:
         "max_program_usd": contract.budget_max_program_usd,
         "usage_records": usage_records,
     }
+    if exceeded:
+        # A budget breach is a §5.4 human escalation, not a bare operational
+        # event — tag it so its runbook playbook is reachable by class.
+        event["escalation_class"] = "budget_breach"
     _record_swarm_event(repo, event, escalation=exceeded)
     return {
         "status": "exceeded" if exceeded else "within_budget",
