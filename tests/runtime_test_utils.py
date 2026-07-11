@@ -471,6 +471,11 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     )
     write_text(root, "docs/runbook_swarm.md", "# runbook\n")
     write_text(root, "docs/runbook_swarm_automation.md", "# automation runbook\n")
+    write_text(
+        root,
+        "docs/operator_runbook.md",
+        (REPO_ROOT / "docs/operator_runbook.md").read_text(encoding="utf-8"),
+    )
     write_text(root, "docs/prompts/planner.md", "# planner prompt\n")
     write_text(root, "docs/prompts/worker.md", "# worker prompt\n")
     write_text(root, "docs/prompts/judge.md", "# judge prompt\n")

@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shlex
 import shutil
@@ -64,6 +65,26 @@ def _offline_subprocess_env() -> dict[str, str]:
         }
     )
     return env
+
+
+def effective_confinement() -> dict[str, object]:
+    """Report capabilities actually enforced by this implementation/host."""
+    system = platform.system().lower() or "unknown"
+    if system != "linux":
+        reason = f"{system}_network_namespace_unavailable"
+    elif shutil.which("bwrap") is None:
+        reason = "bubblewrap_not_available"
+    else:
+        # Having a binary is not enforcement.  Until every rebuild/model/audit
+        # subprocess is launched through the reviewed profile, remain honest.
+        reason = "bubblewrap_profile_not_enabled"
+    return {
+        "capability_probe": reason,
+        "os_enforced": False,
+        "effective_network": "proxy_environment_only",
+        "credential_isolation": "environment_scrub_only",
+        "filesystem_isolation": "scratch_worktree_plus_mutation_detection",
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -878,9 +899,10 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             "builder_families": builders,
             "builder_run_manifest_evidence": builder_evidence,
             "profile": "scratch-worktree",
-            "network": "off",
+            "network": "requested_off",
             "commit_push_allowed": False,
             "scratch_kind": scratch_kind,
+            "effective_confinement": effective_confinement(),
         },
         "repo_confinement": {
             "excluded_prefixes": [".git/", "reports/status/integrity_audit/"],

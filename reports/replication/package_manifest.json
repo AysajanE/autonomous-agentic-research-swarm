@@ -12,9 +12,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 559,
+      "bytes": 706,
       "path": "Makefile",
-      "sha256": "0ce265f8974ddd08c68ffebf519d178fcf40b41d1f98e22822c0af5147ab32c1",
+      "sha256": "c6802f386d345cbccacff6c0ead5eb3cd7f3aab2f61b09cedfd441fb198251a0",
       "verification_bar": "byte_identity"
     },
     {
@@ -30,9 +30,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 6110,
+      "bytes": 6538,
       "path": "contracts/CHANGELOG.md",
-      "sha256": "431ee229dd91517eac6a5db673b69084e53a399404b4e9d7dc918f741c903525",
+      "sha256": "c3f5170750dbc0142aea461c012de113ed6ac02aae7d9a97da3e6004152a5fc0",
       "verification_bar": "byte_identity"
     },
     {
@@ -324,9 +324,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 6600,
+      "bytes": 7291,
       "path": "contracts/schemas/integrity_audit_v1.json",
-      "sha256": "4a9bae5f2e34586d39e0ecc41ed3eb0898d7e1d042357d0b27c4a567740b7125",
+      "sha256": "256397fa181ac0640e251d45ed0c377e9b9123a989703eac6b19860c469ff961",
       "verification_bar": "byte_identity"
     },
     {
@@ -786,15 +786,21 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 73789,
+      "bytes": 76951,
       "path": "docs/first_class_swarm_execution_log.md",
-      "sha256": "42b44258a06ed783a0bdb4b16467049854cb03348f2e04cdb771c0bfe1cdabd2",
+      "sha256": "5dab9eec2378750e1258aa3177ee57e1960e6d5e800a89fff6cd02a3b2572a69",
       "verification_bar": "byte_identity"
     },
     {
       "bytes": 108383,
       "path": "docs/first_class_swarm_production_plan_2026-07-09.md",
       "sha256": "864b3b901113bbaafc6dc91121dc7ab6513e7b8a222c91e54d5ba75214c46640",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 7969,
+      "path": "docs/operator_runbook.md",
+      "sha256": "42357681aac445173ab6497db473a4e65bba007259ca859e47379f96f1f51786",
       "verification_bar": "byte_identity"
     },
     {
@@ -1634,9 +1640,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 39575,
+      "bytes": 40504,
       "path": "scripts/integrity_audit.py",
-      "sha256": "1fda53cc7737005f511fa6bd4e03c8f55a88d9a630e8487230e13b43d5d971b3",
+      "sha256": "d70bc58616cc185d8b30f34d01787ca56730cff1e783d5a6d1ae5dd4d5ded163",
       "verification_bar": "byte_identity"
     },
     {
@@ -1676,9 +1682,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 472407,
+      "bytes": 474904,
       "path": "scripts/quality_gates.py",
-      "sha256": "0131ddf6cb651a6bd06d1622c5c8d06593198b7491bee3e7185aa8737f0954e1",
+      "sha256": "0205e64779730de82e8fc83d0da01532ab8ac788ab542f4284ab7b575c725a63",
       "verification_bar": "byte_identity"
     },
     {
@@ -1718,6 +1724,12 @@
       "verification_bar": "byte_identity"
     },
     {
+      "bytes": 10360,
+      "path": "scripts/seeded_drill.py",
+      "sha256": "1ec2850ae6d3af26d2dcdf8a45cad404950aedcf6db2569b602089ade918c1d1",
+      "verification_bar": "byte_identity"
+    },
+    {
       "bytes": 14918,
       "path": "scripts/spec_curve.py",
       "sha256": "3f925d32f2002e40b1034e08bb3c4d7a5385390a4c61e616746d850368223263",
@@ -1742,9 +1754,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 4884,
+      "bytes": 5205,
       "path": "scripts/swarm_events.py",
-      "sha256": "42425dc9a3062d7f63cea73f23890c4784a29deb2cb2b5534e9091bc955f628c",
+      "sha256": "8459ae058ecca36c3a4b01190d13bcef2a58841007904a2009df2c3e8947a519",
       "verification_bar": "byte_identity"
     },
     {
@@ -1760,9 +1772,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 49589,
+      "bytes": 50540,
       "path": "scripts/swarm_taskfile.py",
-      "sha256": "2630a2023c80d1f6768e757b80bf7e5c3bfdeccb2d7535a52c03694d85a57b30",
+      "sha256": "2a1c9eeb8c7d9ce5b473d0af55b72abecba788c84078d5712bdfa7c4da24b527",
       "verification_bar": "byte_identity"
     },
     {

@@ -48,7 +48,8 @@
         "profile",
         "network",
         "commit_push_allowed",
-        "scratch_kind"
+        "scratch_kind",
+        "effective_confinement"
       ],
       "properties": {
         "backend": {"type": "string", "minLength": 1},
@@ -81,9 +82,20 @@
           }
         },
         "profile": {"const": "scratch-worktree"},
-        "network": {"const": "off"},
+        "network": {"const": "requested_off"},
         "commit_push_allowed": {"const": false},
-        "scratch_kind": {"type": "string", "minLength": 1}
+        "scratch_kind": {"type": "string", "minLength": 1},
+        "effective_confinement": {
+          "type": "object",
+          "required": ["capability_probe", "os_enforced", "effective_network", "credential_isolation", "filesystem_isolation"],
+          "properties": {
+            "capability_probe": {"type": "string", "minLength": 1},
+            "os_enforced": {"type": "boolean"},
+            "effective_network": {"enum": ["proxy_environment_only", "namespace_enforced_off"]},
+            "credential_isolation": {"enum": ["environment_scrub_only", "os_enforced"]},
+            "filesystem_isolation": {"enum": ["scratch_worktree_plus_mutation_detection", "os_enforced"]}
+          }
+        }
       }
     },
     "repo_confinement": {

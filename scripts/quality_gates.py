@@ -48,6 +48,7 @@ from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 from sweep_tasks import plan_sweep as _plan_sweep
 from falsify_claims import evaluate_falsification_spec
 from sweep_harness import enumerate_cells
+from swarm_events import ESCALATION_CLASSES
 from swarm_events import read_events as _read_swarm_events
 from calibrate_referee import calibration_report_failures
 import literature
@@ -3880,6 +3881,66 @@ def gate_task_lint() -> GateResult:
     )
 
 
+_RUNBOOK_GATE_RE = re.compile(r"^\s*-\s+gate:\s+([a-z][a-z0-9_]*)\s*$", re.MULTILINE)
+_RUNBOOK_ESCALATION_RE = re.compile(
+    r"^\s*-\s+escalation_class:\s+([a-z][a-z0-9_]*)\s*$", re.MULTILINE
+)
+
+
+def check_runbook_staleness(
+    path: Path = Path("docs/operator_runbook.md"),
+    *,
+    gate_names: tuple[str, ...] | None = None,
+    escalation_classes: tuple[str, ...] | None = None,
+) -> GateResult:
+    """Require an operator entry for every kernel gate and escalation class."""
+    expected_gates = set(gate_names if gate_names is not None else _ALL_GATE_NAMES)
+    expected_escalations = set(
+        escalation_classes if escalation_classes is not None else ESCALATION_CLASSES
+    )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return GateResult(
+            ok=False,
+            details={
+                "runbook": path.as_posix(),
+                "failures": [
+                    _science_failure(
+                        "operator_runbook_missing",
+                        subject=path.as_posix(),
+                        actual=f"{type(exc).__name__}:{exc}",
+                    )
+                ],
+            },
+        )
+    documented_gates = set(_RUNBOOK_GATE_RE.findall(text))
+    documented_escalations = set(_RUNBOOK_ESCALATION_RE.findall(text))
+    failures = [
+        *(
+            _science_failure("runbook_gate_missing", subject=name)
+            for name in sorted(expected_gates - documented_gates)
+        ),
+        *(
+            _science_failure("runbook_escalation_class_missing", subject=name)
+            for name in sorted(expected_escalations - documented_escalations)
+        ),
+    ]
+    return GateResult(
+        ok=not failures,
+        details={
+            "runbook": path.as_posix(),
+            "gate_count": len(expected_gates),
+            "escalation_class_count": len(expected_escalations),
+            "failures": failures,
+        },
+    )
+
+
+def gate_runbook_staleness() -> GateResult:
+    return check_runbook_staleness()
+
+
 def _science_failure(
     reason: str,
     *,
@@ -7363,7 +7424,15 @@ def gate_integrity_audit() -> GateResult:
             failures.append(_science_failure("integrity_audit_executor_contract_mismatch", subject=subject))
         if not isinstance(audit_family, str) or not isinstance(builders, list) or not builders:
             failures.append(_science_failure("integrity_audit_family_evidence_missing", subject=subject))
-        if executor.get("profile") != "scratch-worktree" or executor.get("network") != "off":
+        confinement = executor.get("effective_confinement")
+        if (
+            executor.get("profile") != "scratch-worktree"
+            or executor.get("network") != "requested_off"
+            or not isinstance(confinement, dict)
+            or not isinstance(confinement.get("os_enforced"), bool)
+            or confinement.get("effective_network")
+            not in {"proxy_environment_only", "namespace_enforced_off"}
+        ):
             failures.append(_science_failure("integrity_audit_profile_invalid", subject=subject))
         if executor.get("commit_push_allowed") is not False:
             failures.append(_science_failure("integrity_audit_commit_push_enabled", subject=subject))
@@ -10873,6 +10942,7 @@ _CORE_GATE_NAMES = (
     "historical_exemptions",
     "network_strings",
     "task_lint",
+    "runbook_staleness",
     "prereg_lock_coverage",
     "raw_retention",
 )
@@ -11002,6 +11072,7 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
         "historical_exemptions": gate_historical_exemptions,
         "network_strings": gate_network_strings,
         "task_lint": gate_task_lint,
+        "runbook_staleness": gate_runbook_staleness,
         "prereg_lock_coverage": gate_prereg_lock_coverage,
         "raw_retention": gate_raw_retention,
         "program_conformance": gate_program_conformance,

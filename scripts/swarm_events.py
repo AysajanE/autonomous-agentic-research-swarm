@@ -17,6 +17,16 @@ DEFAULT_ESCALATION_SINK = {
     "target": "reports/status/events/escalations.jsonl",
 }
 
+# §5.4's standing human-escalation channel.  The operator runbook is checked
+# against this registry so adding a class cannot silently omit its playbook.
+ESCALATION_CLASSES = (
+    "judge_disagreement",
+    "budget_breach",
+    "blocked_with_human",
+    "unsatisfiable_constraints",
+    "hypothesis_task_retirement",
+)
+
 
 def _utc_now_iso() -> str:
     return (

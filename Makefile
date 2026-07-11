@@ -1,6 +1,6 @@
 PYTHON ?= python3.11
 
-.PHONY: gate reproduce-analysis paper
+.PHONY: gate reproduce-analysis paper drill eval-heldout
 
 gate:
 	$(PYTHON) scripts/quality_gates.py
@@ -10,6 +10,12 @@ reproduce-analysis:
 
 paper:
 	$(PYTHON) scripts/render_paper.py
+
+drill:
+	$(PYTHON) scripts/seeded_drill.py --all
+
+eval-heldout:
+	$(PYTHON) -m unittest discover -s tests/held_out -p 'cases.py'
 
 .PHONY: test
 

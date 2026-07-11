@@ -143,9 +143,16 @@ def _valid_report(root: Path, *, audited_sha: str = "a" * 40) -> dict[str, objec
                 }
             ],
             "profile": "scratch-worktree",
-            "network": "off",
+            "network": "requested_off",
             "commit_push_allowed": False,
             "scratch_kind": "hermetic_temp_copy",
+            "effective_confinement": {
+                "capability_probe": "fixture_no_namespace",
+                "os_enforced": False,
+                "effective_network": "proxy_environment_only",
+                "credential_isolation": "environment_scrub_only",
+                "filesystem_isolation": "scratch_worktree_plus_mutation_detection",
+            },
         },
         "repo_confinement": {
             "excluded_prefixes": [".git/", "reports/status/integrity_audit/"],
