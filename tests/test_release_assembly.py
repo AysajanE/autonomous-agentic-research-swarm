@@ -220,6 +220,26 @@ class ReleaseAssemblyTest(unittest.TestCase):
                     allow_gate_failures=True,
                 )
 
+    def test_rendered_paper_without_sources_fails_closed(self) -> None:
+        # Codex F2 (BLOCKER): if the canonical rendered outputs exist but BOTH manuscript
+        # source surfaces are deleted, assembly must fail rather than ship stale renders
+        # whose F14 perimeter would otherwise be suppressed.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_release_ready_repo(root, include_paper=True)
+            (root / "reports/paper/index.qmd").unlink()
+            (root / "reports/paper/paper_values.json").unlink()
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "release_rendered_paper_without_sources",
+            ):
+                release_assembly.assemble_release_manifest(
+                    root,
+                    date(2026, 3, 31),
+                    allow_gate_failures=True,
+                )
+
     def test_write_generates_canonical_release_manifest_and_catalog_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

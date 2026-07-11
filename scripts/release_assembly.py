@@ -537,6 +537,18 @@ def assemble_release_manifest(
         if paper_status == "present" and manuscript_present
         else []
     )
+    # F2 (Codex cross-vendor): a rendered paper must never ship without its sources. If the
+    # canonical HTML/PDF/render-manifest exist (paper_status present) but BOTH computed-paper
+    # source surfaces are gone, the release would carry stale renders whose provenance the
+    # F14 perimeter suppression would otherwise hide — fail closed. A project that has simply
+    # not built its paper yet has no rendered outputs (paper_status pending_stage2), so this
+    # never fires; the not-yet-written-manuscript activation residual is owned by the M4-C
+    # release-stage/venue contract.
+    stale_render_failures = (
+        ["release_rendered_paper_without_sources"]
+        if paper_status == "present" and not manuscript_present
+        else []
+    )
 
     missing_required_inputs = sorted(missing_contracts + missing_registry)
     notes: list[str] = []
@@ -585,7 +597,7 @@ def assemble_release_manifest(
             "referee_release_evidence",
         }
     )
-    if referee_hard_failures or missing_release_perimeter or render_perimeter_failures or (
+    if referee_hard_failures or missing_release_perimeter or render_perimeter_failures or stale_render_failures or (
         (missing_required_inputs or required_gate_failures) and not allow_gate_failures
     ):
         failure_parts: list[str] = []
@@ -603,6 +615,7 @@ def assemble_release_manifest(
                 for path in missing_release_perimeter
             )
         failure_parts.extend(render_perimeter_failures)
+        failure_parts.extend(stale_render_failures)
         raise SystemExit("release_assembly_blocked:" + ";".join(failure_parts))
 
     manifest_relpath = _release_manifest_relpath(release_date).as_posix()

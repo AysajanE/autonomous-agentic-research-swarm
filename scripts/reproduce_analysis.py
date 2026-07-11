@@ -40,12 +40,14 @@ CONTENT_EQUIVALENT_OUTPUTS = (
 )
 ALL_OUTPUTS = BYTE_IDENTICAL_OUTPUTS + CONTENT_EQUIVALENT_OUTPUTS
 
-# Tolerance for the figure-sidecar content check. Cross-platform float64 round-off after
-# the sidecar's own 12-decimal rounding is ~1e-12..1e-10; a genuinely different data
-# point differs by orders of magnitude more. rel_tol catches large-magnitude drift,
-# abs_tol catches near-zero drift.
-_SIDECAR_REL_TOL = 1e-9
-_SIDECAR_ABS_TOL = 1e-9
+# Tolerance for the figure-sidecar content check. The sidecars store values rounded to 12
+# decimals, so cross-platform float64 round-off (accumulated reductions + parse) is bounded
+# at ~1e-12..1e-11. The tolerance is set 1-2 orders above that noise floor — NOT the earlier
+# 1e-9, which was ~100x too loose and could hide real drift (e.g. a near-zero blob-fee value
+# flipping to 0, or a 1e-7 change on a ~950 magnitude series). A genuine data change differs
+# by orders of magnitude more than 1e-10.
+_SIDECAR_REL_TOL = 1e-10
+_SIDECAR_ABS_TOL = 1e-10
 
 
 def _content_equivalent(expected: object, actual: object, path: str) -> list[str]:
@@ -55,6 +57,10 @@ def _content_equivalent(expected: object, actual: object, path: str) -> list[str
         # bool is a subclass of int — compare exactly and never as a number.
         return [] if expected == actual and type(expected) is type(actual) else [path]
     if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+        # Non-finite values (NaN/inf) are never valid plotted data and never compare equal;
+        # reject them explicitly rather than letting NaN!=NaN silently pass or fail.
+        if not (math.isfinite(float(expected)) and math.isfinite(float(actual))):
+            return [f"{path}(non_finite:{expected}/{actual})"]
         if math.isclose(float(expected), float(actual), rel_tol=_SIDECAR_REL_TOL, abs_tol=_SIDECAR_ABS_TOL):
             return []
         return [f"{path}({expected}!={actual})"]

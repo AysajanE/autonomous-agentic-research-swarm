@@ -5920,6 +5920,20 @@ BARE_MANUSCRIPT_NUMBER_RE = re.compile(
     r"(?<![\w])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*%|\s+(?:ETH|x)\b)?",
     flags=re.IGNORECASE,
 )
+# A paper value's `display` is substituted verbatim into the manuscript by
+# render_paper.py, so it must be EXACTLY one signed number (optional comma-thousands and
+# decimals) with an optional single known unit and nothing else — no extra prose, markup,
+# or newlines. Without this a source-validated value could smuggle an arbitrary second
+# claim (the recompute check only inspects the first numeric substring). The trailing unit
+# token maps 1:1 to `unit` and is cross-checked below.
+PAPER_VALUE_DISPLAY_RE = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:%| ETH| x)?")
+PAPER_VALUE_DISPLAY_UNIT_SUFFIX = {"%": "percent", " ETH": "eth", " x": "multiplier"}
+# {{< include >}} targets are rendered into the manuscript verbatim, so a target that is
+# NOT a reproduce-analysis-verified artifact could smuggle unchecked reportable numbers
+# past the bare-numeric scanner. Only these byte/content-reproduced artifacts may be
+# included. (This set grows with the M4-B exhibits manifest.)
+REPRODUCE_VERIFIED_INCLUDE_TARGETS = {"reports/tables/str_regime_summary.md"}
+MANUSCRIPT_INCLUDE_RE = re.compile(r"\{\{<\s*include\s+([^\s>]+)")
 
 
 def _paper_value_failure(code: str, *, subject: str, actual: object | None = None) -> str:
@@ -6069,7 +6083,7 @@ def _bare_manuscript_numerics(text: str) -> list[dict[str, object]]:
         if stripped.startswith("```"):
             in_fence = not in_fence
             continue
-        if in_fence or re.search(r"\{\{<\s*include\b", raw_line):
+        if in_fence:
             continue
         # Explicit structural allowlist: numbered headings are document
         # organization; the STR notation line is mathematical notation; dates
@@ -6078,6 +6092,10 @@ def _bare_manuscript_numerics(text: str) -> list[dict[str, object]]:
         if stripped.startswith("#") or "STR_t = (sum_i RentPaid_{i,t})" in raw_line:
             continue
         line = PAPER_VALUE_TOKEN_RE.sub(" ", raw_line)
+        # Strip Quarto shortcodes (e.g. {{< include ... >}}) but KEEP the rest of the line,
+        # so prose sharing a line with a shortcode is still scanned. The include TARGET is
+        # separately constrained to reproduce-verified artifacts by the gate.
+        line = re.sub(r"\{\{<[^>]*>\}\}", " ", line)
         line = STRUCTURAL_DATE_RE.sub(" ", line)
         line = re.sub(r"\[@[^\]]+\]", " ", line)
         line = re.sub(r"\b(?:fig-)?alt\s*=\s*(?:\"[^\"]*\"|'[^']*')", " ", line)
@@ -6154,6 +6172,23 @@ def gate_manuscript_computed_paper() -> GateResult:
         if not isinstance(entry.get("display"), str):
             failures.append(_paper_value_failure("paper_value_display_invalid", subject=subject))
             continue
+        display_text = str(entry["display"])
+        if PAPER_VALUE_DISPLAY_RE.fullmatch(display_text) is None:
+            # Rejects newlines, markup, and any second number or trailing prose — closing
+            # the render_paper.py verbatim-substitution injection vector.
+            failures.append(_paper_value_failure("paper_value_display_not_canonical", subject=subject, actual=display_text))
+            continue
+        display_unit = next(
+            (unit for suffix, unit in PAPER_VALUE_DISPLAY_UNIT_SUFFIX.items() if display_text.endswith(suffix)),
+            None,
+        )
+        expected_unit = entry.get("unit")
+        if display_unit is not None:
+            if display_unit != expected_unit:
+                failures.append(_paper_value_failure("paper_value_display_unit_mismatch", subject=subject, actual=f"{display_text}~{expected_unit}"))
+        elif expected_unit in PAPER_VALUE_DISPLAY_UNIT_SUFFIX.values():
+            # A unit-bearing kind (percent/eth/multiplier) whose display carries no unit suffix.
+            failures.append(_paper_value_failure("paper_value_display_unit_missing", subject=subject, actual=f"{display_text}~{expected_unit}"))
         uncertainty = entry.get("uncertainty")
         if not isinstance(uncertainty, dict) or not isinstance(uncertainty.get("kind"), str):
             failures.append(_paper_value_failure("paper_value_uncertainty_invalid", subject=subject))
@@ -6185,13 +6220,18 @@ def gate_manuscript_computed_paper() -> GateResult:
             # future source value that lands on a rounding boundary. It stays fail-closed
             # against a genuine source/value/display divergence: any real forgery differs
             # at the display-precision level, far above float round-off (~1e-10).
+            # Recompute the source with the generator's exact operation, but compare it to
+            # the RAW declared value and display number — NOT re-rounded. Rounding the
+            # declared value would let a source-inconsistent forgery (e.g. value 7.4 shown
+            # as "7" at precision 0) round back onto the source and pass. The tiny 1e-9
+            # slack only absorbs float round-off; any genuine divergence is orders larger.
             recomputed = round(float(source_value), precision)
-            declared = round(float(entry["value"]), precision)
-            displayed = round(float(_display_decimal(str(entry["display"]))), precision)
+            declared = float(entry["value"])
+            displayed = float(_display_decimal(str(entry["display"])))
         except (ValueError, InvalidOperation, json.JSONDecodeError, TypeError) as exc:
             failures.append(_paper_value_failure("paper_value_source_selector_invalid", subject=subject, actual=str(exc)))
             continue
-        if recomputed != declared or displayed != declared:
+        if abs(recomputed - declared) > 1e-9 or abs(displayed - declared) > 1e-9:
             failures.append(
                 _paper_value_failure(
                     "paper_value_mismatch_source",
@@ -6236,18 +6276,60 @@ def gate_manuscript_computed_paper() -> GateResult:
         and isinstance(entry.get("unit"), str)
         and isinstance(entry.get("citation_key"), str)
     ]
+    registered_literals: set[tuple[Decimal, str, str]] = set()
     for claim in claims:
+        citation = str(claim.get("citation_key"))
         for literal in claim.get("manuscript_numeric_literals", []):
             parsed = _claim_literal_value_unit(literal) if isinstance(literal, str) else None
-            expected = (*parsed, str(claim.get("citation_key"))) if parsed is not None else None
-            if expected is not None and expected not in available:
-                failures.append(
-                    _paper_value_failure(
-                        "claims_paper_values_divergence",
-                        subject=str(claim.get("claim_id") or "unknown_claim"),
-                        actual=literal,
+            expected = (*parsed, citation) if parsed is not None else None
+            if expected is not None:
+                registered_literals.add(expected)
+                if expected not in available:
+                    failures.append(
+                        _paper_value_failure(
+                            "claims_paper_values_divergence",
+                            subject=str(claim.get("claim_id") or "unknown_claim"),
+                            actual=literal,
+                        )
                     )
+
+    # Reverse (bidirectional) agreement: every paper value RENDERED into the manuscript is
+    # a reportable numeric and must be registered in the claim ledger under its own value,
+    # unit, and citation key. Without this a new source-valid value could be tokenized into
+    # the paper without ever appearing in claims.yaml (which asserts it registers every
+    # reportable manuscript numeric). Non-rendered paper values are not manuscript numerics.
+    rendered_keys = {
+        match.group(1)
+        for match in PAPER_VALUE_TOKEN_RE.finditer(manuscript_text)
+        if match.group(1) in values
+    }
+    for key in sorted(rendered_keys):
+        entry = values[key]
+        if not isinstance(entry, dict) or isinstance(entry.get("value"), bool) or not isinstance(entry.get("value"), (int, float)):
+            continue
+        signature = (Decimal(str(entry["value"])), str(entry.get("unit")), str(entry.get("citation_key")))
+        if signature not in registered_literals:
+            failures.append(
+                _paper_value_failure(
+                    "paper_value_unregistered_in_claims",
+                    subject=f"{values_path.as_posix()}:{key}",
+                    actual=f"{entry.get('display')}~{entry.get('citation_key')}",
                 )
+            )
+
+    # {{< include >}} targets are rendered verbatim; only reproduce-analysis-verified
+    # artifacts may be included, so unchecked reportable numbers cannot be smuggled in.
+    for match in MANUSCRIPT_INCLUDE_RE.finditer(manuscript_text):
+        raw_target = match.group(1)
+        normalized = os.path.normpath((manuscript.parent / raw_target).as_posix())
+        if normalized not in REPRODUCE_VERIFIED_INCLUDE_TARGETS:
+            failures.append(
+                _paper_value_failure(
+                    "manuscript_unverified_include_target",
+                    subject=manuscript.as_posix(),
+                    actual=normalized,
+                )
+            )
 
     return GateResult(
         ok=not failures,

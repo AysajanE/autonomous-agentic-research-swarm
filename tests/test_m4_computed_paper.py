@@ -163,6 +163,90 @@ class M4ComputedPaperTest(unittest.TestCase):
             self.assertEqual(result.details["status"], "active")
             self.assertIn("manuscript_computed_paper_missing", _failure_text(result))
 
+    def test_display_with_injected_second_claim_fails(self) -> None:
+        # Codex F1 (BLOCKER): display is substituted verbatim by render_paper.py, so an
+        # extra claim smuggled into it must be rejected even though the first numeric still
+        # matches the source.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _copy_computed_paper_fixture(root)
+            path = root / "reports/paper/paper_values.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["values"]["pre_dencun_mean_str_pct"]["display"] = "69.14% and post-Dencun STR is 99.99%"
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            with chdir(root):
+                result = quality_gates.gate_manuscript_computed_paper()
+            self.assertFalse(result.ok)
+            self.assertIn("paper_value_display_not_canonical", _failure_text(result))
+
+    def test_value_disagreeing_with_source_but_rounding_to_display_fails(self) -> None:
+        # Codex F4 (MAJOR): a value of 7.4 shown as "7" (precision 0) must fail — the gate
+        # compares the recomputed source to the RAW declared value, not a re-rounded one.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _copy_computed_paper_fixture(root)
+            path = root / "reports/paper/paper_values.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["values"]["blob_fee_floor_min_consecutive_days"]["value"] = 7.4
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            with chdir(root):
+                result = quality_gates.gate_manuscript_computed_paper()
+            self.assertFalse(result.ok)
+            self.assertIn("paper_value_mismatch_source", _failure_text(result))
+
+    def test_rendered_value_absent_from_claim_ledger_fails(self) -> None:
+        # Codex/Claude F5 (MAJOR, bidirectional): the 7-day protocol constant IS rendered
+        # into the manuscript, so removing its claim-ledger literal must trip the reverse
+        # (paper_value -> claim) agreement check.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _copy_computed_paper_fixture(root)
+            path = root / "contracts/claims.yaml"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for claim in payload["claims"]:
+                if claim.get("claim_id") == "REF-BLOB-FLOOR-DEF":
+                    claim["manuscript_numeric_literals"] = ["1.05 x"]
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            with chdir(root):
+                result = quality_gates.gate_manuscript_computed_paper()
+            self.assertFalse(result.ok)
+            self.assertIn("paper_value_unregistered_in_claims", _failure_text(result))
+
+    def test_unverified_include_target_fails(self) -> None:
+        # Codex F3 (MAJOR): an {{< include >}} of a non-reproduce-verified file is a smuggling
+        # channel and must fail.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _copy_computed_paper_fixture(root)
+            manuscript = root / "reports/paper/index.qmd"
+            manuscript.write_text(
+                manuscript.read_text(encoding="utf-8") + "\n{{< include ../unverified_numbers.md >}}\n",
+                encoding="utf-8",
+            )
+            with chdir(root):
+                result = quality_gates.gate_manuscript_computed_paper()
+            self.assertFalse(result.ok)
+            self.assertIn("manuscript_unverified_include_target", _failure_text(result))
+
+    def test_bare_numeric_sharing_a_line_with_include_is_scanned(self) -> None:
+        # Codex F3 (MAJOR): prose sharing a line with an include shortcode must still be
+        # scanned for bare reportable numerics.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _copy_computed_paper_fixture(root)
+            manuscript = root / "reports/paper/index.qmd"
+            text = manuscript.read_text(encoding="utf-8")
+            text = text.replace(
+                "{{< include ../tables/str_regime_summary.md >}}",
+                "{{< include ../tables/str_regime_summary.md >}} and the mean STR is 42.42%.",
+            )
+            manuscript.write_text(text, encoding="utf-8")
+            with chdir(root):
+                result = quality_gates.gate_manuscript_computed_paper()
+            self.assertFalse(result.ok)
+            self.assertIn("manuscript_bare_numeric_literal", _failure_text(result))
+            self.assertIn("42.42%", _failure_text(result))
+
     def test_recompute_matches_generator_rounding_on_boundary(self) -> None:
         # Finding 4 (rounding-mode): the gate recomputes with the generator's exact
         # operation, round(float(source), precision). On a rounding boundary where
@@ -240,6 +324,19 @@ class ReproduceAnalysisContentCheckTest(unittest.TestCase):
         self.assertTrue(self._eq({"a": 1.0}, {"b": 1.0}))  # keys
         self.assertTrue(self._eq({"label": "STR"}, {"label": "str"}))  # string exact
         self.assertTrue(self._eq({"post_dencun": True}, {"post_dencun": 1}))  # bool vs int
+
+    def test_drift_above_tightened_tolerance_is_caught(self) -> None:
+        # Codex F6: a 5e-9 change (which the earlier 1e-9 tolerance would have hidden) must
+        # now be caught by the 1e-10-scale tolerance.
+        self.assertTrue(self._eq({"series": [1.0]}, {"series": [1.000000005]}))
+        # And a near-zero flip (blob-fee 1e-9 -> 0) is caught.
+        self.assertTrue(self._eq({"series": [1e-9]}, {"series": [0.0]}))
+
+    def test_non_finite_values_are_rejected(self) -> None:
+        # Codex F6: NaN/inf are never valid plotted data.
+        self.assertTrue(self._eq({"x": 1.0}, {"x": float("inf")}))
+        self.assertTrue(self._eq({"x": 1.0}, {"x": float("nan")}))
+        self.assertTrue(self._eq({"x": float("nan")}, {"x": float("nan")}))
 
 
 if __name__ == "__main__":
