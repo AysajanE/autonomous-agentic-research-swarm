@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "research_swarm.paper_registry.v1.schema",
+  "title": "Research swarm failing-first paper registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "entries"],
+  "properties": {
+    "schema_version": {"const": "research_swarm.paper_registry.v1"},
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["registry_id", "kind", "required", "status", "artifact", "referee_report", "reason"],
+        "properties": {
+          "registry_id": {"type": "string", "pattern": "^(section|exhibit)_[a-z0-9_]+$"},
+          "kind": {"enum": ["section", "exhibit"]},
+          "required": {"const": true},
+          "status": {"enum": ["failing", "passing"]},
+          "artifact": {
+            "type": ["object", "null"],
+            "required": ["path", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "path": {"type": "string", "minLength": 1},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          },
+          "referee_report": {
+            "type": ["object", "null"],
+            "required": ["path", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "path": {"type": "string", "pattern": "^reports/status/referee_reports/.+\\.json$"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          },
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

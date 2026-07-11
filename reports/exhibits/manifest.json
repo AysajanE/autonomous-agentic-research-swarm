@@ -1,0 +1,147 @@
+{
+  "exhibits": [
+    {
+      "builder": "src/analysis/build_str_release_outputs.py",
+      "caption": "Settlement Take Rate ecosystem time series through the validated as-of date.",
+      "exhibit_id": "str_ecosystem_timeseries",
+      "inputs": [
+        {
+          "path": "contracts/claims.yaml",
+          "sha256": "b2c9f361f692bad7f93e9722ccfd3500da876f84ab535b2a3b54e40932282e9b"
+        },
+        {
+          "path": "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
+          "sha256": "69efbb310daff0dfbaddfc7a96d47030cfb08ec4f178f6618eda2d124448139f"
+        },
+        {
+          "path": "data/processed/panels/daily_rollup_panel.csv",
+          "sha256": "7a048a4e542136afd906ad56c95d00ef1543dff7096946010a1caa49042013d1"
+        },
+        {
+          "path": "docs/protocol.md",
+          "sha256": "ff925b900f59476213b5924f2e07aac43e45b8d1973ba4124ddbf97e5da8f1ea"
+        },
+        {
+          "path": "reports/validation/cross_source_reconciliation.json",
+          "sha256": "941533f8456e404015eba74e723e5e228c3fc5340d4954c77731f7a2681ce095"
+        },
+        {
+          "path": "reports/validation/l1_rent_decomposition_validation.json",
+          "sha256": "294452139c3a991b64951d29169d5c377f51892f0a03ade11eb2ff2d0b4b34fb"
+        },
+        {
+          "path": "reports/validation/rollup_panel_validation.json",
+          "sha256": "9e2489263099da247582a775d0fb193baef76a108c6919e4a73809ae2c36d66c"
+        },
+        {
+          "path": "src/analysis/build_str_release_outputs.py",
+          "sha256": "5e60c4189f74d22fa5d62781843141bfe7b9609e6b42ee08cbfc076b18ec1813"
+        }
+      ],
+      "notes": "Two-panel multi-series figure; plotted values are bound by the matching .data.json sidecar.",
+      "output": "reports/figures/str_ecosystem_timeseries.svg",
+      "self_qa": {
+        "alt_text": "Daily ecosystem Settlement Take Rate with smoothed L2 fees, smoothed L1 rent, and the Dencun boundary.",
+        "labels": true,
+        "legend": true,
+        "units": true
+      }
+    },
+    {
+      "builder": "src/analysis/build_str_release_outputs.py",
+      "caption": "Post-Dencun STR regimes with protocol-defined blob-fee-floor runs.",
+      "exhibit_id": "str_post_dencun_regimes",
+      "inputs": [
+        {
+          "path": "contracts/claims.yaml",
+          "sha256": "b2c9f361f692bad7f93e9722ccfd3500da876f84ab535b2a3b54e40932282e9b"
+        },
+        {
+          "path": "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
+          "sha256": "69efbb310daff0dfbaddfc7a96d47030cfb08ec4f178f6618eda2d124448139f"
+        },
+        {
+          "path": "data/processed/panels/daily_rollup_panel.csv",
+          "sha256": "7a048a4e542136afd906ad56c95d00ef1543dff7096946010a1caa49042013d1"
+        },
+        {
+          "path": "docs/protocol.md",
+          "sha256": "ff925b900f59476213b5924f2e07aac43e45b8d1973ba4124ddbf97e5da8f1ea"
+        },
+        {
+          "path": "reports/validation/cross_source_reconciliation.json",
+          "sha256": "941533f8456e404015eba74e723e5e228c3fc5340d4954c77731f7a2681ce095"
+        },
+        {
+          "path": "reports/validation/l1_rent_decomposition_validation.json",
+          "sha256": "294452139c3a991b64951d29169d5c377f51892f0a03ade11eb2ff2d0b4b34fb"
+        },
+        {
+          "path": "reports/validation/rollup_panel_validation.json",
+          "sha256": "9e2489263099da247582a775d0fb193baef76a108c6919e4a73809ae2c36d66c"
+        },
+        {
+          "path": "src/analysis/build_str_release_outputs.py",
+          "sha256": "5e60c4189f74d22fa5d62781843141bfe7b9609e6b42ee08cbfc076b18ec1813"
+        }
+      ],
+      "notes": "Two-panel multi-series figure; plotted values are bound by the matching .data.json sidecar.",
+      "output": "reports/figures/str_post_dencun_regimes.svg",
+      "self_qa": {
+        "alt_text": "Post-Dencun daily Settlement Take Rate, 14-day mean STR, and shaded blob fee floor periods.",
+        "labels": true,
+        "legend": true,
+        "units": true
+      }
+    },
+    {
+      "builder": "src/analysis/build_str_release_outputs.py",
+      "caption": "STR and rent summaries for the full, Dencun, and blob-fee regimes.",
+      "exhibit_id": "str_regime_summary",
+      "inputs": [
+        {
+          "path": "contracts/claims.yaml",
+          "sha256": "b2c9f361f692bad7f93e9722ccfd3500da876f84ab535b2a3b54e40932282e9b"
+        },
+        {
+          "path": "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
+          "sha256": "69efbb310daff0dfbaddfc7a96d47030cfb08ec4f178f6618eda2d124448139f"
+        },
+        {
+          "path": "data/processed/panels/daily_rollup_panel.csv",
+          "sha256": "7a048a4e542136afd906ad56c95d00ef1543dff7096946010a1caa49042013d1"
+        },
+        {
+          "path": "docs/protocol.md",
+          "sha256": "ff925b900f59476213b5924f2e07aac43e45b8d1973ba4124ddbf97e5da8f1ea"
+        },
+        {
+          "path": "reports/validation/cross_source_reconciliation.json",
+          "sha256": "941533f8456e404015eba74e723e5e228c3fc5340d4954c77731f7a2681ce095"
+        },
+        {
+          "path": "reports/validation/l1_rent_decomposition_validation.json",
+          "sha256": "294452139c3a991b64951d29169d5c377f51892f0a03ade11eb2ff2d0b4b34fb"
+        },
+        {
+          "path": "reports/validation/rollup_panel_validation.json",
+          "sha256": "9e2489263099da247582a775d0fb193baef76a108c6919e4a73809ae2c36d66c"
+        },
+        {
+          "path": "src/analysis/build_str_release_outputs.py",
+          "sha256": "5e60c4189f74d22fa5d62781843141bfe7b9609e6b42ee08cbfc076b18ec1813"
+        }
+      ],
+      "notes": "The Markdown include and same-stem CSV are emitted from one in-memory table; paper_values binds numeric cells to the CSV.",
+      "output": "reports/tables/str_regime_summary.md",
+      "self_qa": {
+        "alt_text": "Table of regime date ranges, observation counts, fee and rent means, and STR distribution summaries with units in column labels.",
+        "labels": true,
+        "legend": true,
+        "units": true
+      }
+    }
+  ],
+  "generated_by": "src/analysis/build_str_release_outputs.py",
+  "schema_version": "research_swarm.exhibits_manifest.v1"
+}

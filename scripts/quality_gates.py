@@ -77,6 +77,8 @@ INTEGRITY_AUDIT_SCHEMA_VERSION = "research_swarm.integrity_audit.v1"
 LITERATURE_MANIFEST_SCHEMA_VERSION = "research_swarm.literature_manifest.v1"
 RECALL_AUDIT_SCHEMA_VERSION = "research_swarm.recall_audit.v1"
 PROMPT_SURFACE_SCHEMA_VERSION = "research_swarm.prompt_surface.v1"
+PROGRAM_TEMPLATE_SCHEMA_VERSION = "research_swarm.program_template.v1"
+EXHIBITS_MANIFEST_SCHEMA_VERSION = "research_swarm.exhibits_manifest.v1"
 REFEREE_RUBRIC_TASK_KINDS = {
     "etl": "etl",
     "analysis": "analysis",
@@ -2749,7 +2751,10 @@ def _kernel_referee_sample(task: Task) -> tuple[list[dict[str, object]], int]:
     return [item for _, item in ranked[:3]], len(scoped)
 
 
-def _referee_report_journaled(report: dict[str, object]) -> bool:
+def _referee_report_journaled(
+    report: dict[str, object],
+    repo: Path | None = None,
+) -> bool:
     task_id = report.get("task_id")
     run_sha = report.get("run_manifest_sha256")
     actor = report.get("actor")
@@ -2762,7 +2767,7 @@ def _referee_report_journaled(report: dict[str, object]) -> bool:
         or not session_id
     ):
         return False
-    events, _ = _read_swarm_events(Path.cwd())
+    events, _ = _read_swarm_events(repo or Path.cwd())
     return any(
         event.get("event") == "referee_invoked"
         and event.get("task_id") == task_id
@@ -9228,6 +9233,720 @@ def gate_checklist_derivation() -> GateResult:
     )
 
 
+def _load_program_template(
+    repo: Path,
+    mode: str,
+) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+    template_path = repo / "contracts" / "program_templates" / f"{mode}.yaml"
+    schema_path = repo / "contracts" / "schemas" / "program_template_v1.yaml"
+    payload, error = _load_json_file(template_path)
+    failures: list[dict[str, object]] = []
+    subject = (
+        template_path.relative_to(repo).as_posix()
+        if template_path.is_relative_to(repo)
+        else template_path.as_posix()
+    )
+    if error is not None or payload is None:
+        return None, [
+            _science_failure("program_template_unreadable", subject=subject, actual=error)
+        ]
+    for issue in _schema_failures(payload, schema_path):
+        failures.append(
+            _science_failure(
+                "program_template_schema_violation",
+                subject=subject,
+                field=str(issue.get("path")),
+                actual=issue,
+            )
+        )
+    if payload.get("program_template") != PROGRAM_TEMPLATE_SCHEMA_VERSION:
+        failures.append(
+            _science_failure(
+                "program_template_marker_invalid",
+                subject=subject,
+                expected=PROGRAM_TEMPLATE_SCHEMA_VERSION,
+                actual=payload.get("program_template"),
+            )
+        )
+    if payload.get("mode") != mode:
+        failures.append(
+            _science_failure(
+                "program_template_mode_mismatch",
+                subject=subject,
+                expected=mode,
+                actual=payload.get("mode"),
+            )
+        )
+
+    seen_programs: set[str] = set()
+    programs = payload.get("programs")
+    for program in programs if isinstance(programs, list) else []:
+        if not isinstance(program, dict):
+            continue
+        program_id = program.get("program_id")
+        if not isinstance(program_id, str):
+            continue
+        if program_id in seen_programs:
+            failures.append(_science_failure("duplicate_program_id", subject=program_id))
+        seen_programs.add(program_id)
+        nodes = program.get("nodes")
+        node_ids = (
+            [
+                str(node["node_id"])
+                for node in nodes
+                if isinstance(node, dict) and isinstance(node.get("node_id"), str)
+            ]
+            if isinstance(nodes, list)
+            else []
+        )
+        if len(node_ids) != len(set(node_ids)):
+            failures.append(_science_failure("duplicate_program_node", subject=program_id))
+        earlier: set[str] = set()
+        for node in nodes if isinstance(nodes, list) else []:
+            if not isinstance(node, dict) or not isinstance(node.get("node_id"), str):
+                continue
+            node_id = str(node["node_id"])
+            for dependency in node.get("depends_on", []):
+                if dependency not in set(node_ids):
+                    failures.append(
+                        _science_failure(
+                            "program_node_dependency_unknown",
+                            subject=f"{program_id}:{node_id}",
+                            actual=dependency,
+                        )
+                    )
+                elif dependency not in earlier:
+                    failures.append(
+                        _science_failure(
+                            "program_node_not_topologically_ordered",
+                            subject=f"{program_id}:{node_id}",
+                            actual=dependency,
+                        )
+                    )
+            earlier.add(node_id)
+    return payload, failures
+
+
+def check_program_conformance(
+    repo: Path = Path("."),
+    *,
+    strict: bool | None = None,
+) -> GateResult:
+    """Validate instantiated program-node metadata against the mode template.
+
+    The reference repository predates program-node metadata. It therefore stays
+    staged until phase 2b is actively locked or a Planner instantiates any task
+    with `program_id`/`program_node`. Fixture callers use ``strict=True`` to
+    exercise the fail-closed conformance path without manufacturing a lock.
+    """
+    repo = repo.resolve()
+    mode = _parse_project_mode(repo / "contracts" / "project.yaml") or "empirical"
+    tagged_paths: list[Path] = []
+    for folder_name in ("backlog", "active", "done"):
+        folder = repo / ".orchestrator" / folder_name
+        for path in sorted(folder.glob("*.md")) if folder.is_dir() else []:
+            if path.name == "README.md":
+                continue
+            frontmatter = _parse_task_frontmatter(_read_text(path))
+            if isinstance(frontmatter, dict) and (
+                frontmatter.get("program_id") is not None
+                or frontmatter.get("program_node") is not None
+            ):
+                tagged_paths.append(path)
+    lock, lock_error = load_prereg_lock(
+        repo / PREREG_PHASE_FILES["2b"], expected_phase="2b"
+    )
+    lock_active = lock_error is None and lock is not None and lock.get("active") is True
+    active = strict if strict is not None else bool(lock_active or tagged_paths)
+    if not active:
+        return GateResult(
+            ok=True,
+            details={
+                "status": "inactive_program_not_instantiated",
+                "skipped": True,
+                "mode": mode,
+                "template": f"contracts/program_templates/{mode}.yaml",
+                "failures": [],
+            },
+        )
+    template, failures = _load_program_template(repo, mode)
+    if template is None:
+        return GateResult(ok=False, details={"status": "invalid_template", "mode": mode, "failures": failures})
+
+    task_records: list[dict[str, object]] = []
+    for folder_name in ("backlog", "active", "done"):
+        folder = repo / ".orchestrator" / folder_name
+        for path in sorted(folder.glob("*.md")) if folder.is_dir() else []:
+            if path.name == "README.md":
+                continue
+            frontmatter = _parse_task_frontmatter(_read_text(path))
+            if not isinstance(frontmatter, dict):
+                continue
+            state = _parse_status_value(_read_text(path), "State") or folder_name
+            task_records.append(
+                {
+                    "path": path.relative_to(repo).as_posix(),
+                    "task_id": frontmatter.get("task_id"),
+                    "task_kind": frontmatter.get("task_kind"),
+                    "role": frontmatter.get("role"),
+                    "workstream": frontmatter.get("workstream"),
+                    "dependencies": _coerce_str_list(frontmatter.get("dependencies")),
+                    "program_id": frontmatter.get("program_id"),
+                    "program_node": frontmatter.get("program_node"),
+                    "state": state,
+                }
+            )
+
+    tagged = [task for task in task_records if task.get("program_id") is not None or task.get("program_node") is not None]
+    programs = template.get("programs")
+    expected: dict[tuple[str, str], dict[str, object]] = {}
+    program_workstreams: dict[str, str] = {}
+    for program in programs if isinstance(programs, list) else []:
+        if not isinstance(program, dict) or not isinstance(program.get("program_id"), str):
+            continue
+        program_id = str(program["program_id"])
+        if isinstance(program.get("workstream"), str):
+            program_workstreams[program_id] = str(program["workstream"])
+        for node in program.get("nodes", []):
+            if isinstance(node, dict) and isinstance(node.get("node_id"), str):
+                expected[(program_id, str(node["node_id"]))] = node
+
+    represented: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for task in tagged:
+        program_id = task.get("program_id")
+        node_id = task.get("program_node")
+        subject = str(task.get("path"))
+        if not isinstance(program_id, str) or not isinstance(node_id, str):
+            failures.append(_science_failure("program_task_metadata_incomplete", subject=subject))
+            continue
+        key = (program_id, node_id)
+        node = expected.get(key)
+        if node is None:
+            failures.append(
+                _science_failure(
+                    "mode_foreign_program_node",
+                    subject=subject,
+                    expected=mode,
+                    actual=f"{program_id}:{node_id}:{task.get('task_kind')}",
+                )
+            )
+            continue
+        if task.get("task_kind") != node.get("task_kind"):
+            failures.append(
+                _science_failure(
+                    "program_node_task_kind_mismatch",
+                    subject=subject,
+                    expected=node.get("task_kind"),
+                    actual=task.get("task_kind"),
+                )
+            )
+        if task.get("role") != node.get("role"):
+            failures.append(
+                _science_failure(
+                    "program_node_role_mismatch",
+                    subject=subject,
+                    expected=node.get("role"),
+                    actual=task.get("role"),
+                )
+            )
+        if task.get("workstream") != program_workstreams.get(program_id):
+            failures.append(
+                _science_failure(
+                    "program_node_workstream_mismatch",
+                    subject=subject,
+                    expected=program_workstreams.get(program_id),
+                    actual=task.get("workstream"),
+                )
+            )
+        represented.setdefault(key, []).append(task)
+
+    for key, node in expected.items():
+        if node.get("required") is True and key not in represented:
+            failures.append(
+                _science_failure(
+                    "required_program_node_missing",
+                    subject=f"{key[0]}:{key[1]}",
+                    expected=node.get("task_kind"),
+                )
+            )
+
+    for key, downstream_tasks in represented.items():
+        node = expected[key]
+        for upstream_node in node.get("depends_on", []):
+            upstream_key = (key[0], str(upstream_node))
+            upstream_tasks = represented.get(upstream_key, [])
+            upstream_ids = {
+                str(task["task_id"])
+                for task in upstream_tasks if isinstance(task.get("task_id"), str)
+            }
+            for task in downstream_tasks:
+                declared = set(task.get("dependencies", []))
+                if not upstream_ids or not upstream_ids.issubset(declared):
+                    failures.append(
+                        _science_failure(
+                            "program_dependency_edge_missing",
+                            subject=str(task.get("path")),
+                            expected=sorted(upstream_ids),
+                            actual=sorted(declared),
+                        )
+                    )
+                if task.get("state") == "done" and any(
+                    upstream.get("state") != "done" for upstream in upstream_tasks
+                ):
+                    failures.append(
+                        _science_failure(
+                            "program_node_done_before_upstream",
+                            subject=str(task.get("path")),
+                            actual=[
+                                upstream.get("task_id")
+                                for upstream in upstream_tasks
+                                if upstream.get("state") != "done"
+                            ],
+                        )
+                    )
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "active",
+            "mode": mode,
+            "template": f"contracts/program_templates/{mode}.yaml",
+            "task_count": len(task_records),
+            "tagged_task_count": len(tagged),
+            "represented_node_count": len(represented),
+            "failures": failures,
+        },
+    )
+
+
+def gate_program_conformance() -> GateResult:
+    return check_program_conformance(Path("."))
+
+
+def _paper_reference_paths(repo: Path) -> set[str]:
+    manuscript = repo / "reports" / "paper" / "index.qmd"
+    if not manuscript.is_file():
+        return set()
+    text = _read_text(manuscript)
+    raw_targets = [
+        match.group(1).strip()
+        for match in re.finditer(r"!\[[^\]]*\]\(([^)\s]+)", text)
+    ]
+    raw_targets.extend(
+        match.group(1).strip().strip("'\"")
+        for match in re.finditer(r"\{\{<\s*include\s+([^\s>]+)", text)
+    )
+    references: set[str] = set()
+    paper_dir = manuscript.parent
+    for raw in raw_targets:
+        if re.match(r"^[a-z]+://", raw, flags=re.IGNORECASE):
+            continue
+        try:
+            resolved = (paper_dir / raw).resolve()
+            references.add(resolved.relative_to(repo).as_posix())
+        except ValueError:
+            references.add(f"outside_repo:{raw}")
+    return references
+
+
+def _paper_value_source_paths(repo: Path) -> set[str]:
+    path = repo / "reports" / "paper" / "paper_values.json"
+    payload, error = _load_json_file(path)
+    if error is not None or payload is None or not isinstance(payload.get("values"), dict):
+        return set()
+    sources: set[str] = set()
+    for entry in payload["values"].values():
+        source = entry.get("source_artifact") if isinstance(entry, dict) else None
+        if not isinstance(source, str):
+            continue
+        if _path_matches_prefix(source, "reports/figures/") or _path_matches_prefix(
+            source, "reports/tables/"
+        ):
+            sources.add(source)
+    return sources
+
+
+def _same_exhibit_surface(left: str, right: str) -> bool:
+    left_path = Path(left)
+    right_path = Path(right)
+    return left == right or (
+        left_path.parent == right_path.parent and left_path.stem == right_path.stem
+    )
+
+
+def _artifact_contains_numeric(path: Path) -> bool:
+    if path.suffix.lower() not in {".csv", ".json", ".md", ".txt"} or not path.is_file():
+        return False
+    try:
+        text = _read_text(path)
+    except (OSError, UnicodeDecodeError):
+        return False
+    return re.search(r"(?<![A-Za-z0-9_])[-+]?\d+(?:\.\d+)?(?![A-Za-z0-9_])", text) is not None
+
+
+def check_exhibits_manifest(repo: Path = Path(".")) -> GateResult:
+    repo = repo.resolve()
+    manifest_path = repo / "reports" / "exhibits" / "manifest.json"
+    manuscript = repo / "reports" / "paper" / "index.qmd"
+    pre_manifest_references = _paper_reference_paths(repo)
+    pre_value_sources = _paper_value_source_paths(repo)
+    if not manifest_path.is_file() and not (pre_manifest_references or pre_value_sources):
+        return GateResult(
+            ok=True,
+            details={"status": "inactive_no_referenced_exhibits", "skipped": True, "failures": []},
+        )
+    failures: list[dict[str, object]] = []
+    payload, error = _load_json_file(manifest_path)
+    if error is not None or payload is None:
+        failures.append(
+            _science_failure(
+                "exhibits_manifest_unreadable",
+                subject="reports/exhibits/manifest.json",
+                actual=error,
+            )
+        )
+        return GateResult(ok=False, details={"status": "active", "failures": failures})
+    schema_path = repo / "contracts" / "schemas" / "exhibits_manifest_v1.json"
+    for issue in _schema_failures(payload, schema_path):
+        failures.append(
+            _science_failure(
+                "exhibits_manifest_schema_violation",
+                subject="reports/exhibits/manifest.json",
+                field=str(issue.get("path")),
+                actual=issue,
+            )
+        )
+    if payload.get("schema_version") != EXHIBITS_MANIFEST_SCHEMA_VERSION:
+        failures.append(
+            _science_failure(
+                "exhibits_manifest_marker_invalid",
+                subject="reports/exhibits/manifest.json",
+                expected=EXHIBITS_MANIFEST_SCHEMA_VERSION,
+                actual=payload.get("schema_version"),
+            )
+        )
+    exhibits = payload.get("exhibits")
+    exhibits = exhibits if isinstance(exhibits, list) else []
+    ids: set[str] = set()
+    outputs: list[str] = []
+    for index, exhibit in enumerate(exhibits):
+        subject = f"reports/exhibits/manifest.json:exhibits[{index}]"
+        if not isinstance(exhibit, dict):
+            continue
+        exhibit_id = exhibit.get("exhibit_id")
+        if isinstance(exhibit_id, str):
+            if exhibit_id in ids:
+                failures.append(_science_failure("duplicate_exhibit_id", subject=subject, actual=exhibit_id))
+            ids.add(exhibit_id)
+        builder = _safe_repo_relative_path(exhibit.get("builder"))
+        if builder is None or not (repo / builder).is_file():
+            failures.append(_science_failure("exhibit_builder_missing", subject=subject, actual=exhibit.get("builder")))
+        output = _safe_repo_relative_path(exhibit.get("output"))
+        if output is None or not (repo / output).is_file():
+            failures.append(_science_failure("exhibit_output_missing", subject=subject, actual=exhibit.get("output")))
+        else:
+            outputs.append(output.as_posix())
+        self_qa = exhibit.get("self_qa")
+        if not isinstance(self_qa, dict):
+            failures.append(_science_failure("exhibit_self_qa_missing", subject=subject))
+        else:
+            for field in ("labels", "legend", "units"):
+                if self_qa.get(field) is not True:
+                    failures.append(
+                        _science_failure("exhibit_self_qa_failed", subject=subject, field=field, actual=self_qa.get(field))
+                    )
+            if not isinstance(self_qa.get("alt_text"), str) or not str(self_qa["alt_text"]).strip():
+                failures.append(_science_failure("exhibit_self_qa_failed", subject=subject, field="alt_text"))
+        inputs = exhibit.get("inputs")
+        for input_index, entry in enumerate(inputs if isinstance(inputs, list) else []):
+            field = f"inputs[{input_index}]"
+            path = _safe_repo_relative_path(entry.get("path")) if isinstance(entry, dict) else None
+            expected_sha = entry.get("sha256") if isinstance(entry, dict) else None
+            if path is None or not (repo / path).is_file():
+                failures.append(_science_failure("exhibit_input_missing", subject=subject, field=field, actual=entry))
+                continue
+            actual_sha = hashlib.sha256((repo / path).read_bytes()).hexdigest()
+            if expected_sha != actual_sha:
+                failures.append(
+                    _science_failure(
+                        "exhibit_input_hash_mismatch",
+                        subject=subject,
+                        field=field,
+                        expected=expected_sha,
+                        actual=actual_sha,
+                    )
+                )
+
+    manuscript_references = _paper_reference_paths(repo)
+    value_sources = _paper_value_source_paths(repo)
+    required_surfaces = manuscript_references | value_sources
+    for reference in sorted(required_surfaces):
+        if reference.startswith("outside_repo:") or not any(
+            _same_exhibit_surface(reference, output) for output in outputs
+        ):
+            failures.append(
+                _science_failure(
+                    "manuscript_exhibit_unregistered",
+                    subject=reference,
+                    expected="reports/exhibits/manifest.json entry",
+                )
+            )
+
+    mode = _parse_project_mode(repo / "contracts" / "project.yaml") or "empirical"
+    if mode in {"modeling", "hybrid"}:
+        for output in outputs:
+            if not any(_same_exhibit_surface(output, reference) for reference in manuscript_references):
+                continue
+            if _artifact_contains_numeric(repo / output) and not any(
+                _same_exhibit_surface(output, source) for source in value_sources
+            ):
+                failures.append(
+                    _science_failure(
+                        "modeling_exhibit_numeric_unregistered",
+                        subject=output,
+                        expected="corresponding reports/paper/paper_values.json source_artifact",
+                    )
+                )
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "active",
+            "mode": mode,
+            "exhibit_count": len(exhibits),
+            "manuscript_reference_count": len(manuscript_references),
+            "failures": failures,
+        },
+    )
+
+
+def gate_exhibits_manifest() -> GateResult:
+    return check_exhibits_manifest(Path("."))
+
+
+def _paper_section_registry_ids(manuscript: Path) -> set[str]:
+    if not manuscript.is_file():
+        return set()
+    ids: set[str] = set()
+    for match in re.finditer(r"^##\s+(.+?)\s*$", _read_text(manuscript), flags=re.MULTILINE):
+        slug = re.sub(r"[^a-z0-9]+", "_", match.group(1).casefold()).strip("_")
+        if slug:
+            ids.add(f"section_{slug}")
+    return ids
+
+
+def _paper_exhibit_registry_ids(repo: Path) -> set[str]:
+    payload, error = _load_json_file(repo / "reports" / "exhibits" / "manifest.json")
+    if error is not None or payload is None or not isinstance(payload.get("exhibits"), list):
+        return set()
+    return {
+        f"exhibit_{item['exhibit_id']}"
+        for item in payload["exhibits"]
+        if isinstance(item, dict) and isinstance(item.get("exhibit_id"), str)
+    }
+
+
+def _paper_registry_passing_failures(
+    repo: Path,
+    entry: dict[str, object],
+) -> list[dict[str, object]]:
+    subject = str(entry.get("registry_id"))
+    failures: list[dict[str, object]] = []
+    artifact = entry.get("artifact")
+    artifact_path = _safe_repo_relative_path(artifact.get("path")) if isinstance(artifact, dict) else None
+    artifact_sha = artifact.get("sha256") if isinstance(artifact, dict) else None
+    if artifact_path is None or not (repo / artifact_path).is_file():
+        failures.append(_science_failure("paper_registry_passing_artifact_missing", subject=subject))
+        return failures
+    actual_artifact_sha = hashlib.sha256((repo / artifact_path).read_bytes()).hexdigest()
+    if artifact_sha != actual_artifact_sha:
+        failures.append(
+            _science_failure(
+                "paper_registry_passing_artifact_hash_mismatch",
+                subject=subject,
+                expected=artifact_sha,
+                actual=actual_artifact_sha,
+            )
+        )
+
+    binding = entry.get("referee_report")
+    report_path = _safe_repo_relative_path(binding.get("path")) if isinstance(binding, dict) else None
+    report_sha = binding.get("sha256") if isinstance(binding, dict) else None
+    if report_path is None or not (repo / report_path).is_file():
+        failures.append(_science_failure("paper_registry_passing_referee_missing", subject=subject))
+        return failures
+    actual_report_sha = hashlib.sha256((repo / report_path).read_bytes()).hexdigest()
+    if report_sha != actual_report_sha:
+        failures.append(
+            _science_failure(
+                "paper_registry_passing_referee_hash_mismatch",
+                subject=subject,
+                expected=report_sha,
+                actual=actual_report_sha,
+            )
+        )
+        return failures
+    report, error = _load_json_file(repo / report_path)
+    if error is not None or report is None:
+        failures.append(_science_failure("paper_registry_passing_referee_invalid", subject=subject, actual=error))
+        return failures
+    for issue in _schema_failures(report, repo / "contracts" / "schemas" / "referee_report_v1.json"):
+        failures.append(
+            _science_failure(
+                "paper_registry_passing_referee_schema_violation",
+                subject=subject,
+                actual=issue,
+            )
+        )
+    if report.get("valid") is not True or report.get("overall") != "supported":
+        failures.append(
+            _science_failure(
+                "paper_registry_passing_referee_not_supported",
+                subject=subject,
+                actual={"valid": report.get("valid"), "overall": report.get("overall")},
+            )
+        )
+    if not _referee_report_journaled(report, repo):
+        failures.append(_science_failure("paper_registry_passing_referee_unjournaled", subject=subject))
+    verdicts = report.get("verdicts")
+    blocking = (
+        [
+            verdict
+            for verdict in verdicts
+            if isinstance(verdict, dict)
+            and verdict.get("severity") == "major"
+            and verdict.get("verdict") != "supported"
+        ]
+        if isinstance(verdicts, list)
+        else []
+    )
+    if blocking:
+        failures.append(
+            _science_failure("paper_registry_passing_referee_open_major", subject=subject, actual=blocking)
+        )
+    reviewed = report.get("reviewed_artifacts")
+    opened = report.get("opened_artifacts")
+    reviewed_paths = {item for item in reviewed if isinstance(item, str)} if isinstance(reviewed, list) else set()
+    opened_paths = (
+        {
+            str(item["path"])
+            for item in opened
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        if isinstance(opened, list)
+        else set()
+    )
+    if artifact_path.as_posix() not in reviewed_paths | opened_paths:
+        failures.append(
+            _science_failure(
+                "paper_registry_passing_referee_artifact_unreviewed",
+                subject=subject,
+                actual=artifact_path.as_posix(),
+            )
+        )
+    return failures
+
+
+def check_paper_registry(
+    repo: Path = Path("."),
+    *,
+    release_perimeter: bool = False,
+) -> GateResult:
+    repo = repo.resolve()
+    registry_path = repo / "reports" / "paper" / "registry.json"
+    manuscript_path = repo / "reports" / "paper" / "index.qmd"
+    pre_required_ids = _paper_section_registry_ids(manuscript_path) | _paper_exhibit_registry_ids(repo)
+    if not registry_path.is_file() and not pre_required_ids:
+        return GateResult(
+            ok=True,
+            details={"status": "inactive_no_paper", "skipped": True, "release_perimeter": release_perimeter, "failures": []},
+        )
+    failures: list[dict[str, object]] = []
+    payload, error = _load_json_file(registry_path)
+    if error is not None or payload is None:
+        failures.append(_science_failure("paper_registry_unreadable", subject="reports/paper/registry.json", actual=error))
+        return GateResult(ok=False, details={"status": "active", "release_perimeter": release_perimeter, "failures": failures})
+    for issue in _schema_failures(payload, repo / "contracts" / "schemas" / "paper_registry_v1.json"):
+        failures.append(
+            _science_failure(
+                "paper_registry_schema_violation",
+                subject="reports/paper/registry.json",
+                field=str(issue.get("path")),
+                actual=issue,
+            )
+        )
+    entries = payload.get("entries")
+    entries = entries if isinstance(entries, list) else []
+    by_id: dict[str, dict[str, object]] = {}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        registry_id = entry.get("registry_id")
+        if not isinstance(registry_id, str):
+            continue
+        if registry_id in by_id:
+            failures.append(_science_failure("duplicate_paper_registry_id", subject=registry_id))
+        by_id[registry_id] = entry
+        expected_kind = registry_id.split("_", 1)[0]
+        if entry.get("kind") != expected_kind:
+            failures.append(
+                _science_failure(
+                    "paper_registry_kind_mismatch",
+                    subject=registry_id,
+                    expected=expected_kind,
+                    actual=entry.get("kind"),
+                )
+            )
+        if entry.get("status") == "passing":
+            failures.extend(_paper_registry_passing_failures(repo, entry))
+
+    required_ids = _paper_section_registry_ids(manuscript_path) | _paper_exhibit_registry_ids(repo)
+    for registry_id in sorted(required_ids - set(by_id)):
+        failures.append(_science_failure("required_paper_registry_entry_missing", subject=registry_id))
+    required_failing = sorted(
+        registry_id
+        for registry_id, entry in by_id.items()
+        if entry.get("required") is True and entry.get("status") != "passing"
+    )
+
+    open_major: list[str] = []
+    report_dir = repo / REFEREE_REPORT_DIR
+    for report_path in sorted(report_dir.glob("*.json")) if report_dir.is_dir() else []:
+        report, report_error = _load_json_file(report_path)
+        if report_error is not None or report is None or not isinstance(report.get("verdicts"), list):
+            continue
+        for verdict in report["verdicts"]:
+            if (
+                isinstance(verdict, dict)
+                and verdict.get("severity") == "major"
+                and verdict.get("verdict") != "supported"
+            ):
+                identifier = verdict.get("success_criterion_id", verdict.get("check_id", "unknown"))
+                open_major.append(f"{report_path.relative_to(repo).as_posix()}:{identifier}")
+
+    if release_perimeter:
+        for registry_id in required_failing:
+            failures.append(_science_failure("paper_registry_required_entry_failing", subject=registry_id))
+        for finding in open_major:
+            failures.append(_science_failure("paper_registry_open_major_referee_finding", subject=finding))
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "release_ready" if release_perimeter and not failures else "staged",
+            "release_perimeter": release_perimeter,
+            "entry_count": len(entries),
+            "required_failing": required_failing,
+            "open_major_findings": open_major,
+            "failures": failures,
+        },
+    )
+
+
+def gate_paper_registry(*, release_perimeter: bool = False) -> GateResult:
+    return check_paper_registry(Path("."), release_perimeter=release_perimeter)
+
+
 _CORE_GATE_NAMES = (
     "framework_contract",
     "repo_structure",
@@ -9256,6 +9975,9 @@ _CORE_GATE_NAMES = (
     "prereg_lock_coverage",
 )
 _MODE_INDEPENDENT_SCIENCE_GATES = (
+    "program_conformance",
+    "exhibits_manifest",
+    "paper_registry",
     "manuscript_computed_paper",
     "citation_integrity",
     "literature_corpus",
@@ -9286,6 +10008,9 @@ _MODELING_SCIENCE_GATES = (
     "sweep_artifact",
 )
 _ALL_GATE_NAMES = _CORE_GATE_NAMES + (
+    "program_conformance",
+    "exhibits_manifest",
+    "paper_registry",
     "prereg_conformance",
     "claim_evidence_ledger",
     "manuscript_computed_paper",
@@ -9363,6 +10088,9 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
         "network_strings": gate_network_strings,
         "task_lint": gate_task_lint,
         "prereg_lock_coverage": gate_prereg_lock_coverage,
+        "program_conformance": gate_program_conformance,
+        "exhibits_manifest": gate_exhibits_manifest,
+        "paper_registry": gate_paper_registry,
         "claim_evidence_ledger": gate_claim_evidence_ledger,
         "manuscript_computed_paper": gate_manuscript_computed_paper,
         "citation_integrity": gate_citation_integrity,

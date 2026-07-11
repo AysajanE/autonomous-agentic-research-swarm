@@ -1,0 +1,17 @@
+{
+  "mode": "hybrid",
+  "program_template": "research_swarm.program_template.v1",
+  "programs": [
+    {
+      "nodes": [
+        {"depends_on": [], "node_id": "calibration", "produces": "calibration_artifact", "required": true, "role": "Worker", "task_kind": "analysis"},
+        {"depends_on": ["calibration"], "node_id": "instance_generation", "produces": "bridge_instances", "required": true, "role": "Worker", "task_kind": "bridge"},
+        {"depends_on": ["instance_generation"], "node_id": "grid_execution", "produces": "grid_results", "required": true, "role": "Worker", "task_kind": "model"},
+        {"depends_on": ["grid_execution"], "node_id": "counterfactual", "produces": "counterfactual_results", "required": true, "role": "Worker", "task_kind": "model"},
+        {"depends_on": ["counterfactual"], "node_id": "exhibits", "produces": "exhibits_manifest", "required": true, "role": "Worker", "task_kind": "analysis"}
+      ],
+      "program_id": "bridge_campaign",
+      "workstream": "W8"
+    }
+  ]
+}

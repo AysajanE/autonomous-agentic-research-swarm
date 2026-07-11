@@ -724,6 +724,11 @@ def _planner_passthrough_env() -> dict[str, str]:
 
 
 def _render_planner_prompt(*, mode: str, context: dict[str, object]) -> str:
+    template_path = Path("contracts/program_templates") / f"{mode}.yaml"
+    try:
+        program_template = json.loads(template_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"planner_program_template_unavailable:{template_path}:{exc}") from exc
     lines = [
         "You are the PLANNER of a repo-native research swarm (read-only profile).",
         "You may inspect the repository with your tools, but you MUST NOT edit",
@@ -753,6 +758,14 @@ def _render_planner_prompt(*, mode: str, context: dict[str, object]) -> str:
         "  comparison_basis: true input disjoint from constructed_by's inputs",
         "- gates must not end in a quote character; no curl/wget/http outside",
         "  network workstreams",
+        "",
+        f"CANONICAL PROGRAM TEMPLATE: {template_path.as_posix()}",
+        "Instantiate this exact mode-specific DAG; do not invent, omit, reorder,",
+        "or rename program nodes. Each instantiated task must copy its program's",
+        "program_id and its node_id as program_node into task frontmatter. The",
+        "section_draft node is instantiated once per required manuscript section.",
+        "The revision_cycle node uses scripts/generate_revision_tasks.py.",
+        json.dumps(program_template, indent=2, sort_keys=True),
         "",
         "CONTEXT:",
         json.dumps(context, indent=2, sort_keys=True, default=str),

@@ -14,6 +14,7 @@ Outputs:
 - reports/figures/str_post_dencun_regimes.svg
 - reports/tables/str_regime_summary.csv
 - reports/tables/str_regime_summary.md
+- reports/exhibits/manifest.json
 
 Run:
 - python src/analysis/build_str_release_outputs.py --sample
@@ -58,6 +59,7 @@ REGIME_FIGURE_DATA_PATH = REPO_ROOT / "reports" / "figures" / "str_post_dencun_r
 REGIME_TABLE_CSV_PATH = REPO_ROOT / "reports" / "tables" / "str_regime_summary.csv"
 REGIME_TABLE_MD_PATH = REPO_ROOT / "reports" / "tables" / "str_regime_summary.md"
 PAPER_VALUES_PATH = REPO_ROOT / "reports" / "paper" / "paper_values.json"
+EXHIBITS_MANIFEST_PATH = REPO_ROOT / "reports" / "exhibits" / "manifest.json"
 CLAIMS_PATH = REPO_ROOT / "contracts" / "claims.yaml"
 PROTOCOL_PATH = REPO_ROOT / "docs" / "protocol.md"
 DENCUN_DATE = pd.Timestamp("2024-03-13")
@@ -110,6 +112,7 @@ def main() -> int:
     write_regime_tables(regime_table)
     if not args.sample:
         write_paper_values(regime_table, as_of_label=as_of_label)
+        write_exhibits_manifest()
 
     print(f"Wrote {ECOSYSTEM_FIGURE_PATH.relative_to(REPO_ROOT)}")
     print(f"Wrote {REGIME_FIGURE_PATH.relative_to(REPO_ROOT)}")
@@ -119,6 +122,7 @@ def main() -> int:
     print(f"Wrote {REGIME_TABLE_MD_PATH.relative_to(REPO_ROOT)}")
     if not args.sample:
         print(f"Wrote {PAPER_VALUES_PATH.relative_to(REPO_ROOT)}")
+        print(f"Wrote {EXHIBITS_MANIFEST_PATH.relative_to(REPO_ROOT)}")
     return 0
 
 
@@ -679,6 +683,80 @@ def write_paper_values(regime_table: pd.DataFrame, *, as_of_label: str) -> None:
             "generated_by": "src/analysis/build_str_release_outputs.py",
             "as_of": as_of_label,
             "values": values,
+        },
+    )
+
+
+def write_exhibits_manifest() -> None:
+    """Emit the deterministic analysis-to-paper interface with build-time QA facts."""
+    input_paths = sorted(
+        (
+            *VALIDATION_BUNDLE,
+            LIVE_PANEL_PATH,
+            LIVE_DECOMP_PATH,
+            CLAIMS_PATH,
+            PROTOCOL_PATH,
+            Path(__file__).resolve(),
+        ),
+        key=lambda path: path.relative_to(REPO_ROOT).as_posix(),
+    )
+    inputs = [
+        {
+            "path": path.relative_to(REPO_ROOT).as_posix(),
+            "sha256": _sha256(path),
+        }
+        for path in input_paths
+    ]
+    exhibits = [
+        {
+            "exhibit_id": "str_ecosystem_timeseries",
+            "builder": "src/analysis/build_str_release_outputs.py",
+            "inputs": inputs,
+            "output": "reports/figures/str_ecosystem_timeseries.svg",
+            "caption": "Settlement Take Rate ecosystem time series through the validated as-of date.",
+            "notes": "Two-panel multi-series figure; plotted values are bound by the matching .data.json sidecar.",
+            "self_qa": {
+                "labels": True,
+                "legend": True,
+                "units": True,
+                "alt_text": "Daily ecosystem Settlement Take Rate with smoothed L2 fees, smoothed L1 rent, and the Dencun boundary.",
+            },
+        },
+        {
+            "exhibit_id": "str_post_dencun_regimes",
+            "builder": "src/analysis/build_str_release_outputs.py",
+            "inputs": inputs,
+            "output": "reports/figures/str_post_dencun_regimes.svg",
+            "caption": "Post-Dencun STR regimes with protocol-defined blob-fee-floor runs.",
+            "notes": "Two-panel multi-series figure; plotted values are bound by the matching .data.json sidecar.",
+            "self_qa": {
+                "labels": True,
+                "legend": True,
+                "units": True,
+                "alt_text": "Post-Dencun daily Settlement Take Rate, 14-day mean STR, and shaded blob fee floor periods.",
+            },
+        },
+        {
+            "exhibit_id": "str_regime_summary",
+            "builder": "src/analysis/build_str_release_outputs.py",
+            "inputs": inputs,
+            "output": "reports/tables/str_regime_summary.md",
+            "caption": "STR and rent summaries for the full, Dencun, and blob-fee regimes.",
+            "notes": "The Markdown include and same-stem CSV are emitted from one in-memory table; paper_values binds numeric cells to the CSV.",
+            "self_qa": {
+                "labels": True,
+                "legend": True,
+                "units": True,
+                "alt_text": "Table of regime date ranges, observation counts, fee and rent means, and STR distribution summaries with units in column labels.",
+            },
+        },
+    ]
+    _write_json(
+        EXHIBITS_MANIFEST_PATH,
+        {
+            "schema_version": "research_swarm.exhibits_manifest.v1",
+            "generated_by": "src/analysis/build_str_release_outputs.py",
+            "exhibits": exhibits,
         },
     )
 
