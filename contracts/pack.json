@@ -3,6 +3,7 @@
   "kernel_requires": ">=1.0.0,<2.0.0",
   "scaffold": false,
   "project": {
+    "mode": "empirical",
     "package_name": "l2-l1-rent-analysis",
     "primary_metric_label": "Settlement Take Rate (STR)"
   },
@@ -10,6 +11,7 @@
     "network_workstreams": ["W1", "W2", "W3", "W-Lit"],
     "local_etl_workstreams": ["W1", "W2"],
     "operator_workstream": "W9",
+    "literature_workstream": "W-Lit",
     "integration_ready_eligible_workstreams": ["W0", "W3", "W8", "W9"]
   },
   "paths": {
@@ -17,6 +19,7 @@
     "panel_schema_index": "contracts/schemas/panel_schema.yaml",
     "primary_panel_schema": "contracts/schemas/panel_schema_str_v1.yaml",
     "decomposition_panel_schema": "contracts/schemas/panel_schema_decomp_v1.yaml",
+    "rent_components_schema": "contracts/schemas/rent_components_v1.json",
     "primary_panel": "data/processed/panels/daily_rollup_panel.csv",
     "primary_panel_sample": "data/samples/panels/daily_rollup_panel_sample.csv",
     "primary_panel_manifest_glob": "data/processed_manifest/daily_rollup_panel_*.json",
@@ -46,7 +49,33 @@
     "render_manifest": "render_manifest.json",
     "verified_include_targets": ["reports/tables/str_regime_summary.md"]
   },
+  "presentation": {
+    "workflow_poster": {
+      "research_question": "Is Ethereum L1's settlement take rate on rollup economics rising, stable, or decaying as L2 usage scales?",
+      "metric_definition": "STR_t = (Sum_i RentPaid_i,t) / (Sum_i L2Fees_i,t)",
+      "vertical_slice": [
+        {"task_id": "T030", "accent": "teal", "title": "ETL Snapshot + Golden Sample", "description": "Fetch growthepie exports, write raw snapshots and manifests, then commit the small tracked panel sample."},
+        {"task_id": "T040", "accent": "rust", "title": "Metric Module + Tests", "description": "Compute Settlement Take Rate from the sample only, with explicit handling for missingness and zero denominators."},
+        {"task_id": "T050", "accent": "slate", "title": "Validation Checks", "description": "Coverage, accounting identity, non-negativity, and STR sanity get audited before analysis."},
+        {"task_id": "T060", "accent": "green", "title": "Public Figure", "description": "The final deterministic output becomes a figure under reports/figures/."}
+      ]
+    }
+  },
   "analysis": {
+    "panel_columns": {
+      "date": "date_utc",
+      "entity": "rollup_id",
+      "denominator": "l2_fees_eth",
+      "numerator": "rent_paid_eth",
+      "metric": "str"
+    },
+    "regime_series": ["str", "rent_paid_eth", "l2_fees_eth"],
+    "regime_defaults": {
+      "series": "str",
+      "max_breaks": 3,
+      "min_segment": 90,
+      "imposed_date": "2024-03-13"
+    },
     "validation_bundle": [
       "reports/validation/rollup_panel_validation.json",
       "reports/validation/l1_rent_decomposition_validation.json",

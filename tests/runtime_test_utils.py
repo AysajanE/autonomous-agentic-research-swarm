@@ -302,12 +302,23 @@ def write_framework_json(
         for key, value in overrides.items():
             payload[key] = value
     pack = json.loads((REPO_ROOT / "contracts/pack.json").read_text(encoding="utf-8"))
+    pack["project"]["mode"] = mode
     pack["project"]["package_name"] = "test-project"
     pack["project"]["primary_metric_label"] = "Fixture metric"
     pack["analysis"]["outputs"] = {
         key: value.replace("str_", "fixture_")
         for key, value in pack["analysis"]["outputs"].items()
     }
+    if mode in {"modeling", "hybrid"}:
+        pack["paths"].update(
+            {
+                "model_spec": "contracts/model_spec.md",
+                "instances_dir": "contracts/instances",
+                "experiments_dir": "contracts/experiments",
+            }
+        )
+        pack["analysis"]["outputs"]["model_summary"] = "reports/models/summary.json"
+        pack["analysis"]["exhibits"]["model_result"] = "fixture_model_result"
     if overrides and isinstance(overrides.get("network_workstreams"), list):
         pack["workflow"]["network_workstreams"] = overrides["network_workstreams"]
     integration = overrides.get("integration_ready_policy") if overrides else None
@@ -382,6 +393,7 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
         "contracts/schemas/panel_schema.yaml",
         "contracts/schemas/panel_schema_str_v1.yaml",
         "contracts/schemas/panel_schema_decomp_v1.yaml",
+        "contracts/schemas/rent_components_v1.json",
         "contracts/schemas/swarm_run_manifest_v1.yaml",
         "contracts/schemas/swarm_run_manifest_v2.json",
         "contracts/schemas/judge_review_log_v1.yaml",

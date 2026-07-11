@@ -102,17 +102,11 @@ DECOMP_HEADERS = list(
         Path(__file__).resolve().parents[2], "paths.decomposition_panel_schema"
     )
 )
-COMPONENT_HEADERS = [
-    "date_utc",
-    "rollup_id",
-    "batch_submissions_eth",
-    "proof_submissions_eth",
-    "state_updates_eth",
-    "execution_base_fee_burn_eth",
-    "execution_priority_fee_eth",
-    "blob_fee_burn_eth",
-    "rent_paid_eth",
-]
+COMPONENT_HEADERS = list(
+    dataframe_schema_field_names(
+        Path(__file__).resolve().parents[2], "paths.rent_components_schema"
+    )
+)
 SAMPLE_ROLLUPS = ("arbitrum", "base", "optimism")
 SAMPLE_DATES = ("2024-03-13", "2024-03-14", "2024-03-15")
 ROLLUPS_WITHOUT_BATCHER_ADDRESSES = {"scroll"}

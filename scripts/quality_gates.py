@@ -31,6 +31,7 @@ from typing import Any
 
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
+_EXECUTING_KERNEL_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
@@ -945,7 +946,9 @@ def _validate_json_schema(
                     "best_variant_failures": best,
                 }
             )
-        return failures
+        # Continue with the surrounding schema after evaluating the composition
+        # keyword; pack schemas use oneOf for mode-specific requirements plus
+        # common top-level constraints.
 
     expected_type = schema.get("type")
     if isinstance(expected_type, str):
@@ -1076,6 +1079,10 @@ def _validate_required_keys(data: object, required_keys: set[str], prefix: str) 
     return failures
 
 
+def _configured_regime_series(repo: Path = Path(".")) -> tuple[str, ...]:
+    return tuple(pack_value(load_pack_config(repo), "analysis.regime_series", list))
+
+
 def _semver_tuple(value: object) -> tuple[int, int, int] | None:
     if not isinstance(value, str):
         return None
@@ -1085,19 +1092,28 @@ def _semver_tuple(value: object) -> tuple[int, int, int] | None:
     return tuple(int(component) for component in match.groups())
 
 
-def check_pack_compat(repo: Path = Path(".")) -> GateResult:
+def check_pack_compat(
+    repo: Path = Path("."),
+    *,
+    executing_kernel_root: Path | None = None,
+) -> GateResult:
     """Validate the versioned kernel/pack boundary before any other work."""
 
     repo = repo.resolve()
+    kernel_root = (executing_kernel_root or _EXECUTING_KERNEL_ROOT).resolve()
     pack, pack_error = _load_json_file(repo / "contracts" / "pack.json")
-    descriptor, descriptor_error = _load_json_file(repo / "contracts" / "kernel_interface.json")
+    descriptor_path = kernel_root / "contracts" / "kernel_interface.json"
+    descriptor, descriptor_error = _load_json_file(descriptor_path)
     failures: list[object] = []
     if pack_error is not None or pack is None:
         failures.append(f"pack_config_unreadable:{pack_error}")
     else:
         failures.extend(
             {"schema": "pack", **issue}
-            for issue in _schema_failures(pack, repo / "contracts" / "schemas" / "pack_config_v1.json")
+            for issue in _schema_failures(
+                pack,
+                kernel_root / "contracts" / "schemas" / "pack_config_v1.json",
+            )
         )
     if descriptor_error is not None or descriptor is None:
         failures.append(f"kernel_interface_unreadable:{descriptor_error}")
@@ -1106,7 +1122,7 @@ def check_pack_compat(repo: Path = Path(".")) -> GateResult:
             {"schema": "kernel_interface", **issue}
             for issue in _schema_failures(
                 descriptor,
-                repo / "contracts" / "schemas" / "kernel_interface_v1.json",
+                kernel_root / "contracts" / "schemas" / "kernel_interface_v1.json",
             )
         )
     required = pack.get("kernel_requires") if isinstance(pack, dict) else None
@@ -1136,6 +1152,7 @@ def check_pack_compat(repo: Path = Path(".")) -> GateResult:
             "kernel_version": version,
             "kernel_requires": required,
             "compatible": compatible,
+            "descriptor_source": descriptor_path.as_posix(),
             "failures": failures,
         },
     )
@@ -1143,6 +1160,85 @@ def check_pack_compat(repo: Path = Path(".")) -> GateResult:
 
 def gate_pack_compat() -> GateResult:
     return check_pack_compat(Path("."))
+
+
+def _scaffold_instantiation_evidence(repo: Path) -> list[str]:
+    """Return mechanically observable evidence that a pack has been instantiated.
+
+    README files and placeholder markers are ignored. Any claim, computed paper value,
+    processed artifact, run manifest, non-scaffold paper-registry entry, or built report
+    output makes the scaffold assertion ineligible.
+    """
+
+    repo = repo.resolve()
+    evidence: list[str] = []
+    claims, claims_error = _load_json_file(repo / "contracts" / "claims.yaml")
+    if claims_error is not None:
+        evidence.append(f"contracts/claims.yaml:unreadable:{claims_error}")
+    elif isinstance(claims, dict) and claims.get("claims"):
+        evidence.append("contracts/claims.yaml:claims_present")
+
+    if (repo / "reports" / "paper" / "paper_values.json").is_file():
+        evidence.append("reports/paper/paper_values.json")
+
+    ignored_names = {"README.md", ".gitkeep"}
+    processed_root = repo / "data" / "processed"
+    if processed_root.is_dir():
+        evidence.extend(
+            path.relative_to(repo).as_posix()
+            for path in sorted(processed_root.rglob("*"))
+            if path.is_file() and path.name not in ignored_names
+        )
+
+    run_root = repo / "reports" / "status" / "swarm_runs"
+    if run_root.is_dir():
+        evidence.extend(
+            path.relative_to(repo).as_posix()
+            for path in sorted(run_root.rglob("*"))
+            if path.is_file() and path.name not in ignored_names
+        )
+
+    registry_path = repo / "reports" / "paper" / "registry.json"
+    if registry_path.is_file():
+        registry, registry_error = _load_json_file(registry_path)
+        entries = registry.get("entries") if registry_error is None and isinstance(registry, dict) else None
+        if registry_error is not None or not isinstance(entries, list):
+            evidence.append(f"reports/paper/registry.json:unreadable:{registry_error}")
+        elif any(not isinstance(item, dict) or item.get("status") != "scaffold" for item in entries):
+            evidence.append("reports/paper/registry.json:non_scaffold_entries")
+
+    for relroot in ("reports/figures", "reports/tables", "reports/models", "reports/exhibits"):
+        output_root = repo / relroot
+        if not output_root.is_dir():
+            continue
+        evidence.extend(
+            path.relative_to(repo).as_posix()
+            for path in sorted(output_root.rglob("*"))
+            if path.is_file() and path.name not in ignored_names
+        )
+    return sorted(set(evidence))
+
+
+def check_scaffold_safety(repo: Path = Path(".")) -> GateResult:
+    repo = repo.resolve()
+    pack, pack_error = _load_json_file(repo / "contracts" / "pack.json")
+    asserted = isinstance(pack, dict) and pack.get("scaffold") is True
+    evidence = _scaffold_instantiation_evidence(repo) if asserted else []
+    failures = ["scaffold_asserted_on_instantiated_repo"] if asserted and evidence else []
+    return GateResult(
+        ok=not failures,
+        details={
+            "scaffold_asserted": asserted,
+            "scaffold_eligible": asserted and not evidence,
+            "instantiation_evidence": evidence,
+            "pack_error": pack_error,
+            "failures": failures,
+        },
+    )
+
+
+def gate_scaffold_safety() -> GateResult:
+    return check_scaffold_safety(Path("."))
 
 
 HISTORICAL_EXEMPTIONS_PATH = Path("contracts/historical_exemptions.json")
@@ -1921,12 +2017,15 @@ def gate_framework_contract() -> GateResult:
 
     if not contract.network_workstreams:
         failures.append("pack_workflow_network_workstreams_empty")
-    if not contract.local_etl_workstreams:
+    if contract.project_mode in {"empirical", "hybrid"} and not contract.local_etl_workstreams:
         failures.append("pack_workflow_local_etl_workstreams_empty")
     if not contract.operator_workstream:
         failures.append("pack_workflow_operator_workstream_empty")
     if not contract.integration_ready_eligible_workstreams:
         failures.append("pack_workflow_integration_ready_eligible_workstreams_empty")
+    pack_mode = contract.pack_config.get("project", {}).get("mode") if isinstance(contract.pack_config.get("project"), dict) else None
+    if pack_mode != contract.project_mode:
+        failures.append(f"pack_project_mode_mismatch:{pack_mode}:{contract.project_mode}")
 
     if contract.scientific_review_role != DEFAULT_SCIENTIFIC_REVIEW_ROLE:
         failures.append(f"invalid_scientific_review_role:{contract.scientific_review_role}")
@@ -1986,7 +2085,10 @@ def gate_repo_structure() -> GateResult:
         return GateResult(ok=False, details={"failures": [str(exc)]})
 
     registry_enabled = _coerce_bool(contract.features.get("registry"), default=(contract.project_mode != "modeling"))
-    scaffold = contract.pack_config.get("scaffold") is True
+    scaffold = (
+        contract.pack_config.get("scaffold") is True
+        and not _scaffold_instantiation_evidence(Path("."))
+    )
     if scaffold:
         required_paths = [
             "README.md",
@@ -2044,9 +2146,6 @@ def gate_repo_structure() -> GateResult:
         "contracts/schemas/experiment_manifest_v1.json",
         "contracts/schemas/raw_manifest_v1.json",
         "contracts/schemas/processed_manifest_v2.json",
-        pack_value(contract.pack_config, "paths.panel_schema_index"),
-        pack_value(contract.pack_config, "paths.primary_panel_schema"),
-        pack_value(contract.pack_config, "paths.decomposition_panel_schema"),
         "contracts/schemas/swarm_run_manifest_v1.yaml",
         "contracts/schemas/swarm_run_manifest_v2.json",
         "contracts/schemas/judge_review_log_v1.yaml",
@@ -2084,6 +2183,16 @@ def gate_repo_structure() -> GateResult:
     ]
 
     required_paths.extend(contract.prompt_templates.values())
+
+    if contract.project_mode in {"empirical", "hybrid"}:
+        required_paths.extend(
+            [
+                pack_value(contract.pack_config, "paths.panel_schema_index"),
+                pack_value(contract.pack_config, "paths.primary_panel_schema"),
+                pack_value(contract.pack_config, "paths.decomposition_panel_schema"),
+                pack_value(contract.pack_config, "paths.rent_components_schema"),
+            ]
+        )
 
     if registry_enabled:
         required_paths.extend(
@@ -4406,7 +4515,11 @@ def _active_statistical_config() -> tuple[
                     actual=regime.get("method"),
                 )
             )
-        if regime.get("series") not in {"str", "rent_paid_eth", "l2_fees_eth"}:
+        try:
+            allowed_regime_series = set(_configured_regime_series())
+        except ValueError:
+            allowed_regime_series = set()
+        if regime.get("series") not in allowed_regime_series:
             failures.append(
                 _science_failure(
                     "invalid_prereg_regime_series",
@@ -6791,11 +6904,23 @@ def gate_recall_audit() -> GateResult:
             for claim in claims if isinstance(claims, list)
         )
         if corpus_entries or has_literature_claim:
+            try:
+                literature_workstream = pack_value(
+                    load_pack_config(),
+                    "workflow.literature_workstream",
+                )
+            except ValueError:
+                literature_workstream = "literature"
             return GateResult(
                 ok=False,
                 details={
                     "status": "missing",
-                    "failures": [_science_failure("recall_audit_required", subject="W-Lit")],
+                    "failures": [
+                        _science_failure(
+                            "recall_audit_required",
+                            subject=literature_workstream,
+                        )
+                    ],
                 },
             )
         return GateResult(
@@ -10465,6 +10590,77 @@ def _statement_binding_resolves(
     return value is not None and value != "" and value != [] and value != {}
 
 
+def check_manuscript_section_profile(
+    repo: Path = Path("."),
+    *,
+    sections: dict[str, object] | None = None,
+) -> GateResult:
+    """Validate the configured paper entrypoint against its venue section profile."""
+
+    repo = repo.resolve()
+    failures: list[dict[str, object]] = []
+    if sections is None:
+        sections, sections_error = _load_yaml_object(repo / "contracts" / "manuscript_sections.yaml")
+        if sections_error is not None or sections is None:
+            failures.append(
+                _m4c_failure(
+                    "venue_compliance_sections_contract_invalid",
+                    subject="contracts/manuscript_sections.yaml",
+                    actual=sections_error,
+                )
+            )
+            sections = {}
+    try:
+        pack = load_pack_config(repo)
+        manuscript_rel = pack_value(pack, "paper.entrypoint")
+    except ValueError as exc:
+        failures.append(_m4c_failure("venue_compliance_pack_invalid", actual=str(exc)))
+        manuscript_rel = "reports/paper/index.qmd"
+    manuscript_path = repo / manuscript_rel
+    manuscript_text = manuscript_path.read_text(encoding="utf-8") if manuscript_path.is_file() else ""
+    actual_headings = {
+        match.group(0).strip()
+        for match in re.finditer(r"^##\s+.+?\s*$", manuscript_text, flags=re.MULTILINE)
+    }
+    canonical = sections.get("canonical_section_ids")
+    heading_map = sections.get("section_headings")
+    canonical_ids = [str(item) for item in canonical] if isinstance(canonical, list) else []
+    matched: set[str] = set()
+    if not canonical_ids or not isinstance(heading_map, dict):
+        failures.append(_m4c_failure("venue_compliance_section_profile_invalid"))
+    else:
+        for section_id in canonical_ids:
+            expected = heading_map.get(section_id)
+            if not isinstance(expected, str) or not expected.startswith("## "):
+                failures.append(
+                    _m4c_failure(
+                        "venue_compliance_section_heading_invalid",
+                        subject=section_id,
+                        actual=expected,
+                    )
+                )
+            elif expected not in actual_headings:
+                failures.append(
+                    _m4c_failure(
+                        "venue_compliance_required_section_missing",
+                        subject=section_id,
+                        expected=expected,
+                    )
+                )
+            else:
+                matched.add(section_id)
+    return GateResult(
+        ok=not failures,
+        details={
+            "paper_entrypoint": manuscript_rel,
+            "canonical_section_ids": canonical_ids,
+            "matched_section_ids": sorted(matched),
+            "actual_headings": sorted(actual_headings),
+            "failures": failures,
+        },
+    )
+
+
 def check_venue_compliance(
     repo: Path = Path("."),
     *,
@@ -10500,7 +10696,9 @@ def check_venue_compliance(
     consent = venue.get("venue_consent") if isinstance(venue.get("venue_consent"), dict) else {}
     author = authorship.get("human_author_of_record")
     author_consent = authorship.get("human_author_consent") if isinstance(authorship.get("human_author_consent"), dict) else {}
-    manuscript_path = repo / "reports/paper/index.qmd"
+    section_profile = check_manuscript_section_profile(repo, sections=sections)
+    failures.extend(section_profile.details["failures"])
+    manuscript_path = repo / str(section_profile.details["paper_entrypoint"])
     manuscript_text = manuscript_path.read_text(encoding="utf-8") if manuscript_path.is_file() else ""
     front_matter_author = re.search(r"(?m)^author:\s*(.*?)\s*$", manuscript_text)
     expected_author = "null" if author is None else json.dumps(str(author), ensure_ascii=False)
@@ -10541,7 +10739,7 @@ def check_venue_compliance(
 
     canonical = sections.get("canonical_section_ids")
     canonical_ids = {str(item) for item in canonical} if isinstance(canonical, list) else set()
-    manuscript_ids = _paper_section_registry_ids(repo / "reports/paper/index.qmd")
+    manuscript_ids = set(section_profile.details["matched_section_ids"])
     if not canonical_ids or manuscript_ids != canonical_ids:
         failures.append(_m4c_failure("venue_compliance_canonical_sections_mismatch", expected=sorted(canonical_ids), actual=sorted(manuscript_ids)))
     registry, registry_error = _load_json_file(repo / "reports/paper/registry.json")
@@ -10650,6 +10848,7 @@ def gate_replication_package_audit(*, release_perimeter: bool = False) -> GateRe
 
 _CORE_GATE_NAMES = (
     "pack_compat",
+    "scaffold_safety",
     "framework_contract",
     "repo_structure",
     "project_contract",
@@ -10749,8 +10948,8 @@ def _active_gates(mode: str, task_kind: str | None = None) -> tuple[str, ...]:
         scaffold = load_pack_config().get("scaffold") is True
     except ValueError:
         scaffold = False
-    if scaffold:
-        staged = {"pack_compat", "framework_contract", "repo_structure", "project_contract", "program_conformance"}
+    if scaffold and not _scaffold_instantiation_evidence(Path(".")):
+        staged = {"pack_compat", "scaffold_safety", "framework_contract", "repo_structure", "project_contract", "program_conformance"}
         return tuple(name for name in _ALL_GATE_NAMES if name in staged)
     active = set(_CORE_GATE_NAMES) | set(_MODE_INDEPENDENT_SCIENCE_GATES)
     if mode == "empirical":
@@ -10778,6 +10977,7 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
     active = set(_active_gates(mode, task_kind))
     functions = {
         "pack_compat": gate_pack_compat,
+        "scaffold_safety": gate_scaffold_safety,
         "framework_contract": gate_framework_contract,
         "repo_structure": gate_repo_structure,
         "project_contract": gate_project_contract,

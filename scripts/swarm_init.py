@@ -35,19 +35,22 @@ def _scaffold_pack(mode: str) -> dict[str, object]:
     base["scaffold"] = True
     base["project"] = {
         "package_name": f"new-{mode}-research-pack",
-        "primary_metric_label": "Primary research metric",
+        "mode": mode,
+        "primary_metric_label": "Primary model result" if mode == "modeling" else "Primary research metric",
     }
     base["workflow"] = {
         "network_workstreams": ["data", "literature"],
-        "local_etl_workstreams": ["data"],
+        "local_etl_workstreams": [] if mode == "modeling" else ["data"],
         "operator_workstream": "operations",
+        "literature_workstream": "literature",
         "integration_ready_eligible_workstreams": ["contracts", "integration", "operations"],
     }
-    base["paths"] = {
+    empirical_paths = {
         "registry": "registry/entities.csv",
         "panel_schema_index": "contracts/schemas/panel_schema.yaml",
         "primary_panel_schema": "contracts/schemas/primary_panel_v1.json",
         "decomposition_panel_schema": "contracts/schemas/decomposition_panel_v1.json",
+        "rent_components_schema": "contracts/schemas/components_v1.json",
         "primary_panel": "data/processed/primary_panel.csv",
         "primary_panel_sample": "data/samples/primary_panel_sample.csv",
         "primary_panel_manifest_glob": "data/processed_manifest/primary_panel_*.json",
@@ -62,6 +65,17 @@ def _scaffold_pack(mode: str) -> dict[str, object]:
         "decomposition_sample": "data/samples/decomposition_sample.csv",
         "decomposition_manifest_pattern": "data/processed_manifest/decomposition_{date}.json",
     }
+    modeling_paths = {
+        "model_spec": "contracts/model_spec.md",
+        "instances_dir": "contracts/instances",
+        "experiments_dir": "contracts/experiments",
+    }
+    if mode == "empirical":
+        base["paths"] = empirical_paths
+    elif mode == "modeling":
+        base["paths"] = modeling_paths
+    else:
+        base["paths"] = {**empirical_paths, **modeling_paths}
     base["protocol"] = {"required_headings": ["## Inclusion criteria"]}
     base["paper"] = {
         "entrypoint": "reports/paper/index.qmd",
@@ -70,8 +84,34 @@ def _scaffold_pack(mode: str) -> dict[str, object]:
         "render_manifest": "render_manifest.json",
         "verified_include_targets": [],
     }
-    base["analysis"] = {
+    base["presentation"] = {
+        "workflow_poster": {
+            "research_question": f"What is the primary {mode} research question?",
+            "metric_definition": base["project"]["primary_metric_label"],
+            "vertical_slice": [
+                {"task_id": "T010", "accent": "teal", "title": "Contracts", "description": "Define the project-owned scientific contracts."},
+                {"task_id": "T020", "accent": "rust", "title": "Implementation", "description": "Author the pack-owned science body."},
+                {"task_id": "T030", "accent": "slate", "title": "Validation", "description": "Validate declared artifacts and assumptions."},
+                {"task_id": "T040", "accent": "green", "title": "Report", "description": "Build the reviewable research output."},
+            ],
+        }
+    }
+    empirical_analysis = {
         "validation_bundle": [],
+        "panel_columns": {
+            "date": "observation_date",
+            "entity": "entity_id",
+            "denominator": "denominator_value",
+            "numerator": "numerator_value",
+            "metric": "primary_metric",
+        },
+        "regime_series": ["primary_metric", "numerator_value", "denominator_value"],
+        "regime_defaults": {
+            "series": "primary_metric",
+            "max_breaks": 1,
+            "min_segment": 2,
+            "imposed_date": "2000-01-01",
+        },
         "outputs": {
             "ecosystem_figure": "reports/figures/primary.svg",
             "ecosystem_figure_data": "reports/figures/primary.data.json",
@@ -88,6 +128,31 @@ def _scaffold_pack(mode: str) -> dict[str, object]:
             "regime_summary": "summary_table",
         },
     }
+    modeling_analysis = {
+        "validation_bundle": [],
+        "outputs": {
+            "model_summary": "reports/models/summary.json",
+            "paper_values": "reports/paper/paper_values.json",
+            "exhibits_manifest": "reports/exhibits/manifest.json",
+        },
+        "exhibits": {"model_result": "primary_model_result"},
+    }
+    if mode == "empirical":
+        base["analysis"] = empirical_analysis
+    elif mode == "modeling":
+        base["analysis"] = modeling_analysis
+    else:
+        base["analysis"] = {
+            **empirical_analysis,
+            "outputs": {
+                **empirical_analysis["outputs"],
+                "model_summary": "reports/models/summary.json",
+            },
+            "exhibits": {
+                **empirical_analysis["exhibits"],
+                "model_result": "primary_model_result",
+            },
+        }
     base["historical_manifest_replacements"] = {}
     return base
 
@@ -107,6 +172,12 @@ def create_scaffold(output: Path, mode: str) -> Path:
         "contracts/schemas/judge_review_log_v2.json",
         "contracts/prompts/worker.md",
         "contracts/prompts/operator.md",
+        "contracts/prompts/planner.md",
+        "contracts/prompts/judge.md",
+        "docs/prompts/planner.md",
+        "docs/prompts/worker.md",
+        "docs/prompts/judge.md",
+        "docs/prompts/operator.md",
     ):
         _copy_kernel_contract(output, relpath)
     _write_json(output, "contracts/pack.json", _scaffold_pack(mode))
@@ -131,16 +202,26 @@ def create_scaffold(output: Path, mode: str) -> Path:
         _write_text(output, f".orchestrator/{folder}/README.md", f"# {folder}\n")
     for folder in ("status", "figures", "tables", "paper", "validation", "models", "replication", "exhibits"):
         _write_text(output, f"reports/{folder}/README.md", f"# {folder}\n\nScaffold; no built artifacts.\n")
+    _write_text(
+        output,
+        "src/analysis/project_analysis.py",
+        '"""Pack-owned science placeholder. Replace with this project\'s analysis implementation."""\n\n'
+        "def main() -> int:\n"
+        "    raise SystemExit(\"project science body is not implemented\")\n\n"
+        "if __name__ == \"__main__\":\n"
+        "    raise SystemExit(main())\n",
+    )
 
     kernel = KERNEL_ROOT.as_posix()
     _write_text(
         output,
         "Makefile",
-        ".PHONY: gate test\n"
+        ".PHONY: gate test scaffold-task-gate\n"
         f"KERNEL_ROOT ?= {kernel}\n"
         "PYTHON ?= python3.11\n\n"
         "gate:\n\t$(PYTHON) $(KERNEL_ROOT)/scripts/quality_gates.py --repo $(CURDIR)\n\n"
-        "test: gate\n",
+        "test: gate\n\n"
+        "scaffold-task-gate:\n\t@test -f contracts/pack.json\n",
     )
     _write_text(
         output,
@@ -148,8 +229,9 @@ def create_scaffold(output: Path, mode: str) -> Path:
         f"# New {mode} research pack\n\n"
         "This is an inactive project-pack scaffold. Replace `contracts/pack.json`, "
         "`contracts/project.yaml`, the referenced program template, venue/authorship references, "
-        "and preregistration locks before creating tasks. Kernel code remains under `KERNEL_ROOT`; "
-        "starting a new project requires contract swaps, not edits to kernel scripts or source.\n\n"
+        "and preregistration locks before creating tasks. Kernel code remains under `KERNEL_ROOT/scripts`; "
+        "a new pack must also replace the placeholder under `src/analysis/` with its own science code. "
+        "The scaffold validates contracts and orchestration, but does not provide a runnable science pipeline.\n\n"
         "Run `make gate` to verify pack compatibility and scaffold shape.\n",
     )
     return output

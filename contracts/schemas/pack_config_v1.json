@@ -3,7 +3,51 @@
   "$id": "research_swarm.pack.v1.schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "kernel_requires", "scaffold", "project", "workflow", "paths", "protocol", "paper", "analysis"],
+  "required": ["schema_version", "kernel_requires", "scaffold", "project", "workflow", "paths", "protocol", "paper", "presentation", "analysis", "historical_manifest_replacements"],
+  "oneOf": [
+    {
+      "properties": {
+        "project": {"properties": {"mode": {"const": "empirical"}}},
+        "paths": {
+          "required": ["registry", "panel_schema_index", "primary_panel_schema", "decomposition_panel_schema", "rent_components_schema", "primary_panel", "primary_panel_sample", "primary_panel_manifest_glob", "primary_panel_manifest_pattern", "vendor_panel", "vendor_panel_sample", "vendor_panel_manifest_pattern", "rent_components", "rent_components_sample", "rent_components_manifest_pattern", "decomposition", "decomposition_sample", "decomposition_manifest_pattern"]
+        },
+        "analysis": {
+          "required": ["panel_columns", "regime_series", "regime_defaults"],
+          "properties": {
+            "outputs": {"required": ["ecosystem_figure", "ecosystem_figure_data", "regime_figure", "regime_figure_data", "regime_table_csv", "regime_table_markdown", "paper_values", "exhibits_manifest"]},
+            "exhibits": {"required": ["ecosystem_timeseries", "post_regime_figure", "regime_summary"]}
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "project": {"properties": {"mode": {"const": "modeling"}}},
+        "paths": {"required": ["model_spec", "instances_dir", "experiments_dir"]},
+        "analysis": {
+          "properties": {
+            "outputs": {"required": ["model_summary", "paper_values", "exhibits_manifest"]},
+            "exhibits": {"required": ["model_result"]}
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "project": {"properties": {"mode": {"const": "hybrid"}}},
+        "paths": {
+          "required": ["registry", "panel_schema_index", "primary_panel_schema", "decomposition_panel_schema", "rent_components_schema", "primary_panel", "primary_panel_sample", "primary_panel_manifest_glob", "primary_panel_manifest_pattern", "vendor_panel", "vendor_panel_sample", "vendor_panel_manifest_pattern", "rent_components", "rent_components_sample", "rent_components_manifest_pattern", "decomposition", "decomposition_sample", "decomposition_manifest_pattern", "model_spec", "instances_dir", "experiments_dir"]
+        },
+        "analysis": {
+          "required": ["panel_columns", "regime_series", "regime_defaults"],
+          "properties": {
+            "outputs": {"required": ["ecosystem_figure", "ecosystem_figure_data", "regime_figure", "regime_figure_data", "regime_table_csv", "regime_table_markdown", "model_summary", "paper_values", "exhibits_manifest"]},
+            "exhibits": {"required": ["ecosystem_timeseries", "post_regime_figure", "regime_summary", "model_result"]}
+          }
+        }
+      }
+    }
+  ],
   "properties": {
     "schema_version": {"const": "research_swarm.pack.v1"},
     "kernel_requires": {"type": "string", "pattern": "^>=[0-9]+\\.[0-9]+\\.[0-9]+,<([0-9]+)\\.([0-9]+)\\.([0-9]+)$"},
@@ -11,8 +55,9 @@
     "project": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["package_name", "primary_metric_label"],
+      "required": ["mode", "package_name", "primary_metric_label"],
       "properties": {
+        "mode": {"enum": ["empirical", "modeling", "hybrid"]},
         "package_name": {"type": "string", "minLength": 1},
         "primary_metric_label": {"type": "string", "minLength": 1}
       }
@@ -20,11 +65,12 @@
     "workflow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["network_workstreams", "local_etl_workstreams", "operator_workstream", "integration_ready_eligible_workstreams"],
+      "required": ["network_workstreams", "local_etl_workstreams", "operator_workstream", "literature_workstream", "integration_ready_eligible_workstreams"],
       "properties": {
         "network_workstreams": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
         "local_etl_workstreams": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
         "operator_workstream": {"type": "string", "minLength": 1},
+        "literature_workstream": {"type": "string", "minLength": 1},
         "integration_ready_eligible_workstreams": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
       }
     },
@@ -33,7 +79,9 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["required_headings"],
-      "properties": {"required_headings": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true}}
+      "properties": {
+        "required_headings": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
     },
     "paper": {
       "type": "object",
@@ -47,12 +95,67 @@
         "verified_include_targets": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
       }
     },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow_poster"],
+      "properties": {
+        "workflow_poster": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["research_question", "metric_definition", "vertical_slice"],
+          "properties": {
+            "research_question": {"type": "string", "minLength": 1},
+            "metric_definition": {"type": "string", "minLength": 1},
+            "vertical_slice": {
+              "type": "array",
+              "minItems": 4,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["task_id", "accent", "title", "description"],
+                "properties": {
+                  "task_id": {"type": "string", "minLength": 1},
+                  "accent": {"enum": ["teal", "rust", "slate", "green", "gold"]},
+                  "title": {"type": "string", "minLength": 1},
+                  "description": {"type": "string", "minLength": 1}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "analysis": {
       "type": "object",
       "additionalProperties": false,
       "required": ["validation_bundle", "outputs", "exhibits"],
       "properties": {
         "validation_bundle": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "panel_columns": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["date", "entity", "denominator", "numerator", "metric"],
+          "properties": {
+            "date": {"type": "string", "minLength": 1},
+            "entity": {"type": "string", "minLength": 1},
+            "denominator": {"type": "string", "minLength": 1},
+            "numerator": {"type": "string", "minLength": 1},
+            "metric": {"type": "string", "minLength": 1}
+          }
+        },
+        "regime_series": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "regime_defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["series", "max_breaks", "min_segment", "imposed_date"],
+          "properties": {
+            "series": {"type": "string", "minLength": 1},
+            "max_breaks": {"type": "integer", "minimum": 1},
+            "min_segment": {"type": "integer", "minimum": 1},
+            "imposed_date": {"type": "string", "minLength": 1}
+          }
+        },
         "outputs": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
         "exhibits": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}}
       }

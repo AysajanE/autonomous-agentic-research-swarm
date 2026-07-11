@@ -4363,7 +4363,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_lit_review(args: argparse.Namespace) -> int:
-    """Route the operator-facing command to the provenance-bounded W-Lit CLI."""
+    """Route the operator-facing command to the provenance-bounded literature CLI."""
     repo = _repo_root()
     forwarded = [args.literature_command]
     if args.literature_command == "acquire":
@@ -10149,7 +10149,7 @@ def build_parser() -> argparse.ArgumentParser:
     costs.set_defaults(func=cmd_costs)
 
     lit_review = subparsers.add_parser(
-        "lit-review", help="Acquire, audit, or synthesize the manifested W-Lit corpus"
+        "lit-review", help="Acquire, audit, or synthesize the manifested literature corpus"
     )
     lit_sub = lit_review.add_subparsers(dest="literature_command", required=True)
     lit_acquire = lit_sub.add_parser("acquire", help="Snapshot literature sources")

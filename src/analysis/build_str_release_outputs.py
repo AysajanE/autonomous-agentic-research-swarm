@@ -495,7 +495,7 @@ def write_figure_data_sidecars(
     )
     regime_payload: dict[str, object] = {
         **common,
-        "figure": "reports/figures/str_post_dencun_regimes.svg",
+        "figure": REGIME_FIGURE_PATH.relative_to(REPO_ROOT).as_posix(),
         "dates": _iso_dates(post["date_utc"]),
         "series": {
             "l1_blob_base_fee_gwei": {"unit": "gwei", "values": _rounded_values(post["l1_blob_base_fee_gwei"])},

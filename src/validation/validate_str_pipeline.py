@@ -45,18 +45,7 @@ def _dataframe_schema_fields(config_key: str) -> tuple[tuple[str, ...], tuple[st
 
 PANEL_REQUIRED_COLUMNS, PANEL_OPTIONAL_COLUMNS = _dataframe_schema_fields("paths.primary_panel_schema")
 DECOMP_REQUIRED_COLUMNS, DECOMP_OPTIONAL_COLUMNS = _dataframe_schema_fields("paths.decomposition_panel_schema")
-
-COMPONENT_REQUIRED_COLUMNS = (
-    "date_utc",
-    "rollup_id",
-    "batch_submissions_eth",
-    "proof_submissions_eth",
-    "state_updates_eth",
-    "blob_fee_burn_eth",
-    "execution_base_fee_burn_eth",
-    "execution_priority_fee_eth",
-    "rent_paid_eth",
-)
+COMPONENT_REQUIRED_COLUMNS, _COMPONENT_OPTIONAL_COLUMNS = _dataframe_schema_fields("paths.rent_components_schema")
 COMPONENT_TX_FAMILY_COLUMNS = (
     "batch_submissions_eth",
     "proof_submissions_eth",

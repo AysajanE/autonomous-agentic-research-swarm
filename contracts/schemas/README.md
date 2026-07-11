@@ -9,6 +9,7 @@ runtime has no PyYAML or dataframe-schema dependency.
 Canonical schemas for this project:
 - `panel_schema_str_v1.yaml` (minimum daily rollup STR panel)
 - `panel_schema_decomp_v1.yaml` (daily Ethereum L1 rent decomposition)
+- `rent_components_v1.json` (pack-owned STR rent-component field order and required columns)
 - `instance_manifest_v1.json` (bridge-generated and synthetic variants)
 - `experiment_spec_v1.json` (Lock A experiment-design surface)
 - `experiment_manifest_v1.json` (solver-run registration surface)
@@ -21,5 +22,5 @@ Canonical schemas for this project:
 
 Manifest schemas are loaded by `scripts/quality_gates.py` (and release assembly
 for release manifests). Dataframe field order/nullability is loaded from the
-versioned panel schemas by ETL writers and validation. Do not duplicate those
+versioned dataframe schemas by ETL writers and validation. Do not duplicate those
 structures in Python.
