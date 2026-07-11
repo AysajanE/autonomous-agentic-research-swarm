@@ -1,0 +1,5 @@
+schema_version: research_swarm.hybrid_fixture.v1
+source_manifest: data/processed_manifest/source.json
+instance_manifest: modeling/instance_manifest.json
+experiment_output: bridge/experiment_output.json
+

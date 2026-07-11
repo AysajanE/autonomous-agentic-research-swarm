@@ -1,7 +1,7 @@
 ---
 title: "Ethereum Rollup Settlement Take Rate After Dencun"
 subtitle: "Validated working paper source for the L2-to-L1 rent analysis release candidate"
-author: "autonomous-agentic-research-swarm"
+author: null
 date: last-modified
 ---
 

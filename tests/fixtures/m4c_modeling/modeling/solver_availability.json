@@ -1,0 +1,7 @@
+{
+  "license_class": "open_source",
+  "open_solver_fallback": "fixture_enumeration_solver",
+  "solver": "fixture_enumeration_solver",
+  "version": "1"
+}
+

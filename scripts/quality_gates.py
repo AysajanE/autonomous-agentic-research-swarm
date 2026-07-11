@@ -28,6 +28,8 @@ import subprocess
 import sys
 from typing import Any
 
+import yaml
+
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -49,6 +51,8 @@ from sweep_harness import enumerate_cells
 from swarm_events import read_events as _read_swarm_events
 from calibrate_referee import calibration_report_failures
 import literature
+import generate_disclosure
+import replication_package
 
 
 SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
@@ -10033,6 +10037,259 @@ def gate_paper_registry(*, release_perimeter: bool = False) -> GateResult:
     return check_paper_registry(Path("."), release_perimeter=release_perimeter)
 
 
+def _m4c_failure(reason: str, **fields: object) -> dict[str, object]:
+    return {"reason": reason, **fields}
+
+
+def _raw_loss_amendment_coverage(repo: Path) -> tuple[set[str], list[str]]:
+    covered: set[str] = set()
+    amendments: list[str] = []
+    release_dir = repo / "reports/status/releases"
+    for release_path in sorted(release_dir.glob("release_*.json")) if release_dir.is_dir() else []:
+        payload, error = _load_json_file(release_path)
+        if error is not None or payload is None:
+            continue
+        notes = payload.get("notes")
+        if not isinstance(notes, list) or not any(
+            isinstance(note, dict) and note.get("type") == "raw_evidence_unavailable"
+            for note in notes
+        ):
+            continue
+        amendments.append(release_path.relative_to(repo).as_posix())
+        artifacts = payload.get("artifacts")
+        raw_manifests = artifacts.get("raw_manifests") if isinstance(artifacts, dict) else None
+        if isinstance(raw_manifests, list):
+            covered.update(
+                str(item["path"])
+                for item in raw_manifests
+                if isinstance(item, dict) and isinstance(item.get("path"), str)
+            )
+    return covered, amendments
+
+
+def check_raw_retention(repo: Path = Path(".")) -> GateResult:
+    """Require live raw files, a versioned archive pointer, or an explicit amendment."""
+    repo = repo.resolve()
+    failures: list[dict[str, object]] = []
+    covered, amendments = _raw_loss_amendment_coverage(repo)
+    checked = 0
+    amendment_satisfied: list[str] = []
+    archive_satisfied: list[str] = []
+    for manifest_path in sorted((repo / "data/raw_manifest").glob("*.json")):
+        payload, error = _load_json_file(manifest_path)
+        relpath = manifest_path.relative_to(repo).as_posix()
+        if error is not None or payload is None:
+            failures.append(_m4c_failure("raw_retention_manifest_unreadable", subject=relpath, actual=error))
+            continue
+        checked += 1
+        files = payload.get("files")
+        entries = files if isinstance(files, list) else []
+        absent = [
+            str(item.get("path"))
+            for item in entries
+            if isinstance(item, dict)
+            and isinstance(item.get("path"), str)
+            and not (repo / str(item["path"])).is_file()
+        ]
+        if not absent:
+            continue
+        archive_url = payload.get("archive_url")
+        archive_sha = payload.get("archive_sha256", payload.get("sha256"))
+        pointer_ok = (
+            isinstance(archive_url, str)
+            and bool(re.match(r"^(?:https|s3|gs|file)://\S+$", archive_url))
+            and isinstance(archive_sha, str)
+            and bool(re.fullmatch(r"[0-9a-f]{64}", archive_sha))
+        )
+        if pointer_ok and archive_url.startswith("file://"):
+            archive_path = Path(archive_url[7:])
+            pointer_ok = archive_path.is_file() and hashlib.sha256(archive_path.read_bytes()).hexdigest() == archive_sha
+        if pointer_ok:
+            archive_satisfied.append(relpath)
+        elif relpath in covered:
+            amendment_satisfied.append(relpath)
+        else:
+            failures.append(
+                _m4c_failure(
+                    "raw_retention_unresolvable_pointer",
+                    subject=relpath,
+                    absent_file_count=len(absent),
+                    expected="archive_url+sha256 or covering raw_evidence_unavailable amendment",
+                )
+            )
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "active",
+            "manifest_count": checked,
+            "archive_satisfied": archive_satisfied,
+            "amendment_satisfied": amendment_satisfied,
+            "amendment_sources": amendments,
+            "failures": failures,
+        },
+    )
+
+
+def gate_raw_retention() -> GateResult:
+    if not Path("scripts/replication_package.py").is_file():
+        return GateResult(ok=True, details={"status": "inactive_m4c_not_installed", "skipped": True, "failures": []})
+    return check_raw_retention(Path("."))
+
+
+def _load_yaml_object(path: Path) -> tuple[dict[str, object] | None, str | None]:
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        return None, str(exc)
+    return (payload, None) if isinstance(payload, dict) else (None, "top_level_not_object")
+
+
+def check_venue_compliance(
+    repo: Path = Path("."),
+    *,
+    submission_declared: bool | None = None,
+) -> GateResult:
+    repo = repo.resolve()
+    failures: list[dict[str, object]] = []
+    venue, venue_error = _load_yaml_object(repo / "contracts/venue.yaml")
+    authorship, authorship_error = _load_yaml_object(repo / "contracts/authorship.yaml")
+    sections, sections_error = _load_yaml_object(repo / "contracts/manuscript_sections.yaml")
+    if venue_error is not None or venue is None:
+        failures.append(_m4c_failure("venue_compliance_contract_invalid", subject="contracts/venue.yaml", actual=venue_error))
+        venue = {}
+    if authorship_error is not None or authorship is None:
+        failures.append(_m4c_failure("venue_compliance_authorship_invalid", subject="contracts/authorship.yaml", actual=authorship_error))
+        authorship = {}
+    if sections_error is not None or sections is None:
+        failures.append(_m4c_failure("venue_compliance_sections_contract_invalid", subject="contracts/manuscript_sections.yaml", actual=sections_error))
+        sections = {}
+
+    release = venue.get("release") if isinstance(venue.get("release"), dict) else {}
+    mode = release.get("mode")
+    supported = release.get("supported_modes")
+    allowed = venue.get("ai_policy", {}).get("allowed_release_modes") if isinstance(venue.get("ai_policy"), dict) else None
+    if mode not in {"mainstream", "ai_native"} or not isinstance(supported, list) or mode not in supported:
+        failures.append(_m4c_failure("venue_compliance_release_mode_invalid", actual=mode))
+    if not isinstance(allowed, list) or mode not in allowed:
+        failures.append(_m4c_failure("venue_compliance_mode_conflict", actual=mode, expected=allowed))
+
+    declared = submission_declared
+    if declared is None:
+        declared = release.get("submission_declared") is True or release.get("submission_package_requested") is True
+    consent = venue.get("venue_consent") if isinstance(venue.get("venue_consent"), dict) else {}
+    author = authorship.get("human_author_of_record")
+    author_consent = authorship.get("human_author_consent") if isinstance(authorship.get("human_author_consent"), dict) else {}
+    manuscript_path = repo / "reports/paper/index.qmd"
+    manuscript_text = manuscript_path.read_text(encoding="utf-8") if manuscript_path.is_file() else ""
+    front_matter_author = re.search(r"(?m)^author:\s*(.*?)\s*$", manuscript_text)
+    expected_author = "null" if author is None else json.dumps(str(author), ensure_ascii=False)
+    if front_matter_author is None or front_matter_author.group(1) != expected_author:
+        failures.append(
+            _m4c_failure(
+                "venue_compliance_authorship_front_matter_mismatch",
+                expected=expected_author,
+                actual=front_matter_author.group(1) if front_matter_author else None,
+            )
+        )
+    submission_eligible = bool(
+        author
+        and author_consent.get("status") == "consented"
+        and consent.get("consent_compatible") is True
+        and consent.get("real_submission_authorized") is True
+    )
+    if declared:
+        if consent.get("consent_compatible") is not True or consent.get("real_submission_authorized") is not True:
+            failures.append(_m4c_failure("venue_compliance_consent_incompatible"))
+        if not author or author_consent.get("status") != "consented":
+            failures.append(_m4c_failure("venue_compliance_no_consented_author"))
+
+    disclosure_path = repo / "reports/paper/disclosure.md"
+    expected_disclosure = generate_disclosure.generate_disclosure(repo)
+    if not disclosure_path.is_file() or disclosure_path.read_text(encoding="utf-8") != expected_disclosure:
+        failures.append(_m4c_failure("venue_compliance_disclosure_not_regenerable", subject="reports/paper/disclosure.md"))
+
+    canonical = sections.get("canonical_section_ids")
+    canonical_ids = {str(item) for item in canonical} if isinstance(canonical, list) else set()
+    manuscript_ids = _paper_section_registry_ids(repo / "reports/paper/index.qmd")
+    if not canonical_ids or manuscript_ids != canonical_ids:
+        failures.append(_m4c_failure("venue_compliance_canonical_sections_mismatch", expected=sorted(canonical_ids), actual=sorted(manuscript_ids)))
+    registry, registry_error = _load_json_file(repo / "reports/paper/registry.json")
+    entries = registry.get("entries") if registry_error is None and isinstance(registry, dict) else None
+    by_id = {
+        str(item.get("registry_id")): item
+        for item in entries
+        if isinstance(item, dict) and isinstance(item.get("registry_id"), str)
+    } if isinstance(entries, list) else {}
+    missing_registry = sorted(canonical_ids - set(by_id))
+    if missing_registry:
+        failures.append(_m4c_failure("venue_compliance_canonical_registry_missing", actual=missing_registry))
+    passing_reports = [
+        item.get("referee_report", {}).get("path")
+        for key, item in by_id.items()
+        if key in canonical_ids and item.get("status") == "passing" and isinstance(item.get("referee_report"), dict)
+    ]
+    if len(passing_reports) != len(set(passing_reports)):
+        failures.append(_m4c_failure("venue_compliance_per_section_referee_not_granular"))
+
+    if declared:
+        required_perimeter = (
+            "reports/paper/index.qmd",
+            "reports/paper/references.bib",
+            "reports/paper/_quarto.yml",
+            "reports/paper/paper_values.json",
+        )
+        missing = [path for path in required_perimeter if not (repo / path).is_file()]
+        if missing:
+            failures.append(_m4c_failure("venue_compliance_submission_manuscript_perimeter_missing", actual=missing))
+        program = check_program_conformance(repo, release_perimeter=True)
+        if not program.ok:
+            failures.append(_m4c_failure("venue_compliance_submission_program_not_instantiated", actual=program.details.get("failures")))
+        if not canonical_ids or missing_registry:
+            failures.append(_m4c_failure("venue_compliance_submission_disclosure_bundle_incomplete"))
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "reference_bundle_valid" if not failures and not declared else "submission_eligible" if not failures else "blocked",
+            "release_mode": mode,
+            "submission_declared": declared,
+            "submission_eligible": submission_eligible,
+            "reference_implementation": venue.get("status") == "reference_implementation" and authorship.get("status") == "reference_implementation",
+            "failures": failures,
+        },
+    )
+
+
+def gate_venue_compliance(*, submission_declared: bool | None = None) -> GateResult:
+    if not Path("contracts/venue.yaml").is_file():
+        return GateResult(ok=True, details={"status": "inactive_m4c_not_installed", "skipped": True, "failures": []})
+    return check_venue_compliance(Path("."), submission_declared=submission_declared)
+
+
+def check_replication_package_audit(
+    repo: Path = Path("."),
+    *,
+    execute_empirical_master: bool = True,
+) -> GateResult:
+    result = replication_package.audit_repo_profiles(repo, execute_empirical_master=execute_empirical_master)
+    failures: list[dict[str, object]] = []
+    profiles = result.get("profiles")
+    if isinstance(profiles, dict):
+        for profile, profile_result in sorted(profiles.items()):
+            if not isinstance(profile_result, dict) or not profile_result.get("ok"):
+                failures.append(_m4c_failure("replication_package_profile_failed", subject=profile, actual=profile_result))
+    return GateResult(
+        ok=not failures,
+        details={"status": "active", "profiles": profiles, "failures": failures},
+    )
+
+
+def gate_replication_package_audit() -> GateResult:
+    if not Path("scripts/replication_package.py").is_file():
+        return GateResult(ok=True, details={"status": "inactive_m4c_not_installed", "skipped": True, "failures": []})
+    return check_replication_package_audit(Path("."))
+
+
 _CORE_GATE_NAMES = (
     "framework_contract",
     "repo_structure",
@@ -10059,9 +10316,12 @@ _CORE_GATE_NAMES = (
     "network_strings",
     "task_lint",
     "prereg_lock_coverage",
+    "raw_retention",
 )
 _MODE_INDEPENDENT_SCIENCE_GATES = (
     "program_conformance",
+    "replication_package_audit",
+    "venue_compliance",
     "exhibits_manifest",
     "paper_registry",
     "manuscript_computed_paper",
@@ -10095,6 +10355,8 @@ _MODELING_SCIENCE_GATES = (
 )
 _ALL_GATE_NAMES = _CORE_GATE_NAMES + (
     "program_conformance",
+    "replication_package_audit",
+    "venue_compliance",
     "exhibits_manifest",
     "paper_registry",
     "prereg_conformance",
@@ -10174,7 +10436,10 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
         "network_strings": gate_network_strings,
         "task_lint": gate_task_lint,
         "prereg_lock_coverage": gate_prereg_lock_coverage,
+        "raw_retention": gate_raw_retention,
         "program_conformance": gate_program_conformance,
+        "replication_package_audit": gate_replication_package_audit,
+        "venue_compliance": gate_venue_compliance,
         "exhibits_manifest": gate_exhibits_manifest,
         "paper_registry": gate_paper_registry,
         "claim_evidence_ledger": gate_claim_evidence_ledger,

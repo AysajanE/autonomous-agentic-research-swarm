@@ -1,0 +1,31 @@
+schema_version: research_swarm.authorship.v1
+status: reference_implementation
+reference_note: "Reference implementation — no consented human author of record; a real submission requires a consented author."
+human_author_of_record: null
+human_author_consent:
+  status: not_obtained
+  evidence_pointer: null
+credit_contributions:
+  human:
+    conceptualization: pending_consented_author
+    methodology: pending_consented_author
+    validation: pending_consented_author
+    writing_review_editing: pending_consented_author
+    supervision: pending_consented_author
+  ai_assistance:
+    roles:
+      - planning
+      - software
+      - data_curation
+      - formal_analysis
+      - visualization
+      - drafting
+      - review_support
+    evidence: reports/paper/disclosure.md
+    author_eligible: false
+ai_use_disclosure_text: "AI systems assisted only in the roles evidenced by the generated execution-log disclosure. They are not authors. Model/version, gate, review, and edit-history statements must be regenerated from durable logs."
+availability:
+  data: "Processed data and manifested provenance are included in the generated replication package. Raw evidence is unavailable as documented by the release amendment; access/reacquisition instructions are rendered from raw manifests."
+  code: "Transformation and reproduction code is included in the generated replication package."
+  replication: reports/replication/package_manifest.json
+

@@ -1,0 +1,8 @@
+{
+  "instance_id": "toy-hybrid-1",
+  "seed": 23,
+  "source_manifest": {
+    "path": "data/processed_manifest/source.json",
+    "sha256": "01620d232cd85b92c3864b59688689d77a75eba0691e4d6133e2c5911238c215"
+  }
+}

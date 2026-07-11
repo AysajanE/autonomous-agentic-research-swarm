@@ -27,6 +27,9 @@ import subprocess
 import sys
 import tempfile
 
+import generate_disclosure
+import replication_package
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BYTE_IDENTICAL_OUTPUTS = (
@@ -34,6 +37,9 @@ BYTE_IDENTICAL_OUTPUTS = (
     Path("reports/tables/str_regime_summary.md"),
     Path("reports/paper/paper_values.json"),
     Path("reports/exhibits/manifest.json"),
+    Path("reports/paper/disclosure.md"),
+    Path("reports/replication/README.md"),
+    Path("reports/replication/package_manifest.json"),
 )
 CONTENT_EQUIVALENT_OUTPUTS = (
     Path("reports/figures/str_ecosystem_timeseries.data.json"),
@@ -97,6 +103,21 @@ def main() -> int:
     if not isinstance(as_of, str):
         raise SystemExit("reproduce_analysis_as_of_missing")
 
+    with tempfile.TemporaryDirectory(prefix="research-swarm-package-") as package_tmp:
+        package_root = Path(package_tmp) / "replication_package"
+        replication_package.generate_package(REPO_ROOT, package_root, profile="empirical")
+        generated_package_artifacts = {
+            Path("reports/replication/README.md"): package_root / "README.md",
+            Path("reports/replication/package_manifest.json"): package_root / "package_manifest.json",
+        }
+        package_mismatches = [
+            baseline.as_posix()
+            for baseline, generated in generated_package_artifacts.items()
+            if generated.read_bytes() != baseline_bytes[baseline]
+        ]
+    if package_mismatches:
+        raise SystemExit("reproduce_analysis_package_mismatch:" + ",".join(package_mismatches))
+
     with tempfile.TemporaryDirectory(prefix="research-swarm-mpl-") as mpl_config:
         environment = dict(os.environ)
         environment["MPLCONFIGDIR"] = mpl_config
@@ -113,6 +134,11 @@ def main() -> int:
         )
     if completed.returncode != 0:
         return completed.returncode
+
+    disclosure = generate_disclosure.generate_disclosure(REPO_ROOT)
+    disclosure_path = REPO_ROOT / "reports/paper/disclosure.md"
+    if disclosure_path.read_text(encoding="utf-8") != disclosure:
+        raise SystemExit("reproduce_analysis_disclosure_not_regenerable")
 
     byte_mismatches = [
         path.as_posix()

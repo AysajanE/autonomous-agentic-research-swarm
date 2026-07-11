@@ -1,0 +1,6 @@
+{
+  "agent_role": "clean_room_reproducer",
+  "master_script_returncode": 0,
+  "non_author_agent": "fixture-independent-agent"
+}
+

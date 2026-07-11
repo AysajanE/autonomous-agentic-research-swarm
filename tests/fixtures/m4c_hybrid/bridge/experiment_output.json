@@ -1,0 +1,8 @@
+{
+  "instance_manifest": {
+    "path": "modeling/instance_manifest.json",
+    "sha256": "32173b1452cf6f8ea7004a9725b1a26073831395c91211e06895b0b068de0929"
+  },
+  "objective": 7.0,
+  "status": "optimal"
+}
