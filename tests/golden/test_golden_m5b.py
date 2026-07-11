@@ -202,8 +202,13 @@ class GoldenM5bTests(unittest.TestCase):
         import re
 
         src = (ROOT / "scripts/swarm.py").read_text(encoding="utf-8")
+        # Cover BOTH emitter forms: dict-literal (`"escalation_class": "x"`) and
+        # subscript-assignment (`event["escalation_class"] = "x"`, which the
+        # budget_breach tag uses).  A typo in either form must be caught.
         literals = set(re.findall(r'"escalation_class"\s*:\s*"([a-z_]+)"', src))
-        self.assertTrue(literals, "scan found no tagged emitters — pattern drift?")
+        literals |= set(re.findall(r'\[\s*"escalation_class"\s*\]\s*=\s*"([a-z_]+)"', src))
+        self.assertIn("budget_breach", literals, "subscript-assignment emitter not scanned")
+        self.assertGreaterEqual(len(literals), 3, "scan found too few tagged emitters — pattern drift?")
         unregistered = literals - set(swarm_events.ESCALATION_CLASSES)
         self.assertEqual(
             unregistered, set(), f"unregistered escalation classes emitted: {sorted(unregistered)}"

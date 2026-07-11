@@ -414,6 +414,25 @@ class IntegrityAuditTest(unittest.TestCase):
                 result = quality_gates.gate_integrity_audit()
             self.assertIn("integrity_audit_executor_contract_mismatch", _reasons(result))
 
+    def test_unknown_backend_is_rejected_by_confinement_binding(self) -> None:
+        # An unimplemented/typo'd backend, made consistent across framework +
+        # report so the executor-contract match passes, must NOT inherit a live
+        # confinement tuple by default — the gate rejects unknown backends.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            report = _valid_report(root)
+            fw_path = root / "contracts/framework.json"
+            framework = json.loads(fw_path.read_text(encoding="utf-8"))
+            framework["executors"]["integrity_audit"]["backend"] = "claude_typo"
+            write_json(root, "contracts/framework.json", framework)
+            report["executor"]["backend"] = "claude_typo"
+            _write_audit(root, "reports/status/integrity_audit/audit.json", report)
+            with chdir(root):
+                result = quality_gates.gate_integrity_audit()
+            self.assertFalse(result.ok)
+            self.assertIn("integrity_audit_unknown_backend", _reasons(result))
+
     def test_gate_rehashes_bytes_even_when_report_flags_claim_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"

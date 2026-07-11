@@ -7393,6 +7393,22 @@ def _integrity_builder_evidence_failures(
     return derived, failures
 
 
+# The ONLY implemented audit backends and the single honest confinement tuple
+# each may report (see integrity_audit.effective_confinement).  A report whose
+# backend is not a key here is rejected — an unimplemented/typo'd backend must
+# not inherit a live tuple by default.
+_INTEGRITY_CONFINEMENT_BY_BACKEND = {
+    "mock": {
+        "effective_network": "proxy_environment_only",
+        "credential_isolation": "environment_scrub_only",
+    },
+    "claude": {
+        "effective_network": "unrestricted_process_egress",
+        "credential_isolation": "vendor_credential_retained",
+    },
+}
+
+
 def gate_integrity_audit() -> GateResult:
     paths = sorted(Path("reports/status/integrity_audit").glob("*.json"))
     if not paths:
@@ -7455,22 +7471,17 @@ def gate_integrity_audit() -> GateResult:
             # a hash-bound but DISHONEST report (e.g. a live backend claiming
             # proxy-only network / full scrub, or any report claiming OS
             # enforcement this implementation never provides) must not pass the
-            # gate.  The mock backend confines every subprocess (scrub + dead
-            # proxy); the live backend honestly retains vendor cred + unrestricted
-            # egress.
+            # gate.  Dispatch through an explicit KNOWN-backend map and reject
+            # unknown backends — an unimplemented/typo'd backend must not inherit
+            # the live tuple by default.  The mock backend confines every
+            # subprocess (scrub + dead proxy); the live claude backend honestly
+            # retains the vendor credential + unrestricted egress.
             report_backend = executor.get("backend")
             configured_backend = configured_executor["backend"] if configured_executor else None
-            if report_backend == "mock":
-                expected_confinement = {
-                    "effective_network": "proxy_environment_only",
-                    "credential_isolation": "environment_scrub_only",
-                }
-            else:
-                expected_confinement = {
-                    "effective_network": "unrestricted_process_egress",
-                    "credential_isolation": "vendor_credential_retained",
-                }
-            if (
+            expected_confinement = _INTEGRITY_CONFINEMENT_BY_BACKEND.get(report_backend)
+            if expected_confinement is None:
+                failures.append(_science_failure("integrity_audit_unknown_backend", subject=subject, actual=report_backend))
+            elif (
                 confinement.get("os_enforced") is not False
                 or confinement.get("effective_network") != expected_confinement["effective_network"]
                 or confinement.get("credential_isolation") != expected_confinement["credential_isolation"]
