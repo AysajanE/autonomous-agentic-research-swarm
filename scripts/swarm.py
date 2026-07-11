@@ -5071,6 +5071,7 @@ def cmd_referee_waiver(args: argparse.Namespace) -> int:
         repo,
         {
             "event": "referee_owner_waiver",
+            "escalation_class": "blocked_with_human",
             "emitted_by": REFEREE_WAIVER_EMITTER,
             "actor": "HumanOwner",
             "control_plane_branch": current_branch,
@@ -5709,6 +5710,7 @@ def _apply_planner_proposals(
                     repo,
                     {
                         "event": "hypothesis_retirement_escalated",
+                        "escalation_class": "hypothesis_task_retirement",
                         "level": "L3",
                         "task_id": proposal.get("task_id"),
                         "hypothesis_id": hypothesis_id,
@@ -5928,6 +5930,7 @@ def cmd_plan_program(args: argparse.Namespace) -> int:
                 repo,
                 {
                     "event": "plan_awaiting_human_approval",
+                    "escalation_class": "blocked_with_human",
                     "pending_path": PLAN_APPROVAL_PENDING_PATH.as_posix(),
                     "proposal_count": len(outcome.proposals),
                 },
@@ -9774,6 +9777,7 @@ def cmd_run_task(args: argparse.Namespace) -> int:
             repo,
             {
                 "event": "human_question",
+                "escalation_class": "blocked_with_human",
                 "task_id": task.task_id,
                 "blocked_reasons": blocked_reasons,
                 "note": note,

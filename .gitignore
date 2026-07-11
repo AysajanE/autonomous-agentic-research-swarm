@@ -126,6 +126,10 @@ data/processed/panels/*
 *.tmp
 .local/
 
+# Seeded-defect drill journal — ephemeral rehearsal evidence, never released
+# provenance and never committed (keeps `make drill` idempotent / tree-clean).
+reports/status/drills/
+
 # Internal documents
 docs/feedbacks/
 !docs/feedbacks/

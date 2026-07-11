@@ -150,9 +150,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 5567,
+      "bytes": 5692,
       "path": "contracts/pack.json",
-      "sha256": "6ba9172dd9c35921da2cd5970f96475e2e4e06cee9089ddb24cb705e32e84f86",
+      "sha256": "227d4b6137c94b0f6eb04bb8deb605a4c43d401cbc9eca0eb7aee1c6d95c221c",
       "verification_bar": "byte_identity"
     },
     {
@@ -324,9 +324,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 7291,
+      "bytes": 7350,
       "path": "contracts/schemas/integrity_audit_v1.json",
-      "sha256": "256397fa181ac0640e251d45ed0c377e9b9123a989703eac6b19860c469ff961",
+      "sha256": "d2de0e49796a6137b7732c5e7f1bf4d81f6564a602b8ffa82c218f8395879237",
       "verification_bar": "byte_identity"
     },
     {
@@ -354,9 +354,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 8287,
+      "bytes": 8492,
       "path": "contracts/schemas/pack_config_v1.json",
-      "sha256": "c8407f5ef56f171c4806fa284332e81643043656feb1c4847d8af5ac343976ca",
+      "sha256": "423f42b6b9d0434b1cab658c9fa0daaf4e5e57f7510929827b61b07053cd8d50",
       "verification_bar": "byte_identity"
     },
     {
@@ -786,9 +786,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 76951,
+      "bytes": 83233,
       "path": "docs/first_class_swarm_execution_log.md",
-      "sha256": "5dab9eec2378750e1258aa3177ee57e1960e6d5e800a89fff6cd02a3b2572a69",
+      "sha256": "c367938a6be8377ee40e4c8306c7e623f8ba69ffa9eeadbf768c020287357651",
       "verification_bar": "byte_identity"
     },
     {
@@ -798,9 +798,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 7969,
+      "bytes": 9975,
       "path": "docs/operator_runbook.md",
-      "sha256": "42357681aac445173ab6497db473a4e65bba007259ca859e47379f96f1f51786",
+      "sha256": "b8f58627e9d6d414bdfa2e8f066d966d79eed9fd35ee7a079b660852f340f47c",
       "verification_bar": "byte_identity"
     },
     {
@@ -1628,9 +1628,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 10120,
+      "bytes": 10543,
       "path": "scripts/generate_disclosure.py",
-      "sha256": "b33361a30a0e43182245a0464f8d3591e44fc601cd726d36b5e376f4a60f98c2",
+      "sha256": "d1c3a05b77e9d03706df2d2c2a33a71514d5e3f6f48b80faf9e6fd2368507fae",
       "verification_bar": "byte_identity"
     },
     {
@@ -1640,9 +1640,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 40504,
+      "bytes": 43841,
       "path": "scripts/integrity_audit.py",
-      "sha256": "d70bc58616cc185d8b30f34d01787ca56730cff1e783d5a6d1ae5dd4d5ded163",
+      "sha256": "132caa4c3bcc9c55bde757dd38b7ca0948f0c3df33d373a908f396451314970f",
       "verification_bar": "byte_identity"
     },
     {
@@ -1682,9 +1682,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 474904,
+      "bytes": 476214,
       "path": "scripts/quality_gates.py",
-      "sha256": "0205e64779730de82e8fc83d0da01532ab8ac788ab542f4284ab7b575c725a63",
+      "sha256": "359fec939c61f852a1c143a77d67afd565e5178f5a942ea8ac9ade89acbbea36",
       "verification_bar": "byte_identity"
     },
     {
@@ -1724,9 +1724,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 10360,
+      "bytes": 10784,
       "path": "scripts/seeded_drill.py",
-      "sha256": "1ec2850ae6d3af26d2dcdf8a45cad404950aedcf6db2569b602089ade918c1d1",
+      "sha256": "7c7fa12dbb29d14e3d04852f81ad9878cf191d282a3b8fd391f1c61dc390ae3b",
       "verification_bar": "byte_identity"
     },
     {
@@ -1736,9 +1736,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 401436,
+      "bytes": 401684,
       "path": "scripts/swarm.py",
-      "sha256": "3dc6f3a95fa32df47c727efc7813b9a28adc09e53b322d665cb7cb057fb7b767",
+      "sha256": "9894461238eb13ea6bbcab4fb69f3e72db0e12cfd002c8165c7bdc4141d700cf",
       "verification_bar": "byte_identity"
     },
     {
@@ -1754,9 +1754,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 5205,
+      "bytes": 7124,
       "path": "scripts/swarm_events.py",
-      "sha256": "8459ae058ecca36c3a4b01190d13bcef2a58841007904a2009df2c3e8947a519",
+      "sha256": "84b7653b2e83eddf43d558d85c4ae2a5f784dd4e5f7e608345c103cd431561e0",
       "verification_bar": "byte_identity"
     },
     {

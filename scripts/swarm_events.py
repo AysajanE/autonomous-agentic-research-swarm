@@ -12,6 +12,11 @@ import subprocess
 
 EVENT_SCHEMA_VERSION = "research_swarm.event.v1"
 EVENT_JOURNAL_PATH = Path("reports/status/events/events.jsonl")
+# Seeded-defect drills write here, NOT to the compliance journal above.  The
+# disclosure/compliance surface consumes only EVENT_JOURNAL_PATH, so rehearsal
+# drill events can never pollute a released artifact's provenance.  This path is
+# gitignored: running drills must never dirty the committed tree.
+DRILL_JOURNAL_PATH = Path("reports/status/drills/drill_events.jsonl")
 DEFAULT_ESCALATION_SINK = {
     "type": "file",
     "target": "reports/status/events/escalations.jsonl",
@@ -55,8 +60,15 @@ def append_event(
     event: dict,
     *,
     actor_session: str | None = None,
+    journal_path: Path | None = None,
 ) -> dict:
-    """Append one enriched event to the crash-durable main journal."""
+    """Append one enriched event to a crash-durable journal.
+
+    Defaults to the compliance journal (``EVENT_JOURNAL_PATH``).  Callers that
+    must stay out of the compliance/disclosure surface — the seeded-defect
+    drills — pass ``journal_path=DRILL_JOURNAL_PATH`` so their events land in a
+    separate ledger the disclosure never reads.
+    """
     event_name = event.get("event")
     if not isinstance(event_name, str) or not event_name.strip():
         raise ValueError("event must be a non-empty string")
@@ -67,13 +79,17 @@ def append_event(
     record["actor_session"] = (
         actor_session if actor_session is not None else event.get("actor_session")
     )
-    _append_json_line(Path(repo) / EVENT_JOURNAL_PATH, record)
+    _append_json_line(Path(repo) / (journal_path or EVENT_JOURNAL_PATH), record)
     return record
 
 
-def read_events(repo: Path) -> tuple[list[dict], int]:
-    """Read valid journal records, skipping malformed/torn lines."""
-    path = Path(repo) / EVENT_JOURNAL_PATH
+def read_events(repo: Path, *, journal_path: Path | None = None) -> tuple[list[dict], int]:
+    """Read valid journal records, skipping malformed/torn lines.
+
+    Defaults to the compliance journal; pass ``journal_path=DRILL_JOURNAL_PATH``
+    to read the seeded-defect drill ledger.
+    """
+    path = Path(repo) / (journal_path or EVENT_JOURNAL_PATH)
     if not path.is_file():
         return [], 0
 
@@ -114,6 +130,25 @@ def escalation_sink_config(repo: Path) -> dict:
     return {"type": sink_type, "target": target}
 
 
+def escalation_class_of(event: dict) -> str | None:
+    """Validate and return an event's human-escalation class, if any.
+
+    Escalations form two tiers.  ``escalation=True`` alone marks an *operational*
+    notable event (auto-recovery, refusal, retry) that needs no human playbook.
+    An event that additionally carries an ``escalation_class`` is a *human*
+    escalation on §5.4's standing channel — every such class MUST be one of the
+    registered ``ESCALATION_CLASSES`` (which ``runbook_staleness`` then forces to
+    carry a playbook).  A new human-escalation class therefore cannot ship
+    without being registered here and documented in the runbook.
+    """
+    escalation_class = event.get("escalation_class")
+    if escalation_class is None:
+        return None
+    if escalation_class not in ESCALATION_CLASSES:
+        raise ValueError(f"unregistered_escalation_class:{escalation_class}")
+    return escalation_class
+
+
 def escalate(
     repo: Path,
     event: dict,
@@ -121,6 +156,7 @@ def escalate(
     actor_session: str | None = None,
 ) -> dict:
     """Journal an escalation, then deliver it without raising delivery errors."""
+    escalation_class_of(event)  # reject an unregistered human-escalation class
     record = append_event(
         Path(repo),
         {**event, "escalation": True},

@@ -3540,7 +3540,7 @@ def gate_historical_exemptions() -> GateResult:
         return GateResult(ok=False, details={"failures": [str(exc)]})
 
     failures: list[str] = []
-    exempted: dict[str, dict[str, str]] = {"run_manifests": {}, "review_logs": {}}
+    exempted: dict[str, dict[str, str]] = {"run_manifests": {}, "review_logs": {}, "tasks": {}}
     exemptions_path = Path("contracts/historical_exemptions.json")
 
     if exemptions_path.exists():
@@ -3549,7 +3549,26 @@ def gate_historical_exemptions() -> GateResult:
             return GateResult(ok=False, details={"failures": [f"{exemptions_path}:{error}"]})
         if payload.get("schema_version") != HISTORICAL_EXEMPTIONS_SCHEMA_VERSION:
             failures.append(f"{exemptions_path}:invalid_schema_version")
-        for kind in ("run_manifests", "review_logs"):
+
+        # The exemption ledger is one-time immutable historical remediation: it
+        # grandfathers pre-schema-v2 artifacts (incl. the two W6/W7 v1 tasks) out
+        # of strict checks.  A *new* entry silently added here bypasses a
+        # mandatory schema-v2 binding — e.g. adding a v1 W6/W7/W8 task exemption
+        # skips program tagging (task_lint honours anything on this list).  So
+        # the whole ledger is frozen: the pack declares its pinned digest and any
+        # drift (in ANY section, tasks included) is a deliberate, reviewable,
+        # dual-file change, never a silent side effect of task creation.
+        actual_ledger_sha, _ = _sha256_and_bytes(exemptions_path)
+        try:
+            pinned_sha = pack_value(load_pack_config(), "integrity.historical_exemptions_sha256", str)
+        except ValueError:
+            pinned_sha = None
+        if not isinstance(pinned_sha, str) or not pinned_sha:
+            failures.append("historical_exemptions_pin_missing")
+        elif actual_ledger_sha != pinned_sha:
+            failures.append("historical_exemptions_ledger_mutated")
+
+        for kind in ("run_manifests", "review_logs", "tasks"):
             for item in payload.get(kind, []):
                 if not isinstance(item, dict):
                     failures.append(f"{exemptions_path}:{kind}:invalid_entry")
@@ -7431,7 +7450,9 @@ def gate_integrity_audit() -> GateResult:
             or not isinstance(confinement, dict)
             or not isinstance(confinement.get("os_enforced"), bool)
             or confinement.get("effective_network")
-            not in {"proxy_environment_only", "namespace_enforced_off"}
+            not in {"proxy_environment_only", "namespace_enforced_off", "vendor_api_transport_only"}
+            or confinement.get("credential_isolation")
+            not in {"environment_scrub_only", "os_enforced", "vendor_credential_retained"}
         ):
             failures.append(_science_failure("integrity_audit_profile_invalid", subject=subject))
         if executor.get("commit_push_allowed") is not False:

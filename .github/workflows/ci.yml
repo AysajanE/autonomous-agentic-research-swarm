@@ -53,7 +53,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
-          if printf '%s\n' "$changed" | grep -Eq '^(contracts/|docs/prompts/|scripts/(quality_gates|swarm|swarm_taskfile)\.py$)'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(contracts/|docs/prompts/|scripts/(quality_gates|swarm|swarm_taskfile|swarm_events|integrity_audit|generate_disclosure|pack_config|falsify_claims|replication_package)\.py$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"

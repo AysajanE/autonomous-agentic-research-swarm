@@ -34,6 +34,15 @@ change scientific contracts or mark scientific work `done`.
 
 ## Escalation playbooks
 
+Escalations form two tiers. A plain `escalation=True` event is an *operational*
+notable event (auto-recovery, refusal, retry) that needs no human playbook. An
+event that additionally carries an `escalation_class` is a *human* escalation on
+§5.4's standing channel — every such class MUST be one of the registered classes
+below, which `runbook_staleness` then forces to carry a playbook. A new
+human-escalation class therefore cannot ship without being registered in
+`swarm_events.ESCALATION_CLASSES` and documented here (`escalate()` rejects an
+unregistered class).
+
 ### Judge disagreement
 
 - escalation_class: judge_disagreement
@@ -106,9 +115,13 @@ python3.11 scripts/seeded_drill.py --all
 
 Each drill creates a disposable rehearsal fixture using the mock executor,
 injects exactly one named defect, invokes the real Judge or science gate, and
-appends a `seeded_drill` event. Any injected-but-not-caught case exits red. The
-summary event reports `caught / injected`; zero detected defects is never
-interpreted as zero fabrication.
+appends a `seeded_drill` event to the ephemeral drill ledger
+(`reports/status/drills/drill_events.jsonl`, gitignored) — **never** the
+compliance journal the disclosure reads, so a rehearsal can never pollute a
+released artifact's provenance and `make drill` leaves the tree clean. Any
+injected-but-not-caught case exits red. The summary event reports
+`caught / injected`; zero detected defects is never interpreted as zero
+fabrication.
 
 Run the held-out Goodhart-control tier only at milestone gates:
 
@@ -124,14 +137,35 @@ Tier-c live-LLM calibration remains on-demand/BT2 and is not a per-PR job.
 ## Effective scratch confinement
 
 The integrity audit always uses a disposable detached worktree (or a hermetic
-temporary copy), a credential-scrubbed subprocess environment, offline proxy
-settings, an allowlisted command surface, and detection/rejection of main-repo
-mutation. On macOS this does **not** provide an OS network namespace or a
-kernel-enforced filesystem boundary. Reports therefore record
-`os_enforced: false` and `effective_network: proxy_environment_only`; this is an
-honest residual, not OS confinement. A future Linux deployment may claim
-`os_enforced: true` only after its namespace/credential-isolation capability
-probe succeeds and every audit subprocess is actually launched inside it.
+temporary copy), an allowlisted command surface, and detection/rejection of
+main-repo mutation. On macOS this does **not** provide an OS network namespace or
+a kernel-enforced filesystem boundary, so `os_enforced` is always `false` — an
+honest residual, not OS confinement.
+
+The confinement report describes what is **actually applied to the launched
+subprocesses**, per backend — it never claims a scrub or proxy it does not
+perform:
+
+- **mock backend** (CI default): the auditor transcript is read from a local
+  file (no auditor egress); the only subprocesses are offline rebuilds/recomputes
+  launched with credentials stripped from the environment and every proxy pointed
+  at a dead local port. Reported as `credential_isolation: environment_scrub_only`
+  and `effective_network: proxy_environment_only` — both true, because the offline
+  environment genuinely removes credential-named variables and dead-proxies the
+  network.
+- **live backend**: the auditor subprocess must reach the vendor API, so it
+  necessarily retains outbound vendor transport and the vendor credential (every
+  *other* credential is still scrubbed). Reported honestly as
+  `credential_isolation: vendor_credential_retained` and
+  `effective_network: vendor_api_transport_only` — never a full-scrub/proxy-only
+  claim the live call cannot honour.
+
+The executor config requests `network: off`; because no OS namespace enforces it
+here, the report records the honest `network: requested_off` (request made, not
+kernel-enforced), not a bare `off` that would overstate enforcement. A future
+Linux deployment may report `os_enforced: true` / `namespace_enforced_off` only
+after its namespace/credential-isolation capability probe succeeds and every
+audit subprocess is actually launched inside it.
 
 ## Gate registry coverage
 

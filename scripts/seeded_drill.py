@@ -202,6 +202,7 @@ def run_one(spec: DrillSpec, *, journal_root: Path, timestamp: str) -> dict[str,
             "timestamp": timestamp,
         },
         actor_session="seeded-drill-kernel",
+        journal_path=swarm_events.DRILL_JOURNAL_PATH,
     )
     if not observation.blocked:
         raise MissedInjection(
@@ -220,7 +221,10 @@ def run_rotation(
             events.append(run_one(spec, journal_root=journal_root, timestamp=timestamp))
     except MissedInjection:
         caught = sum(event.get("caught") is True for event in events)
-        injected = len(events) + 1
+        # A missed injection aborts the rotation, so later specs never run.  Score
+        # the catch rate over the FULL intended rotation (unrun == uncaught): a
+        # conservative lower bound that never overstates the KPI on a red run.
+        injected = len(specs)
         swarm_events.append_event(
             journal_root,
             {
@@ -228,10 +232,11 @@ def run_rotation(
                 "timestamp": timestamp,
                 "injected": injected,
                 "caught": caught,
-                "catch_rate": caught / injected,
+                "catch_rate": caught / injected if injected else 0.0,
                 "status": "red",
             },
             actor_session="seeded-drill-kernel",
+            journal_path=swarm_events.DRILL_JOURNAL_PATH,
         )
         raise
     injected = len(events)
@@ -247,6 +252,7 @@ def run_rotation(
             "status": "green" if caught == injected else "red",
         },
         actor_session="seeded-drill-kernel",
+        journal_path=swarm_events.DRILL_JOURNAL_PATH,
     )
     return {"events": events, "summary": summary}
 

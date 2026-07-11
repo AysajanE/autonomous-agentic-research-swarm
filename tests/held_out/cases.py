@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
-import shutil
 import sys
 import tempfile
 import unittest
@@ -12,12 +12,12 @@ ROOT = Path(__file__).resolve().parents[2]
 TESTS = ROOT / "tests"
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 
-from golden.test_golden_m4b import _program_fixture, _task  # noqa: E402
-from golden.test_golden_m4c import _refresh_member_hash, _venue_fixture  # noqa: E402
-from runtime_test_utils import chdir, load_quality_gates_module  # noqa: E402
-from test_m3b_referee import RefereeFixture  # noqa: E402
-from test_m4c_replication import replication  # noqa: E402
+from golden.harness import GoldenRepo  # noqa: E402
+from runtime_test_utils import chdir, load_quality_gates_module, write_json, write_text  # noqa: E402
+from test_m3a_modeling_battery import _claim as _model_claim, _claims as _model_claims  # noqa: E402
 
 
 quality_gates = load_quality_gates_module()
@@ -34,91 +34,188 @@ def _reasons(result: object) -> set[str]:
     return reasons
 
 
+def _sha256_of(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 class HeldOutM5Cases(unittest.TestCase):
-    def test_computed_paper_rejects_fresh_source_forgery(self) -> None:
+    """Held-out Goodhart-control tier (plan §9.3).
+
+    Distinctness contract — verified, not aspirational:
+    * every case is constructed *independently* here (generic ``GoldenRepo`` /
+      model-claim harness plus an inline attack), importing NONE of the
+      CI-visible golden test modules (``golden.test_golden_m4*``,
+      ``test_m3b_referee``, ``test_m4c_replication``); and
+    * every case asserts a failure mode (gate + reason) that is exercised by
+      NEITHER the ``make test`` golden suite NOR the seeded-defect drill
+      rotation.  A prompt/contract change over-fit to the visible set is
+      therefore still caught here, because a regression these cases detect does
+      not already fail the suite that produced the optimiser's signal.
+
+    This tier is deliberately excluded from default ``make test`` discovery
+    (filename ``cases.py``, not ``test*.py``) and MUST be refreshed adversarially
+    at every milestone with fresh cases aimed at then-current mechanisms.  It is
+    an offline deterministic control; live-referee held-out judgement is a
+    tier-c/live-calibration concern (on-demand/BT2), not faked here with a
+    self-supplied mock verdict.
+    """
+
+    def test_falsification_rejects_wrong_monotonicity_comparative_static(self) -> None:
+        # Wrong-but-coherent theory: a lemma asserts the model output is
+        # monotonically INCREASING in x, but the stated function decreases.
+        # Detected via `comparative_static_violated` — a mechanism the drill
+        # rotation (which uses `inequality_violated`) and the golden suite never
+        # assert.
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            for relpath in (
-                "reports/paper/index.qmd",
-                "reports/paper/paper_values.json",
-                "reports/tables/str_regime_summary.csv",
-                "reports/validation/rollup_panel_validation.json",
-                "reports/validation/cross_source_reconciliation.json",
-                "contracts/claims.yaml",
-                "contracts/pack.json",
-                "docs/protocol.md",
-            ):
-                target = root / relpath
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(ROOT / relpath, target)
-            values = root / "reports/paper/paper_values.json"
-            payload = json.loads(values.read_text(encoding="utf-8"))
-            payload["values"]["post_dencun_mean_str_pct"]["value"] = 88.88
-            payload["values"]["post_dencun_mean_str_pct"]["display"] = "88.88%"
-            values.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            with chdir(root):
-                result = quality_gates.gate_manuscript_computed_paper()
+            repo = GoldenRepo.create(tmp)
+            claim = _model_claim(repo.root, "theoretical")
+            claim["falsification_spec"] = {
+                "inequalities": [],
+                "comparative_statics": [
+                    {"expression": "10.0 - x", "parameter": "x", "sign": "positive"}
+                ],
+                "domain": {"x": [0.0, 1.0]},
+                "seed": 5,
+                "sample_points": [{"x": 0.25}, {"x": 0.75}],
+            }
+            _model_claims(repo.root, [claim])
+            with chdir(repo.root):
+                result = quality_gates.gate_theoretical_falsification()
             self.assertFalse(result.ok)
-            self.assertIn("paper_value_mismatch_source", _reasons(result))
+            self.assertIn("comparative_static_violated", _reasons(result))
 
-    def test_referee_blocks_fresh_wrong_but_coherent_artifact(self) -> None:
-        text = (
-            "# Analysis\n\nThe task claims a preregistered estimator, but the artifact "
-            "quietly substitutes an unregistered complete-case estimator and "
-            "then repeats internally consistent values from that substitution.\n"
-        )
+    def test_falsification_rejects_wrong_signed_explicit_derivative(self) -> None:
+        # A second, mechanistically different theory fabrication: the claim
+        # supplies an EXPLICIT derivative expression (not a finite difference)
+        # whose sign contradicts the asserted comparative static.  Exercises the
+        # explicit-derivative branch, which no golden/drill case reaches.
         with tempfile.TemporaryDirectory() as tmp:
-            fixture = RefereeFixture(Path(tmp) / "repo", text=text)
-            fixture.write_mock(overrides={"ANALYSIS_PROTOCOL_CONFORMANCE": "not_supported"})
-            code, _ = fixture.run()
-            self.assertEqual(code, 1)
-            _, report = fixture.latest_report()
-            self.assertEqual(report["overall"], "not_supported")
+            repo = GoldenRepo.create(tmp)
+            claim = _model_claim(repo.root, "theoretical")
+            claim["falsification_spec"] = {
+                "inequalities": [],
+                "comparative_statics": [
+                    {
+                        "derivative": {"expression": "-2.0 * k"},
+                        "parameter": "k",
+                        "sign": "nonnegative",
+                    }
+                ],
+                "domain": {"k": [1.0, 3.0]},
+                "seed": 9,
+                "sample_points": [{"k": 2.0}],
+            }
+            _model_claims(repo.root, [claim])
+            with chdir(repo.root):
+                result = quality_gates.gate_theoretical_falsification()
+            self.assertFalse(result.ok)
+            self.assertIn("comparative_static_violated", _reasons(result))
 
-    def test_program_conformance_rejects_fresh_cross_mode_node(self) -> None:
+    def test_instance_manifest_rejects_absent_source_binding(self) -> None:
+        # Provenance fabrication: a bridge instance binds a source processed
+        # manifest that does not exist on disk.  Detected via
+        # `content_binding_target_missing` — distinct from the drill's stale-hash
+        # `content_binding_sha256_mismatch` (the binding target is present there).
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _program_fixture(root, mode="hybrid")
-            _task(
-                root,
-                "T991",
-                program_id="w7_writing",
-                program_node="section_draft",
-                task_kind="writing",
-                workstream="W7",
+            repo = GoldenRepo.create(tmp)
+            output = write_text(repo.root, "reports/models/bridge_instance.txt", "instance output\n")
+            validation = write_json(repo.root, "reports/validation/bridge.json", {"status": "green"})
+            write_json(
+                repo.root,
+                "contracts/instances/bridge.json",
+                {
+                    "schema_version": "research_swarm.instance_manifest.v1",
+                    "instance_id": "bridge",
+                    "source_processed_manifests": [
+                        {
+                            "path": "data/processed_manifest/never_generated.json",
+                            "sha256": "a" * 64,
+                        }
+                    ],
+                    "generator_command": "python scripts/generate_bridge.py",
+                    "generated_at_utc": "2026-07-10T11:00:00Z",
+                    "outputs": [{"path": "reports/models/bridge_instance.txt", "sha256": _sha256_of(output)}],
+                    "pre_bridge_validation": [
+                        {
+                            "path": "reports/validation/bridge.json",
+                            "sha256": _sha256_of(validation),
+                            "status": "green",
+                        }
+                    ],
+                },
             )
-            result = quality_gates.check_program_conformance(root, strict=True)
+            repo.git("add", "-A")
+            with chdir(repo.root):
+                result = quality_gates.gate_instance_manifest_conformance()
             self.assertFalse(result.ok)
-            self.assertIn("mode_foreign_program_node", _reasons(result))
+            self.assertIn("content_binding_target_missing", _reasons(result))
 
-    def test_replication_audit_rejects_fresh_bridge_skip(self) -> None:
+    def test_instance_manifest_rejects_schema_violating_bridge(self) -> None:
+        # A bridge instance that is internally plausible but violates the manifest
+        # schema (missing the required `instance_id`).  Detected via
+        # `instance_manifest_schema_violation`, a reason no golden/drill case
+        # asserts.
         with tempfile.TemporaryDirectory() as tmp:
-            package = Path(tmp) / "package"
-            replication.generate_package(ROOT / "tests/fixtures/m4c_hybrid", package, profile="hybrid")
-            generator = package / "bridge/generate_instances.py"
-            generator.write_text("print('coherent but does not regenerate the bridge')\n", encoding="utf-8")
-            _refresh_member_hash(package, "bridge/generate_instances.py")
-            clean_room = package / "bridge/clean_room.json"
-            payload = json.loads(clean_room.read_text(encoding="utf-8"))
-            payload.update({"traversed_bridge": True, "regenerated_instances": True})
-            clean_room.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            _refresh_member_hash(package, "bridge/clean_room.json")
-            result = replication.audit_package(package)
-            self.assertFalse(result["ok"])
-            self.assertIn("replication_hybrid_clean_room_bridge_not_traversed", result["failures"])
-
-    def test_compliance_rejects_fresh_release_mode_conflict(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _venue_fixture(root)
-            venue_path = root / "contracts/venue.yaml"
-            venue = json.loads(venue_path.read_text(encoding="utf-8"))
-            venue["release"]["mode"] = "ai_native"
-            venue["ai_policy"]["allowed_release_modes"] = ["mainstream"]
-            venue_path.write_text(json.dumps(venue, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            result = quality_gates.check_venue_compliance(root)
+            repo = GoldenRepo.create(tmp)
+            output = write_text(repo.root, "reports/models/bridge_instance.txt", "instance output\n")
+            write_json(
+                repo.root,
+                "contracts/instances/bridge.json",
+                {
+                    "schema_version": "research_swarm.instance_manifest.v1",
+                    # instance_id deliberately omitted -> schema violation
+                    "source_processed_manifests": [],
+                    "generator_command": "python scripts/generate_bridge.py",
+                    "generated_at_utc": "2026-07-10T11:00:00Z",
+                    "outputs": [{"path": "reports/models/bridge_instance.txt", "sha256": _sha256_of(output)}],
+                },
+            )
+            repo.git("add", "-A")
+            with chdir(repo.root):
+                result = quality_gates.gate_instance_manifest_conformance()
             self.assertFalse(result.ok)
-            self.assertIn("venue_compliance_mode_conflict", _reasons(result))
+            self.assertIn("instance_manifest_schema_violation", _reasons(result))
+
+    def test_citation_snapshot_key_forgery(self) -> None:
+        # Provenance fabrication: a resolved, non-retracted citation snapshot
+        # whose recorded citekey attests a DIFFERENT work than the one cited.
+        # Detected via `citation_snapshot_key_mismatch` — the drill fires
+        # unresolved/retraction/url reasons instead, and the golden suite asserts
+        # neither.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = GoldenRepo.create(tmp)
+            write_text(repo.root, "reports/paper/index.qmd", "# Paper\n\nAs shown [@smith2025].\n")
+            write_text(
+                repo.root,
+                "reports/paper/references.bib",
+                "@article{smith2025, title={A Real Result}, doi={10.1/real}}\n",
+            )
+            write_text(repo.root, "data/citations/AS_OF", "2026-07-11\n")
+            retrieval = {"citekey": "smith2025", "provider": "fixture"}
+            write_json(
+                repo.root,
+                "data/citations/2026-07-11/smith2025.json",
+                {
+                    "schema_version": "research_swarm.citation_snapshot.v1",
+                    # attests a different key than the filename/cite subject
+                    "citekey": "jones2019",
+                    "title": "A Real Result",
+                    "doi": "10.1/real",
+                    "source": "crossref",
+                    "retrieved_at_utc": "2026-07-11T00:00:00Z",
+                    "retrieval_sha256": hashlib.sha256(
+                        json.dumps(retrieval, separators=(",", ":"), sort_keys=True).encode()
+                    ).hexdigest(),
+                    "retrieval_payload": retrieval,
+                    "resolved": True,
+                    "retraction_status": "clean",
+                    "url_resolves": True,
+                },
+            )
+            with chdir(repo.root):
+                result = quality_gates.gate_citation_integrity()
+            self.assertFalse(result.ok)
+            self.assertIn("citation_snapshot_key_mismatch", _reasons(result))
 
 
 if __name__ == "__main__":

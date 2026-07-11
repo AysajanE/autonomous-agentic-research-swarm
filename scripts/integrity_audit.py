@@ -49,8 +49,40 @@ def _utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+# Environment variables whose names mark a credential/secret.  These are removed
+# from every offline audit subprocess so the reported `environment_scrub_only`
+# label is TRUE, not aspirational — a rebuild/recompute subprocess never inherits
+# repository, cloud, or API credentials.
+_CREDENTIAL_ENV_MARKERS = (
+    "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "API_KEY", "APIKEY",
+    "ACCESS_KEY", "PRIVATE_KEY", "SESSION_TOKEN", "AUTH",
+)
+_CREDENTIAL_ENV_PREFIXES = (
+    "AWS_", "ANTHROPIC", "OPENAI", "CLAUDE", "GITHUB", "GH_", "SSH_", "GCP_",
+    "GOOGLE_", "AZURE_", "NPM_", "PYPI_", "DOCKER_", "SLACK_", "STRIPE_", "HF_",
+    "HUGGINGFACE", "VAULT_", "CLOUDFLARE", "DIGITALOCEAN", "HEROKU", "NETLIFY",
+    "VERCEL", "SENTRY", "DATADOG", "TWILIO",
+)
+# Vendor credentials the LIVE audit backend legitimately needs to reach its API.
+_VENDOR_CREDENTIAL_PREFIXES = ("ANTHROPIC", "CLAUDE")
+
+
+def _is_credential_env(name: str) -> bool:
+    upper = name.upper()
+    if any(upper.startswith(prefix) for prefix in _CREDENTIAL_ENV_PREFIXES):
+        return True
+    return any(marker in upper for marker in _CREDENTIAL_ENV_MARKERS)
+
+
+def _is_vendor_credential_env(name: str) -> bool:
+    return name.upper().startswith(_VENDOR_CREDENTIAL_PREFIXES)
+
+
 def _offline_subprocess_env() -> dict[str, str]:
-    env = dict(os.environ)
+    """Environment for OFFLINE rebuild/recompute subprocesses: credentials
+    stripped (so `environment_scrub_only` is true) and every proxy pointed at a
+    dead local port (so `proxy_environment_only` is true)."""
+    env = {key: value for key, value in os.environ.items() if not _is_credential_env(key)}
     dead_proxy = "http://127.0.0.1:9"
     env.update(
         {
@@ -67,8 +99,32 @@ def _offline_subprocess_env() -> dict[str, str]:
     return env
 
 
-def effective_confinement() -> dict[str, object]:
-    """Report capabilities actually enforced by this implementation/host."""
+def _live_backend_env() -> dict[str, str]:
+    """Environment for the LIVE audit backend.  It must reach the vendor API, so
+    it retains vendor transport and the vendor credential — but every OTHER
+    credential (repo, cloud, unrelated API) is still scrubbed.  The confinement
+    report labels this honestly (`vendor_credential_retained`), never claiming a
+    full scrub it does not apply."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if _is_vendor_credential_env(key) or not _is_credential_env(key)
+    }
+
+
+def effective_confinement(backend: str = "mock") -> dict[str, object]:
+    """Report the confinement ACTUALLY enforced, per backend — never a control
+    that isn't applied to the launched subprocesses.
+
+    - ``mock`` (default, CI): the auditor transcript is read from a local file,
+      so no auditor egress; the only subprocesses are offline rebuilds/recomputes
+      launched with `_offline_subprocess_env()` (credentials stripped, proxies
+      dead).  Hence `environment_scrub_only` + `proxy_environment_only`.
+    - live: the auditor subprocess reaches the vendor API and therefore retains
+      outbound vendor transport and the vendor credential.  Reported as
+      `vendor_api_transport_only` + `vendor_credential_retained` — the honest
+      weakest link, not a scrub/proxy claim the live call does not honour.
+    """
     system = platform.system().lower() or "unknown"
     if system != "linux":
         reason = f"{system}_network_namespace_unavailable"
@@ -78,11 +134,17 @@ def effective_confinement() -> dict[str, object]:
         # Having a binary is not enforcement.  Until every rebuild/model/audit
         # subprocess is launched through the reviewed profile, remain honest.
         reason = "bubblewrap_profile_not_enabled"
+    if backend == "mock":
+        effective_network = "proxy_environment_only"
+        credential_isolation = "environment_scrub_only"
+    else:
+        effective_network = "vendor_api_transport_only"
+        credential_isolation = "vendor_credential_retained"
     return {
         "capability_probe": reason,
         "os_enforced": False,
-        "effective_network": "proxy_environment_only",
-        "credential_isolation": "environment_scrub_only",
+        "effective_network": effective_network,
+        "credential_isolation": credential_isolation,
         "filesystem_isolation": "scratch_worktree_plus_mutation_detection",
     }
 
@@ -597,6 +659,10 @@ def _load_transcript(
         text=True,
         capture_output=True,
         timeout=timeout,
+        # Vendor transport + vendor credential retained (the live auditor needs
+        # its API); every other credential is scrubbed — matches the honest
+        # `vendor_credential_retained` confinement label for the live backend.
+        env=_live_backend_env(),
     )
     if cp.returncode != 0:
         raise ValueError(f"audit_backend_failed:{cp.returncode}:{cp.stderr[-1000:]}")
@@ -902,7 +968,7 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             "network": "requested_off",
             "commit_push_allowed": False,
             "scratch_kind": scratch_kind,
-            "effective_confinement": effective_confinement(),
+            "effective_confinement": effective_confinement(args.backend),
         },
         "repo_confinement": {
             "excluded_prefixes": [".git/", "reports/status/integrity_audit/"],

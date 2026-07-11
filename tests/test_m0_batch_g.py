@@ -10,6 +10,7 @@ from runtime_test_utils import (
     SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1,
     chdir,
     load_quality_gates_module,
+    pin_pack_to_ledger,
     scaffold_runtime_repo,
     write_json,
     write_run_manifest,
@@ -25,7 +26,7 @@ def _sha256_file(path: Path) -> str:
 
 
 def _write_exemptions(root: Path, run_entries: list[dict[str, str]]) -> Path:
-    return write_json(
+    written = write_json(
         root,
         "contracts/historical_exemptions.json",
         {
@@ -36,6 +37,8 @@ def _write_exemptions(root: Path, run_entries: list[dict[str, str]]) -> Path:
             "review_logs": [],
         },
     )
+    pin_pack_to_ledger(root)  # freeze contract: keep the fixture pack pin in sync
+    return written
 
 
 def _write_annotation(root: Path, manifest_path: Path, *, sha256: str, provenance_class: str = "manual_operator") -> Path:

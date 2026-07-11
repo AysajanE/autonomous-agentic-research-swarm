@@ -99,7 +99,13 @@ def collect_disclosure_evidence(repo: Path) -> dict[str, object]:
                 event_counts["invalid_event_record"] += 1
                 continue
             if isinstance(event, dict):
-                event_counts[str(event.get("event") or event.get("type") or "untyped_event")] += 1
+                event_name = str(event.get("event") or event.get("type") or "untyped_event")
+                # Seeded-defect drills write to their own ledger, never here; but
+                # if a rehearsal event ever leaks into the compliance journal it
+                # must not be counted as released-work provenance.
+                if event_name.startswith("seeded_drill") or str(event.get("actor_session") or "") == "seeded-drill-kernel":
+                    continue
+                event_counts[event_name] += 1
 
     return {
         "schema_version": SCHEMA_VERSION,
