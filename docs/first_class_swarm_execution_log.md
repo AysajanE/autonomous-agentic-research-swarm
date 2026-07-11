@@ -10,6 +10,18 @@ Delivery: one branch per milestone (`milestone/<id>-<slug>`), red/green-tested b
 
 ---
 
+## M3c — Inference module (branch: `milestone/m3c-inference`) — FIX ROUND IN PROGRESS
+
+Scope: plan §5.2 `statistical_reporting`, §6.4 inference toolkit, and the M3c acceptance row.
+
+Fix-round record:
+
+- **M3c deterministic-disposition fix round.** Corrected chronological Driscoll–Kraay score aggregation and fail-closed cluster identifiers; projected non-PSD two-way clustered covariance estimates onto the PSD cone; changed the piecewise-constant break routine from always choosing `max_breaks` to BIC selection over every feasible break count; made the statistical-reporting gate validate finite estimate/SE-or-CI/N semantics, ledger↔table headline parity, all causal claims, recursive registered table surfaces, content-bound spec-curve inputs, and a recomputed spec-curve verdict. The locked clustered-VCE plus `date_aggregate` grid combination is rejected during config validation rather than during estimation.
+- **D-M3c-1 (output recomputation → M4).** M3c content-binds the processed-panel input, locked parameters, and recomputed spec-curve verdict. Independent recomputation of regime `break_dates`/`ssr` and every table `estimate` from the hash-bound panel plus active lock remains the §6.5 integrity-audit tier exercised on the M4 computed paper from retained raw evidence; it is not implemented in the M3c deterministic gate.
+- **D-M3c-2 (disclosed estimator limits).** Oster delta remains the documented linear approximation. HAC/cluster routines continue to omit finite-sample CR/HAC multipliers as disclosed; neither item changes the locked M3c estimator arithmetic.
+
+---
+
 ## M3b — Referee panel + gold set (branch: `milestone/m3b-referee`) — Batch 1 IN PROGRESS (converged after 2 fix rounds; cheap residual blockers fixed inline; deep residuals → M5)
 
 Scope: plan §5.3/§5.4 (L2 cross-family referee panel), §9.3 (gold-set calibration). Batch 2 (§6.5 integrity audit + §6.3 W-Lit + §6.6 truth-seeking prompts) staged separately.
