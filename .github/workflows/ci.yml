@@ -6,6 +6,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege: every job only checks out and runs read-only gates/tests —
+# none writes to the repo or needs elevated scope (CodeQL least-privilege finding).
+permissions:
+  contents: read
+
 jobs:
   gate:
     runs-on: ubuntu-latest
