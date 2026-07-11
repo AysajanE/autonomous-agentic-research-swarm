@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "research_swarm.exhibits_manifest.v1.schema",
   "title": "Research swarm exhibits manifest v1",
+  "description": "Registers manuscript exhibit outputs and their build-time QA. Figures nested inside a {{< include chapter.qmd >}} sub-document are not recursively scanned; that release-perimeter limitation is deferred to M4-C.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "generated_by", "exhibits"],
@@ -39,9 +40,9 @@
             "additionalProperties": false,
             "required": ["labels", "legend", "units", "alt_text"],
             "properties": {
-              "labels": {"const": true},
-              "legend": {"const": true},
-              "units": {"const": true},
+              "labels": {"type": "boolean"},
+              "legend": {"type": "boolean"},
+              "units": {"type": "boolean"},
               "alt_text": {"type": "string", "minLength": 1}
             }
           }

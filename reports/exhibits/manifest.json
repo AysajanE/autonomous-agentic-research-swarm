@@ -35,7 +35,7 @@
         },
         {
           "path": "src/analysis/build_str_release_outputs.py",
-          "sha256": "5e60c4189f74d22fa5d62781843141bfe7b9609e6b42ee08cbfc076b18ec1813"
+          "sha256": "8b81aaf0f16e0bdb2e8e800a15a0c3cbe03b53ce0ee632730ca3206b0c235f42"
         }
       ],
       "notes": "Two-panel multi-series figure; plotted values are bound by the matching .data.json sidecar.",
@@ -82,7 +82,7 @@
         },
         {
           "path": "src/analysis/build_str_release_outputs.py",
-          "sha256": "5e60c4189f74d22fa5d62781843141bfe7b9609e6b42ee08cbfc076b18ec1813"
+          "sha256": "8b81aaf0f16e0bdb2e8e800a15a0c3cbe03b53ce0ee632730ca3206b0c235f42"
         }
       ],
       "notes": "Two-panel multi-series figure; plotted values are bound by the matching .data.json sidecar.",
@@ -129,7 +129,7 @@
         },
         {
           "path": "src/analysis/build_str_release_outputs.py",
-          "sha256": "5e60c4189f74d22fa5d62781843141bfe7b9609e6b42ee08cbfc076b18ec1813"
+          "sha256": "8b81aaf0f16e0bdb2e8e800a15a0c3cbe03b53ce0ee632730ca3206b0c235f42"
         }
       ],
       "notes": "The Markdown include and same-stem CSV are emitted from one in-memory table; paper_values binds numeric cells to the CSV.",

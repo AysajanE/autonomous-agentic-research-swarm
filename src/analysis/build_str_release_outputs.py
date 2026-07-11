@@ -106,13 +106,20 @@ def main() -> int:
     ecosystem = build_ecosystem_frame(panel, decomposition)
     regime_table = build_regime_summary(ecosystem)
 
-    write_ecosystem_figure(ecosystem, as_of_label=as_of_label, sample_mode=args.sample)
-    write_post_dencun_regime_figure(ecosystem, as_of_label=as_of_label, sample_mode=args.sample)
+    ecosystem_figure_qa = write_ecosystem_figure(
+        ecosystem, as_of_label=as_of_label, sample_mode=args.sample
+    )
+    regime_figure_qa = write_post_dencun_regime_figure(
+        ecosystem, as_of_label=as_of_label, sample_mode=args.sample
+    )
     write_figure_data_sidecars(ecosystem, as_of_label=as_of_label, sample_mode=args.sample)
     write_regime_tables(regime_table)
     if not args.sample:
         write_paper_values(regime_table, as_of_label=as_of_label)
-        write_exhibits_manifest()
+        write_exhibits_manifest(
+            ecosystem_figure_qa=ecosystem_figure_qa,
+            regime_figure_qa=regime_figure_qa,
+        )
 
     print(f"Wrote {ECOSYSTEM_FIGURE_PATH.relative_to(REPO_ROOT)}")
     print(f"Wrote {REGIME_FIGURE_PATH.relative_to(REPO_ROOT)}")
@@ -251,7 +258,36 @@ def build_regime_summary(ecosystem: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def write_ecosystem_figure(ecosystem: pd.DataFrame, *, as_of_label: str, sample_mode: bool) -> None:
+def derive_figure_self_qa(
+    axes: tuple[plt.Axes, ...],
+    *,
+    declared_unit_tokens: tuple[tuple[str, ...], ...],
+    alt_text: str,
+) -> dict[str, object]:
+    """Derive manifest QA facts from the Matplotlib artists being saved."""
+    if len(axes) != len(declared_unit_tokens):
+        raise ValueError("figure_self_qa_axis_unit_mismatch")
+    axis_labels = [
+        (axis.get_xlabel().strip(), axis.get_ylabel().strip())
+        for axis in axes
+    ]
+    return {
+        "labels": all(bool(xlabel) and bool(ylabel) for xlabel, ylabel in axis_labels),
+        "legend": all(axis.get_legend() is not None for axis in axes),
+        "units": all(
+            all(token.casefold() in f"{xlabel} {ylabel}".casefold() for token in tokens)
+            for (xlabel, ylabel), tokens in zip(axis_labels, declared_unit_tokens, strict=True)
+        ),
+        "alt_text": alt_text.strip(),
+    }
+
+
+def write_ecosystem_figure(
+    ecosystem: pd.DataFrame,
+    *,
+    as_of_label: str,
+    sample_mode: bool,
+) -> dict[str, object]:
     fig, (ax_top, ax_bottom) = plt.subplots(
         2,
         1,
@@ -265,6 +301,7 @@ def write_ecosystem_figure(ecosystem: pd.DataFrame, *, as_of_label: str, sample_
     ax_top.plot(ecosystem["date_utc"], ecosystem["rent_paid_14d"], color="#d97706", linewidth=2.2, label="L1 rent (14d mean)")
     ax_top.axvline(DENCUN_DATE, color="#7c3aed", linestyle="--", linewidth=1.2, alpha=0.8, label="Dencun")
     ax_top.set_ylabel("ETH / day")
+    ax_top.set_xlabel("Date (UTC)")
     ax_top.set_title(f"Ecosystem fee and rent levels through {ecosystem['date_utc'].max().date().isoformat()}")
     ax_top.legend(loc="upper right", frameon=False)
     ax_top.grid(axis="y", alpha=0.25)
@@ -273,7 +310,8 @@ def write_ecosystem_figure(ecosystem: pd.DataFrame, *, as_of_label: str, sample_
     ax_bottom.plot(ecosystem["date_utc"], ecosystem["str_30d"], color="#111827", linewidth=2.0, label="30d mean STR")
     ax_bottom.axhline(1.0, color="#dc2626", linestyle=":", linewidth=1.0, alpha=0.8)
     ax_bottom.axvline(DENCUN_DATE, color="#7c3aed", linestyle="--", linewidth=1.2, alpha=0.8)
-    ax_bottom.set_ylabel("STR")
+    ax_bottom.set_ylabel("STR (%)")
+    ax_bottom.set_xlabel("Date (UTC)")
     ax_bottom.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
     ax_bottom.grid(axis="y", alpha=0.25)
     ax_bottom.legend(loc="upper right", frameon=False)
@@ -282,16 +320,28 @@ def write_ecosystem_figure(ecosystem: pd.DataFrame, *, as_of_label: str, sample_
 
     mode_label = "sample" if sample_mode else f"as-of {as_of_label}"
     fig.suptitle(f"Settlement Take Rate ecosystem time series ({mode_label})", fontsize=14, fontweight="bold")
+    self_qa = derive_figure_self_qa(
+        (ax_top, ax_bottom),
+        declared_unit_tokens=(("date", "ETH"), ("date", "%")),
+        alt_text="Daily ecosystem Settlement Take Rate with smoothed L2 fees, smoothed L1 rent, and the Dencun boundary.",
+    )
     fig.savefig(
         ECOSYSTEM_FIGURE_PATH,
         format="svg",
         facecolor="white",
         metadata={"Date": None, "Creator": "build_str_release_outputs.py"},
     )
+    _strip_svg_trailing_whitespace(ECOSYSTEM_FIGURE_PATH)
     plt.close(fig)
+    return self_qa
 
 
-def write_post_dencun_regime_figure(ecosystem: pd.DataFrame, *, as_of_label: str, sample_mode: bool) -> None:
+def write_post_dencun_regime_figure(
+    ecosystem: pd.DataFrame,
+    *,
+    as_of_label: str,
+    sample_mode: bool,
+) -> dict[str, object]:
     post = ecosystem.loc[ecosystem["post_dencun"]].copy()
     if post.empty:
         raise SystemExit("post-Dencun slice is empty; cannot build str_post_dencun_regimes.svg")
@@ -313,6 +363,7 @@ def write_post_dencun_regime_figure(ecosystem: pd.DataFrame, *, as_of_label: str
         threshold = post["l1_blob_base_fee_gwei"].min() * 1.05
         ax_top.axhline(threshold, color="#b45309", linestyle="--", linewidth=1.1, label="Floor threshold")
     ax_top.set_ylabel("Blob base fee (gwei)")
+    ax_top.set_xlabel("Date (UTC)")
     ax_top.set_yscale("log")
     ax_top.set_title("Post-Dencun blob-fee regime detection")
     ax_top.legend(loc="upper right", frameon=False)
@@ -321,7 +372,8 @@ def write_post_dencun_regime_figure(ecosystem: pd.DataFrame, *, as_of_label: str
     ax_bottom.plot(post["date_utc"], post["str"], color="#cbd5e1", linewidth=0.9, alpha=0.75, label="Daily STR")
     ax_bottom.plot(post["date_utc"], post["str_14d"], color="#1d4ed8", linewidth=2.2, label="14d mean STR")
     ax_bottom.axhline(1.0, color="#dc2626", linestyle=":", linewidth=1.0, alpha=0.8)
-    ax_bottom.set_ylabel("STR")
+    ax_bottom.set_ylabel("STR (%)")
+    ax_bottom.set_xlabel("Date (UTC)")
     ax_bottom.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
     ax_bottom.legend(loc="upper right", frameon=False)
     ax_bottom.grid(axis="y", alpha=0.25)
@@ -330,13 +382,25 @@ def write_post_dencun_regime_figure(ecosystem: pd.DataFrame, *, as_of_label: str
 
     mode_label = "sample" if sample_mode else f"as-of {as_of_label}"
     fig.suptitle(f"Post-Dencun STR regimes ({mode_label})", fontsize=14, fontweight="bold")
+    self_qa = derive_figure_self_qa(
+        (ax_top, ax_bottom),
+        declared_unit_tokens=(("date", "gwei"), ("date", "%")),
+        alt_text="Post-Dencun daily Settlement Take Rate, 14-day mean STR, and shaded blob fee floor periods.",
+    )
     fig.savefig(
         REGIME_FIGURE_PATH,
         format="svg",
         facecolor="white",
         metadata={"Date": None, "Creator": "build_str_release_outputs.py"},
     )
+    _strip_svg_trailing_whitespace(REGIME_FIGURE_PATH)
     plt.close(fig)
+    return self_qa
+
+
+def _strip_svg_trailing_whitespace(path: Path) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    path.write_text("\n".join(line.rstrip() for line in lines) + "\n", encoding="utf-8")
 
 
 def shade_regime_spans(axis: plt.Axes, post: pd.DataFrame) -> None:
@@ -687,7 +751,11 @@ def write_paper_values(regime_table: pd.DataFrame, *, as_of_label: str) -> None:
     )
 
 
-def write_exhibits_manifest() -> None:
+def write_exhibits_manifest(
+    *,
+    ecosystem_figure_qa: dict[str, object],
+    regime_figure_qa: dict[str, object],
+) -> None:
     """Emit the deterministic analysis-to-paper interface with build-time QA facts."""
     input_paths = sorted(
         (
@@ -715,12 +783,7 @@ def write_exhibits_manifest() -> None:
             "output": "reports/figures/str_ecosystem_timeseries.svg",
             "caption": "Settlement Take Rate ecosystem time series through the validated as-of date.",
             "notes": "Two-panel multi-series figure; plotted values are bound by the matching .data.json sidecar.",
-            "self_qa": {
-                "labels": True,
-                "legend": True,
-                "units": True,
-                "alt_text": "Daily ecosystem Settlement Take Rate with smoothed L2 fees, smoothed L1 rent, and the Dencun boundary.",
-            },
+            "self_qa": ecosystem_figure_qa,
         },
         {
             "exhibit_id": "str_post_dencun_regimes",
@@ -729,12 +792,7 @@ def write_exhibits_manifest() -> None:
             "output": "reports/figures/str_post_dencun_regimes.svg",
             "caption": "Post-Dencun STR regimes with protocol-defined blob-fee-floor runs.",
             "notes": "Two-panel multi-series figure; plotted values are bound by the matching .data.json sidecar.",
-            "self_qa": {
-                "labels": True,
-                "legend": True,
-                "units": True,
-                "alt_text": "Post-Dencun daily Settlement Take Rate, 14-day mean STR, and shaded blob fee floor periods.",
-            },
+            "self_qa": regime_figure_qa,
         },
         {
             "exhibit_id": "str_regime_summary",

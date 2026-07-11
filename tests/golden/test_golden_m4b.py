@@ -36,6 +36,17 @@ def _load_swarm():
     return module
 
 
+def _load_analysis_builder():
+    path = ROOT / "src" / "analysis" / "build_str_release_outputs.py"
+    sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location("golden_m4b_analysis_builder", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _write(root: Path, relpath: str, text: str) -> Path:
     path = root / relpath
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,6 +145,96 @@ def _write_exhibits(root: Path, entry: dict[str, object]) -> None:
     )
 
 
+def _passing_registry_fixture(
+    root: Path,
+    *,
+    registry_id: str = "section_abstract",
+    artifact_relpath: str = "reports/paper/index.qmd",
+    journaled: bool = True,
+) -> tuple[Path, dict[str, object]]:
+    _copy(root, "contracts/schemas/paper_registry_v1.json")
+    _copy(root, "contracts/schemas/referee_report_v1.json")
+    manuscript = root / "reports/paper/index.qmd"
+    if not manuscript.is_file():
+        _write(root, "reports/paper/index.qmd", "## Abstract\n\nText.\n")
+    artifact = root / artifact_relpath
+    if not artifact.is_file():
+        _write(root, artifact_relpath, "fixture artifact\n")
+    artifact_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    report: dict[str, object] = {
+        "schema_version": "research_swarm.referee_report.v1",
+        "task_id": "T900",
+        "actor": "Referee",
+        "session_id": "fixture-referee-session",
+        "referee_family": "independent-fixture",
+        "run_manifest_sha256": "a" * 64,
+        "rubric_version": "fixture-v1",
+        "verdicts": [
+            {
+                "check_id": "authority-check",
+                "verdict": "supported",
+                "severity": "minor",
+                "evidence_pointer": f"{artifact_relpath}:1",
+                "note": "Fixture independently supports the artifact.",
+            }
+        ],
+        "opened_artifacts": [
+            {"path": artifact_relpath, "sha256": artifact_sha, "quoted_span": "fixture"}
+        ],
+        "reviewed_artifacts": [artifact_relpath],
+        "overall": "supported",
+        "valid": True,
+    }
+    report_path = _write_json(root, "reports/status/referee_reports/T900_fixture.json", report)
+    if journaled:
+        _write(
+            root,
+            "reports/status/events/events.jsonl",
+            json.dumps(
+                {
+                    "event": "referee_invoked",
+                    "task_id": "T900",
+                    "run_manifest_sha256": "a" * 64,
+                    "actor": "Referee",
+                    "session_id": "fixture-referee-session",
+                    "actor_session": "fixture-referee-session",
+                },
+                sort_keys=True,
+            )
+            + "\n",
+        )
+    _write_json(
+        root,
+        "reports/paper/registry.json",
+        {
+            "schema_version": "research_swarm.paper_registry.v1",
+            "entries": [
+                {
+                    "registry_id": registry_id,
+                    "kind": registry_id.split("_", 1)[0],
+                    "required": True,
+                    "status": "passing",
+                    "artifact": {"path": artifact_relpath, "sha256": artifact_sha},
+                    "referee_report": {
+                        "path": report_path.relative_to(root).as_posix(),
+                        "sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
+                    },
+                    "reason": "independently supported fixture",
+                }
+            ],
+        },
+    )
+    return report_path, report
+
+
+def _rewrite_bound_report(root: Path, report_path: Path, report: dict[str, object]) -> None:
+    _write_json(root, report_path.relative_to(root).as_posix(), report)
+    registry_path = root / "reports/paper/registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["entries"][0]["referee_report"]["sha256"] = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    _write_json(root, "reports/paper/registry.json", registry)
+
+
 class GoldenM4bTests(unittest.TestCase):
     def test_planner_prompt_references_and_embeds_canonical_mode_template(self) -> None:
         # The empirical prompt must name the single canonical file and carry its
@@ -143,6 +244,14 @@ class GoldenM4bTests(unittest.TestCase):
         self.assertIn("contracts/program_templates/empirical.yaml", prompt)
         self.assertIn('"node_id": "estimation_plan"', prompt)
         self.assertIn("scripts/generate_revision_tasks.py", prompt)
+
+    def test_planner_prompt_rejects_unknown_mode_before_path_lookup(self) -> None:
+        swarm = _load_swarm()
+        with self.assertRaisesRegex(
+            ValueError,
+            r"^planner_mode_unsupported:None:expected=empirical,modeling,hybrid$",
+        ):
+            swarm._render_planner_prompt(mode=None, context={})  # type: ignore[arg-type]
 
     def test_program_dag_missing_required_node_fails_conformance(self) -> None:
         # The empirical template independently declares 11 required nodes; zero
@@ -188,6 +297,17 @@ class GoldenM4bTests(unittest.TestCase):
                 self.assertEqual(result.details["mode"], mode)
                 self.assertEqual(len(missing), expected_required)
 
+    def test_uninstantiated_program_fails_at_release_perimeter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _program_fixture(root)
+            result = quality_gates.check_program_conformance(root, release_perimeter=True)
+            self.assertFalse(result.ok)
+            self.assertEqual(
+                _reasons(result),
+                {"program_conformance_not_instantiated_at_release"},
+            )
+
     def test_manuscript_referenced_exhibit_absent_from_manifest_fails(self) -> None:
         # The manuscript target and registered output are distinct paths, so
         # exact/same-stem matching has the independently expected result false.
@@ -200,6 +320,49 @@ class GoldenM4bTests(unittest.TestCase):
             result = quality_gates.check_exhibits_manifest(root)
             self.assertFalse(result.ok)
             self.assertIn("manuscript_exhibit_unregistered", _reasons(result))
+
+    def test_raw_html_image_absent_from_manifest_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, entry = _exhibit_fixture(root)
+            _write(root, "reports/paper/index.qmd", '<img src="../figures/x.svg" alt="x">\n')
+            _write(root, "reports/figures/x.svg", "<svg/>\n")
+            _write_exhibits(root, entry)
+            result = quality_gates.check_exhibits_manifest(root)
+            self.assertFalse(result.ok)
+            self.assertIn("manuscript_exhibit_unregistered", _reasons(result))
+
+    def test_quarto_embed_absent_from_manifest_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, entry = _exhibit_fixture(root)
+            _write(root, "reports/paper/index.qmd", "{{< embed ../figures/x.svg >}}\n")
+            _write(root, "reports/figures/x.svg", "<svg/>\n")
+            _write_exhibits(root, entry)
+            result = quality_gates.check_exhibits_manifest(root)
+            self.assertFalse(result.ok)
+            self.assertIn("manuscript_exhibit_unregistered", _reasons(result))
+
+    def test_same_stem_different_extension_is_not_registered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, entry = _exhibit_fixture(root)
+            _write(root, "reports/paper/index.qmd", "![Mismatch](../figures/registered.png)\n")
+            _write(root, "reports/figures/registered.png", "png fixture\n")
+            _write_exhibits(root, entry)
+            result = quality_gates.check_exhibits_manifest(root)
+            self.assertFalse(result.ok)
+            self.assertIn("manuscript_exhibit_unregistered", _reasons(result))
+
+    def test_outside_repo_exhibit_reference_is_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            _, entry = _exhibit_fixture(root)
+            _write(root, "reports/paper/index.qmd", "![Outside](../../../../outside.svg)\n")
+            _write_exhibits(root, entry)
+            result = quality_gates.check_exhibits_manifest(root)
+            self.assertFalse(result.ok)
+            self.assertIn("manuscript_exhibit_reference_unresolved", _reasons(result))
 
     def test_manifest_entry_with_bad_input_hash_fails(self) -> None:
         # SHA-256("data/input.csv") is not 64 zeroes, so recomputation must fail.
@@ -229,6 +392,56 @@ class GoldenM4bTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertEqual(fields, {"legend", "units"})
 
+    def test_label_less_figure_derives_false_and_fails_exhibits_gate(self) -> None:
+        builder = _load_analysis_builder()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output, entry = _exhibit_fixture(root)
+            fig, axis = builder.plt.subplots()
+            axis.plot([1, 2], [1, 2], label="Series")
+            axis.set_ylabel("ETH")
+            axis.legend()
+            qa = builder.derive_figure_self_qa(
+                (axis,),
+                declared_unit_tokens=(("ETH",),),
+                alt_text="Fixture figure.",
+            )
+            fig.savefig(output)
+            builder.plt.close(fig)
+            self.assertFalse(qa["labels"])
+            self.assertTrue(qa["legend"])
+            self.assertTrue(qa["units"])
+            entry["self_qa"] = qa
+            _write_exhibits(root, entry)
+            result = quality_gates.check_exhibits_manifest(root)
+            self.assertFalse(result.ok)
+            self.assertIn("exhibit_self_qa_failed", _reasons(result))
+
+    def test_legendless_figure_derives_false_and_fails_exhibits_gate(self) -> None:
+        builder = _load_analysis_builder()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output, entry = _exhibit_fixture(root)
+            fig, axis = builder.plt.subplots()
+            axis.plot([1, 2], [1, 2])
+            axis.set_xlabel("Date (UTC)")
+            axis.set_ylabel("ETH")
+            qa = builder.derive_figure_self_qa(
+                (axis,),
+                declared_unit_tokens=(("date", "ETH"),),
+                alt_text="Fixture figure.",
+            )
+            fig.savefig(output)
+            builder.plt.close(fig)
+            self.assertTrue(qa["labels"])
+            self.assertFalse(qa["legend"])
+            self.assertTrue(qa["units"])
+            entry["self_qa"] = qa
+            _write_exhibits(root, entry)
+            result = quality_gates.check_exhibits_manifest(root)
+            self.assertFalse(result.ok)
+            self.assertIn("exhibit_self_qa_failed", _reasons(result))
+
     def test_hand_edited_passing_registry_without_evidence_fails(self) -> None:
         # A null artifact/referee binding cannot authorize `passing`, regardless
         # of the hand-edited status string.
@@ -257,6 +470,81 @@ class GoldenM4bTests(unittest.TestCase):
             result = quality_gates.check_paper_registry(root)
             self.assertFalse(result.ok)
             self.assertIn("paper_registry_passing_artifact_missing", _reasons(result))
+
+    def test_passing_exhibit_registry_entry_must_target_canonical_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, entry = _exhibit_fixture(root)
+            _write_exhibits(root, entry)
+            _passing_registry_fixture(
+                root,
+                registry_id="exhibit_registered",
+                artifact_relpath="reports/paper/index.qmd",
+            )
+            result = quality_gates.check_paper_registry(root)
+            self.assertFalse(result.ok)
+            self.assertIn("paper_registry_entry_artifact_not_canonical", _reasons(result))
+
+    def test_passing_section_registry_entry_must_target_manuscript(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output, entry = _exhibit_fixture(root)
+            _write_exhibits(root, entry)
+            _passing_registry_fixture(
+                root,
+                registry_id="section_abstract",
+                artifact_relpath=output.relative_to(root).as_posix(),
+            )
+            result = quality_gates.check_paper_registry(root)
+            self.assertFalse(result.ok)
+            self.assertIn("paper_registry_entry_artifact_not_canonical", _reasons(result))
+
+    def test_passing_registry_requires_journaled_referee_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _passing_registry_fixture(root, journaled=False)
+            result = quality_gates.check_paper_registry(root)
+            self.assertFalse(result.ok)
+            self.assertIn("paper_registry_passing_referee_unjournaled", _reasons(result))
+
+    def test_passing_registry_requires_supported_overall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report_path, report = _passing_registry_fixture(root)
+            report["overall"] = "not_supported"
+            _rewrite_bound_report(root, report_path, report)
+            result = quality_gates.check_paper_registry(root)
+            self.assertFalse(result.ok)
+            self.assertIn("paper_registry_passing_referee_not_supported", _reasons(result))
+
+    def test_passing_registry_requires_artifact_in_reviewed_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report_path, report = _passing_registry_fixture(root)
+            report["opened_artifacts"] = []
+            report["reviewed_artifacts"] = []
+            _rewrite_bound_report(root, report_path, report)
+            result = quality_gates.check_paper_registry(root)
+            self.assertFalse(result.ok)
+            self.assertIn("paper_registry_passing_referee_artifact_unreviewed", _reasons(result))
+
+    def test_passing_registry_rejects_open_major_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report_path, report = _passing_registry_fixture(root)
+            report["verdicts"] = [
+                {
+                    "check_id": "open-major",
+                    "verdict": "not_supported",
+                    "severity": "major",
+                    "evidence_pointer": "reports/paper/index.qmd:1",
+                    "note": "Independent major finding remains open.",
+                }
+            ]
+            _rewrite_bound_report(root, report_path, report)
+            result = quality_gates.check_paper_registry(root)
+            self.assertFalse(result.ok)
+            self.assertIn("paper_registry_passing_referee_open_major", _reasons(result))
 
     def test_failing_required_registry_entry_blocks_release_perimeter(self) -> None:
         # One required entry with status `failing` makes the all-required-passing

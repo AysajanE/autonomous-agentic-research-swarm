@@ -18,6 +18,7 @@ from runtime_test_utils import (
     REPO_ROOT,
     chdir,
     init_git_fixture_repo,
+    instantiate_program_fixture,
     load_quality_gates_module,
     load_swarm_module,
     scaffold_runtime_repo,
@@ -132,6 +133,24 @@ def _materialize_release_surface(fixture: "RefereeFixture") -> None:
     # F2) — and the render_manifest declares all six perimeter inputs with real hashes so
     # the render-perimeter verification passes.
     root = fixture.root
+    program_task = write_task(
+        root,
+        "backlog",
+        "T998",
+        task_kind="analysis",
+        workstream="W6",
+        role="Worker",
+        state="backlog",
+        slug="release_program_fixture",
+    )
+    instantiate_program_fixture(
+        root,
+        program_task,
+        mode=fixture.mode,
+        task_kind="analysis",
+        role="Worker",
+        workstream="W6",
+    )
     write_text(root, "reports/paper/index.qmd", "# Paper\n\nThe validated result.\n")
     write_text(root, "reports/paper/references.bib", "@misc{fixture}\n")
     write_text(root, "reports/paper/_quarto.yml", "project: default\n")
@@ -168,6 +187,9 @@ class RefereeFixture:
     def __init__(self, root: Path, task_id: str = "T850", *, task_kind: str = "analysis", text: str | None = None, workstream: str = "W4", complexity_tier: str = "S", mode: str = "empirical") -> None:
         self.root = root
         self.task_id = task_id
+        self.task_kind = task_kind
+        self.workstream = workstream
+        self.mode = mode
         scaffold_runtime_repo(root, mode=mode)
         _configure_mock_panel(root)
         shutil.copytree(REPO_ROOT / "tests/gold_set", root / "tests/gold_set", dirs_exist_ok=True)

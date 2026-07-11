@@ -4,7 +4,9 @@ from datetime import date
 import importlib.util
 import json
 from functools import lru_cache
+import hashlib
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -14,6 +16,7 @@ if str(_TESTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_TESTS_ROOT))
 
 from runtime_test_utils import (
+    instantiate_program_fixture,
     scaffold_runtime_repo,
     write_json,
     write_review_log,
@@ -155,6 +158,13 @@ def scaffold_release_ready_repo(
         state="done",
         slug="validation",
     )
+    instantiate_program_fixture(
+        root,
+        task_path,
+        task_kind="validation",
+        role="Worker",
+        workstream="W5",
+    )
     run_manifest_path = write_run_manifest(
         root,
         "T500",
@@ -177,6 +187,69 @@ def scaffold_release_ready_repo(
 
 
 class ReleaseAssemblyTest(unittest.TestCase):
+    def test_allow_gate_failures_cannot_bypass_failing_paper_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_release_ready_repo(root, include_paper=False)
+            manuscript = write_text(root, "reports/paper/index.qmd", "## Abstract\n\nText.\n")
+            schema = root / "contracts/schemas/paper_registry_v1.json"
+            schema.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(
+                Path(__file__).resolve().parents[1] / "contracts/schemas/paper_registry_v1.json",
+                schema,
+            )
+            write_json(
+                root,
+                "reports/paper/registry.json",
+                {
+                    "schema_version": "research_swarm.paper_registry.v1",
+                    "entries": [
+                        {
+                            "registry_id": "section_abstract",
+                            "kind": "section",
+                            "required": True,
+                            "status": "failing",
+                            "artifact": {
+                                "path": "reports/paper/index.qmd",
+                                "sha256": hashlib.sha256(manuscript.read_bytes()).hexdigest(),
+                            },
+                            "referee_report": None,
+                            "reason": "awaiting referee",
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "release_assembly_blocked:.*paper_registry_required_entry_failing",
+            ):
+                release_assembly.write_release(
+                    root,
+                    date(2026, 3, 31),
+                    allow_gate_failures=True,
+                )
+
+    def test_allow_gate_failures_cannot_bypass_uninstantiated_program(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scaffold_release_ready_repo(root, include_paper=False)
+            task_path = next((root / ".orchestrator/done").glob("T500*.md"))
+            text = task_path.read_text(encoding="utf-8")
+            text = text.replace('program_id: "release_fixture"\n', "")
+            text = text.replace('program_node: "release_ready"\n', "")
+            task_path.write_text(text, encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "release_assembly_blocked:.*program_conformance_not_instantiated_at_release",
+            ):
+                release_assembly.write_release(
+                    root,
+                    date(2026, 3, 31),
+                    allow_gate_failures=True,
+                )
+
     def test_required_release_perimeter_member_removed_from_inventory_is_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

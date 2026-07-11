@@ -8,6 +8,7 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from typing import Any
@@ -84,6 +85,52 @@ def write_json(root: Path, rel: str, data: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def instantiate_program_fixture(
+    root: Path,
+    task_path: Path,
+    *,
+    mode: str = "empirical",
+    task_kind: str,
+    role: str,
+    workstream: str,
+) -> None:
+    """Bind one existing fixture task to a minimal valid mode program."""
+    schema_target = root / "contracts/schemas/program_template_v1.yaml"
+    schema_target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(REPO_ROOT / "contracts/schemas/program_template_v1.yaml", schema_target)
+    write_json(
+        root,
+        f"contracts/program_templates/{mode}.yaml",
+        {
+            "program_template": "research_swarm.program_template.v1",
+            "mode": mode,
+            "programs": [
+                {
+                    "program_id": "release_fixture",
+                    "workstream": workstream,
+                    "nodes": [
+                        {
+                            "node_id": "release_ready",
+                            "task_kind": task_kind,
+                            "role": role,
+                            "produces": "release_fixture_evidence",
+                            "depends_on": [],
+                            "required": True,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    text = task_path.read_text(encoding="utf-8")
+    marker = "\n---\n"
+    if marker not in text:
+        raise ValueError(f"program_fixture_task_frontmatter_missing:{task_path}")
+    frontmatter, body = text.split(marker, 1)
+    frontmatter += '\nprogram_id: "release_fixture"\nprogram_node: "release_ready"'
+    task_path.write_text(frontmatter + marker + body, encoding="utf-8")
 
 
 def mkdir(root: Path, rel: str) -> Path:

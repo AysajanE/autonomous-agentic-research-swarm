@@ -724,6 +724,11 @@ def _planner_passthrough_env() -> dict[str, str]:
 
 
 def _render_planner_prompt(*, mode: str, context: dict[str, object]) -> str:
+    supported_modes = ("empirical", "modeling", "hybrid")
+    if mode not in supported_modes:
+        raise ValueError(
+            f"planner_mode_unsupported:{mode!r}:expected={','.join(supported_modes)}"
+        )
     template_path = Path("contracts/program_templates") / f"{mode}.yaml"
     try:
         program_template = json.loads(template_path.read_text(encoding="utf-8"))

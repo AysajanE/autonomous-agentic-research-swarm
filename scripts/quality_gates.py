@@ -9331,6 +9331,7 @@ def check_program_conformance(
     repo: Path = Path("."),
     *,
     strict: bool | None = None,
+    release_perimeter: bool = False,
 ) -> GateResult:
     """Validate instantiated program-node metadata against the mode template.
 
@@ -9357,7 +9358,24 @@ def check_program_conformance(
         repo / PREREG_PHASE_FILES["2b"], expected_phase="2b"
     )
     lock_active = lock_error is None and lock is not None and lock.get("active") is True
-    active = strict if strict is not None else bool(lock_active or tagged_paths)
+    if release_perimeter and not tagged_paths:
+        return GateResult(
+            ok=False,
+            details={
+                "status": "release_program_not_instantiated",
+                "skipped": False,
+                "release_perimeter": True,
+                "mode": mode,
+                "template": f"contracts/program_templates/{mode}.yaml",
+                "failures": [
+                    _science_failure(
+                        "program_conformance_not_instantiated_at_release",
+                        subject=mode,
+                    )
+                ],
+            },
+        )
+    active = strict if strict is not None else bool(release_perimeter or lock_active or tagged_paths)
     if not active:
         return GateResult(
             ok=True,
@@ -9509,6 +9527,7 @@ def check_program_conformance(
         ok=not failures,
         details={
             "status": "active",
+            "release_perimeter": release_perimeter,
             "mode": mode,
             "template": f"contracts/program_templates/{mode}.yaml",
             "task_count": len(task_records),
@@ -9519,8 +9538,8 @@ def check_program_conformance(
     )
 
 
-def gate_program_conformance() -> GateResult:
-    return check_program_conformance(Path("."))
+def gate_program_conformance(*, release_perimeter: bool = False) -> GateResult:
+    return check_program_conformance(Path("."), release_perimeter=release_perimeter)
 
 
 def _paper_reference_paths(repo: Path) -> set[str]:
@@ -9528,24 +9547,49 @@ def _paper_reference_paths(repo: Path) -> set[str]:
     if not manuscript.is_file():
         return set()
     text = _read_text(manuscript)
-    raw_targets = [
-        match.group(1).strip()
-        for match in re.finditer(r"!\[[^\]]*\]\(([^)\s]+)", text)
-    ]
-    raw_targets.extend(
-        match.group(1).strip().strip("'\"")
-        for match in re.finditer(r"\{\{<\s*include\s+([^\s>]+)", text)
+    patterns = (
+        re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)"),
+        re.compile(
+            r"<img\b[^>]*\bsrc\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))[^>]*>",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            r"\{\{<\s*(?:include|embed)\s+(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))\s*>\}\}",
+            flags=re.IGNORECASE,
+        ),
     )
+    raw_targets: list[tuple[str, int]] = []
+    matched_lines: set[int] = set()
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            raw = next((group for group in match.groups() if group is not None), "")
+            line_number = text.count("\n", 0, match.start()) + 1
+            raw_targets.append((raw.strip(), line_number))
+            matched_lines.add(line_number)
+
     references: set[str] = set()
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if (
+            any(marker in line.casefold() for marker in ("![", "<img", "{{< include", "{{< embed"))
+            and line_number not in matched_lines
+        ):
+            references.add(f"unresolved:line_{line_number}:{line.strip()}")
+
     paper_dir = manuscript.parent
-    for raw in raw_targets:
-        if re.match(r"^[a-z]+://", raw, flags=re.IGNORECASE):
+    for raw, line_number in raw_targets:
+        if re.match(r"^(?:[a-z][a-z0-9+.-]*:)?//", raw, flags=re.IGNORECASE):
+            continue
+        if not raw or any(character in raw for character in "{}<>") or "?" in raw or "#" in raw:
+            references.add(f"unresolved:line_{line_number}:{raw}")
+            continue
+        if raw.casefold().endswith(".qmd"):
+            # M4-C owns recursive scanning of included manuscript sub-documents.
             continue
         try:
             resolved = (paper_dir / raw).resolve()
             references.add(resolved.relative_to(repo).as_posix())
         except ValueError:
-            references.add(f"outside_repo:{raw}")
+            references.add(f"unresolved:line_{line_number}:{raw}")
     return references
 
 
@@ -9567,6 +9611,10 @@ def _paper_value_source_paths(repo: Path) -> set[str]:
 
 
 def _same_exhibit_surface(left: str, right: str) -> bool:
+    return left == right
+
+
+def _same_exhibit_family(left: str, right: str) -> bool:
     left_path = Path(left)
     right_path = Path(right)
     return left == right or (
@@ -9679,16 +9727,30 @@ def check_exhibits_manifest(repo: Path = Path(".")) -> GateResult:
 
     manuscript_references = _paper_reference_paths(repo)
     value_sources = _paper_value_source_paths(repo)
-    required_surfaces = manuscript_references | value_sources
-    for reference in sorted(required_surfaces):
-        if reference.startswith("outside_repo:") or not any(
-            _same_exhibit_surface(reference, output) for output in outputs
-        ):
+    for reference in sorted(manuscript_references):
+        if reference.startswith("unresolved:"):
+            failures.append(
+                _science_failure(
+                    "manuscript_exhibit_reference_unresolved",
+                    subject=reference,
+                    expected="local repository-relative exhibit path",
+                )
+            )
+        elif not any(_same_exhibit_surface(reference, output) for output in outputs):
             failures.append(
                 _science_failure(
                     "manuscript_exhibit_unregistered",
                     subject=reference,
                     expected="reports/exhibits/manifest.json entry",
+                )
+            )
+    for source in sorted(value_sources):
+        if not any(_same_exhibit_family(source, output) for output in outputs):
+            failures.append(
+                _science_failure(
+                    "manuscript_exhibit_unregistered",
+                    subject=source,
+                    expected="reports/exhibits/manifest.json entry or same-stem data source",
                 )
             )
 
@@ -9698,7 +9760,7 @@ def check_exhibits_manifest(repo: Path = Path(".")) -> GateResult:
             if not any(_same_exhibit_surface(output, reference) for reference in manuscript_references):
                 continue
             if _artifact_contains_numeric(repo / output) and not any(
-                _same_exhibit_surface(output, source) for source in value_sources
+                _same_exhibit_family(output, source) for source in value_sources
             ):
                 failures.append(
                     _science_failure(
@@ -9736,14 +9798,21 @@ def _paper_section_registry_ids(manuscript: Path) -> set[str]:
 
 
 def _paper_exhibit_registry_ids(repo: Path) -> set[str]:
+    return set(_paper_exhibit_registry_artifacts(repo))
+
+
+def _paper_exhibit_registry_artifacts(repo: Path) -> dict[str, str]:
     payload, error = _load_json_file(repo / "reports" / "exhibits" / "manifest.json")
     if error is not None or payload is None or not isinstance(payload.get("exhibits"), list):
-        return set()
-    return {
-        f"exhibit_{item['exhibit_id']}"
-        for item in payload["exhibits"]
-        if isinstance(item, dict) and isinstance(item.get("exhibit_id"), str)
-    }
+        return {}
+    artifacts: dict[str, str] = {}
+    for item in payload["exhibits"]:
+        if not isinstance(item, dict) or not isinstance(item.get("exhibit_id"), str):
+            continue
+        output = _safe_repo_relative_path(item.get("output"))
+        if output is not None:
+            artifacts[f"exhibit_{item['exhibit_id']}"] = output.as_posix()
+    return artifacts
 
 
 def _paper_registry_passing_failures(
@@ -9877,6 +9946,7 @@ def check_paper_registry(
         )
     entries = payload.get("entries")
     entries = entries if isinstance(entries, list) else []
+    exhibit_artifacts = _paper_exhibit_registry_artifacts(repo)
     by_id: dict[str, dict[str, object]] = {}
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
@@ -9895,6 +9965,22 @@ def check_paper_registry(
                     subject=registry_id,
                     expected=expected_kind,
                     actual=entry.get("kind"),
+                )
+            )
+        artifact = entry.get("artifact")
+        artifact_path = _safe_repo_relative_path(artifact.get("path")) if isinstance(artifact, dict) else None
+        canonical_artifact = (
+            "reports/paper/index.qmd"
+            if registry_id.startswith("section_")
+            else exhibit_artifacts.get(registry_id)
+        )
+        if artifact_path is None or artifact_path.as_posix() != canonical_artifact:
+            failures.append(
+                _science_failure(
+                    "paper_registry_entry_artifact_not_canonical",
+                    subject=registry_id,
+                    expected=canonical_artifact,
+                    actual=artifact_path.as_posix() if artifact_path is not None else None,
                 )
             )
         if entry.get("status") == "passing":
