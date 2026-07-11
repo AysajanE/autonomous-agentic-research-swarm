@@ -780,9 +780,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 69621,
+      "bytes": 71750,
       "path": "docs/first_class_swarm_execution_log.md",
-      "sha256": "2952d4eb0df19a3754baeb595ca7946b1877abab23f77b969373847a837bc44e",
+      "sha256": "7de54c3d422496f27dbc26eb7213dfbe27efcad464eb1000ac3c74cebb429b55",
       "verification_bar": "byte_identity"
     },
     {
