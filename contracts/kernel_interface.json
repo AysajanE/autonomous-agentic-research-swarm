@@ -1,0 +1,33 @@
+{
+  "schema_version": "research_swarm.kernel_interface.v1",
+  "kernel_version": "1.0.0",
+  "task_schema_version": "research_swarm.task.v2",
+  "manifest_schema_versions": {
+    "claims": "research_swarm.claims.v1",
+    "experiment": "research_swarm.experiment_manifest.v1",
+    "instance": "research_swarm.instance_manifest.v1",
+    "integrity_audit": "research_swarm.integrity_audit.v1",
+    "judge_review": "research_swarm.judge_review_log.v2",
+    "literature": "research_swarm.literature_manifest.v1",
+    "paper_registry": "research_swarm.paper_registry.v1",
+    "processed": "research_swarm.processed_manifest.v2",
+    "raw": "research_swarm.raw_manifest.v1",
+    "referee": "research_swarm.referee_report.v1",
+    "release": "research_swarm.release_manifest.v1",
+    "run": "research_swarm.runtime_run_manifest.v2"
+  },
+  "gate_registration_api_version": "1.0.0",
+  "executor_config_version": "1.0.0",
+  "reserved_claim_ref_namespaces": [
+    "refs/swarm/claims/<program>/T###"
+  ],
+  "semver_policy": {
+    "breaking_changes": [
+      "removal of a manifest field",
+      "removal of a task-schema field",
+      "change to gate semantics"
+    ],
+    "additive_changes": "minor",
+    "compatible_fixes": "patch"
+  }
+}

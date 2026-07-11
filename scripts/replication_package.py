@@ -17,27 +17,31 @@ import tempfile
 import tomllib
 from typing import Any, Iterable
 
+from pack_config import load_pack_config, pack_value
+
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = "research_swarm.replication_package.v1"
 PROFILES = {"empirical", "modeling", "hybrid"}
-BYTE_PATHS = {
-    "reports/tables/str_regime_summary.csv",
-    "reports/tables/str_regime_summary.md",
-    "reports/paper/paper_values.json",
-    "reports/exhibits/manifest.json",
-}
-CONTENT_PATHS = {
-    "reports/figures/str_ecosystem_timeseries.svg",
-    "reports/figures/str_ecosystem_timeseries.data.json",
-    "reports/figures/str_post_dencun_regimes.svg",
-    "reports/figures/str_post_dencun_regimes.data.json",
-}
-EMPIRICAL_EXPECTED_BARS = {
-    **{path: "byte_identity" for path in BYTE_PATHS},
-    **{path: "content_equivalence" for path in CONTENT_PATHS},
-}
+
+
+def _empirical_expected_bars(repo: Path) -> dict[str, str]:
+    pack = load_pack_config(repo)
+    byte_keys = ("regime_table_csv", "regime_table_markdown", "paper_values", "exhibits_manifest")
+    content_keys = ("ecosystem_figure", "ecosystem_figure_data", "regime_figure", "regime_figure_data")
+    return {
+        **{pack_value(pack, f"analysis.outputs.{key}"): "byte_identity" for key in byte_keys},
+        **{pack_value(pack, f"analysis.outputs.{key}"): "content_equivalence" for key in content_keys},
+    }
+
+
+def _content_paths(repo: Path) -> set[str]:
+    return {
+        path
+        for path, bar in _empirical_expected_bars(repo).items()
+        if bar == "content_equivalence"
+    }
 COMMON_REQUIRED = {"README.md", "MASTER.sh", "package_manifest.json"}
 PROFILE_REQUIRED = {
     "empirical": {
@@ -364,6 +368,8 @@ def _render_readme(profile: str, metadata: dict[str, object]) -> str:
 
 
 def _manifest_members(package: Path) -> list[dict[str, object]]:
+    config_root = package if (package / "contracts" / "pack.json").is_file() else REPO_ROOT
+    content_paths = _content_paths(config_root)
     members: list[dict[str, object]] = []
     for path in sorted(package.rglob("*")):
         if not path.is_file() or path.name == "package_manifest.json":
@@ -371,7 +377,7 @@ def _manifest_members(package: Path) -> list[dict[str, object]]:
         if path.relative_to(package).as_posix().startswith("reports/replication/"):
             continue
         relpath = path.relative_to(package).as_posix()
-        if relpath in CONTENT_PATHS:
+        if relpath in content_paths:
             members.append(
                 {
                     "path": relpath,
@@ -526,7 +532,8 @@ def _required_present(package: Path, relpath: str) -> bool:
 
 def _expected_reproduction_bars(package: Path, profile: str) -> dict[str, str]:
     if profile == "empirical":
-        return dict(EMPIRICAL_EXPECTED_BARS)
+        config_root = package if (package / "contracts" / "pack.json").is_file() else REPO_ROOT
+        return _empirical_expected_bars(config_root)
     spec_path = package / "replication_spec.json"
     if not spec_path.is_file():
         return {}
@@ -742,9 +749,11 @@ def audit_package(package: Path, *, execute_master: bool = False) -> dict[str, o
         for item in manifest.get("members", [])
         if isinstance(item, dict) and isinstance(item.get("path"), str)
     }
+    config_root = package if (package / "contracts" / "pack.json").is_file() else REPO_ROOT
+    content_paths = _content_paths(config_root)
     for relpath, item in sorted(by_member.items()):
         path = package / str(relpath)
-        if relpath in CONTENT_PATHS:
+        if relpath in content_paths:
             if (
                 not path.is_file()
                 or item.get("verification_bar") != "content_equivalence"

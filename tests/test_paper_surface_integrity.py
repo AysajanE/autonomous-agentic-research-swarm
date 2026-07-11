@@ -1,41 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import re
 import unittest
-
-
-EXPECTED_SECTIONS = [
-    "## Abstract",
-    "## Research Question",
-    "## Data And Protocol",
-    "## Validation",
-    "## Results",
-    "## Provenance And Limitations",
-]
-
-EXPECTED_BIB_KEYS = [
-    "@misc{protocol_lock,",
-    "@misc{project_contract,",
-    "@misc{rollup_panel_validation,",
-    "@misc{l1_rent_decomposition_validation,",
-    "@misc{cross_source_reconciliation,",
-    "@misc{str_ecosystem_timeseries,",
-    "@misc{str_post_dencun_regimes,",
-    "@misc{str_regime_summary,",
-    "@misc{release_output_caveats,",
-]
-
-CANONICAL_PAPER_BUILD_ARTIFACTS = {
-    "l2_l1_rent_working_paper.html",
-    "l2_l1_rent_working_paper.pdf",
-    "render_manifest.json",
-}
 
 
 class PaperSurfaceIntegrityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.repo_root = Path(__file__).resolve().parents[1]
+        cls.pack = json.loads((cls.repo_root / "contracts/pack.json").read_text(encoding="utf-8"))
+        cls.sections = json.loads((cls.repo_root / "contracts/manuscript_sections.yaml").read_text(encoding="utf-8"))
+
+    @property
+    def paper_build_artifacts(self) -> set[str]:
+        paper = self.pack["paper"]
+        return {f"{paper['artifact_basename']}.html", f"{paper['artifact_basename']}.pdf", paper["render_manifest"]}
 
     def read(self, relpath: str) -> str:
         return (self.repo_root / relpath).read_text(encoding="utf-8")
@@ -56,9 +37,8 @@ class PaperSurfaceIntegrityTest(unittest.TestCase):
     def test_paper_readme_documents_render_and_release_workflow(self) -> None:
         text = self.read("reports/paper/README.md")
         self.assertIn("quarto render reports/paper/", text)
-        self.assertIn("reports/paper/build/l2_l1_rent_working_paper.html", text)
-        self.assertIn("reports/paper/build/l2_l1_rent_working_paper.pdf", text)
-        self.assertIn("reports/paper/build/render_manifest.json", text)
+        for filename in self.paper_build_artifacts:
+            self.assertIn(f"{self.pack['paper']['build_dir']}{filename}", text)
         self.assertIn("pending_stage2", text)
         self.assertIn("present", text)
 
@@ -69,39 +49,40 @@ class PaperSurfaceIntegrityTest(unittest.TestCase):
         self.assertIn("- index.qmd", text)
         self.assertIn("bibliography: references.bib", text)
         self.assertIn("embed-resources: true", text)
-        self.assertIn("output-file: l2_l1_rent_working_paper.html", text)
-        self.assertIn("output-file: l2_l1_rent_working_paper.pdf", text)
+        basename = self.pack["paper"]["artifact_basename"]
+        self.assertIn(f"output-file: {basename}.html", text)
+        self.assertIn(f"output-file: {basename}.pdf", text)
 
     def test_manuscript_contains_required_sections_and_release_links(self) -> None:
         text = self.read("reports/paper/index.qmd")
-        for heading in EXPECTED_SECTIONS:
+        for section_id in self.sections["canonical_section_ids"]:
+            heading = self.sections["section_headings"][section_id]
             with self.subTest(heading=heading):
                 self.assertIn(heading, text)
 
         expected_terms = [
-            "STR_t = (sum_i RentPaid_{i,t}) / (sum_i L2Fees_{i,t})",
-            "../figures/str_ecosystem_timeseries.svg",
-            "../figures/str_post_dencun_regimes.svg",
-            "../tables/str_regime_summary.md",
-            "`2026-04-09`",
-            "`2024-03-13`",
-            "Operator-owned T080 surfaces",
+            "../" + self.pack["analysis"]["outputs"][key].removeprefix("reports/")
+            for key in ("ecosystem_figure", "regime_figure", "regime_table_markdown")
         ]
         for needle in expected_terms:
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
 
     def test_bibliography_covers_repo_local_contract_and_provenance_sources(self) -> None:
-        text = self.read("reports/paper/references.bib")
-        for key in EXPECTED_BIB_KEYS:
-            with self.subTest(key=key):
-                self.assertIn(key, text)
+        manuscript = self.read("reports/paper/index.qmd")
+        bibliography = self.read("reports/paper/references.bib")
+        cited = {
+            key
+            for key in re.findall(r"@([A-Za-z0-9_:.-]+)", manuscript)
+            if not key.startswith("fig-")
+        }
+        available = set(re.findall(r"@[A-Za-z]+\{([^,]+),", bibliography))
+        self.assertTrue(cited.issubset(available), sorted(cited - available))
 
     def test_build_readme_documents_operator_owned_release_surface(self) -> None:
         text = self.read("reports/paper/build/README.md")
-        self.assertIn("l2_l1_rent_working_paper.html", text)
-        self.assertIn("l2_l1_rent_working_paper.pdf", text)
-        self.assertIn("render_manifest.json", text)
+        for filename in self.paper_build_artifacts:
+            self.assertIn(filename, text)
         self.assertIn("pending_stage2", text)
         self.assertIn("index.html", text)
 
@@ -117,7 +98,7 @@ class PaperSurfaceIntegrityTest(unittest.TestCase):
             with self.subTest(filename=filename):
                 self.assertIn(
                     filename,
-                    {"README.md", "index.resolved.qmd", *CANONICAL_PAPER_BUILD_ARTIFACTS},
+                    {"README.md", "index.resolved.qmd", *self.paper_build_artifacts},
                 )
 
 

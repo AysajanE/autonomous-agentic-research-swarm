@@ -47,6 +47,8 @@ Relevant surfaces:
 The framework separates framework policy from project policy.
 
 - [`contracts/framework.json`](contracts/framework.json) defines framework capabilities, roles, states, task semantics, execution engines, and release policy.
+- [`contracts/pack.json`](contracts/pack.json) defines project-owned names, paths, workstream meanings, and the compatible kernel range.
+- [`contracts/kernel_interface.json`](contracts/kernel_interface.json) versions the kernel surfaces consumed by packs.
 - [`contracts/project.yaml`](contracts/project.yaml) defines the currently instantiated research project.
 - [`docs/protocol.md`](docs/protocol.md) locks empirical definitions when the current project is empirical.
 - [`contracts/model_spec.md`](contracts/model_spec.md) is the modeling specification surface.
@@ -195,12 +197,20 @@ Use the repo as-is to inspect or extend the current empirical project that has b
 
 ### 2. Use the framework for a different research project
 
-Reuse the framework structure and replace the project-specific contract surfaces with a different project instance:
+Generate a compatible inactive pack scaffold, then replace its project-specific contract surfaces:
 
+```sh
+python3.11 scripts/swarm_init.py --mode empirical --output ../my-empirical-pack
+make -C ../my-empirical-pack gate
+```
+
+- update `contracts/pack.json`
 - update [`contracts/project.yaml`](contracts/project.yaml)
 - update the relevant empirical, modeling, or hybrid contracts
 - define the task queue under [`.orchestrator/`](.orchestrator/)
 - keep the same role, state, gate, and review semantics
+
+Use `--mode modeling` or `--mode hybrid` for the other program templates. The generated Makefile points at this repo-native kernel for M5a; physical installable packaging remains the separate M5b decision.
 
 The framework is intended to generalize. The current empirical project is only one concrete instantiation.
 

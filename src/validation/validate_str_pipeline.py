@@ -14,34 +14,37 @@ from typing import Iterable
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
 import pandas as pd
 
 from src.analysis.metrics_str import compute_ecosystem_str, compute_rollup_str
+from pack_config import load_pack_config, pack_value
 
 
 REPORT_DIR = REPO_ROOT / "reports" / "validation"
+PACK = load_pack_config(REPO_ROOT)
 
-PANEL_REQUIRED_COLUMNS = (
-    "date_utc",
-    "rollup_id",
-    "l2_fees_eth",
-    "rent_paid_eth",
-)
-PANEL_OPTIONAL_COLUMNS = ("profit_eth", "txcount")
 
-DECOMP_REQUIRED_COLUMNS = (
-    "date_utc",
-    "l1_base_fee_burn_eth",
-    "l1_blob_fee_burn_eth",
-    "l1_priority_fee_eth",
-    "l1_total_rent_eth",
-)
-DECOMP_OPTIONAL_COLUMNS = (
-    "l1_blob_gas_used",
-    "l1_calldata_gas_used",
-    "l1_blob_base_fee_gwei",
-)
+def _dataframe_schema_fields(config_key: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    schema_path = REPO_ROOT / pack_value(PACK, config_key)
+    payload = json.loads(schema_path.read_text(encoding="utf-8"))
+    fields = payload.get("fields") if isinstance(payload, dict) else None
+    if not isinstance(fields, list):
+        raise ValueError(f"dataframe_schema_fields_missing:{schema_path}")
+    required: list[str] = []
+    optional: list[str] = []
+    for field_spec in fields:
+        if not isinstance(field_spec, dict) or not isinstance(field_spec.get("name"), str):
+            raise ValueError(f"dataframe_schema_field_invalid:{schema_path}")
+        target = optional if field_spec.get("nullable") is True else required
+        target.append(str(field_spec["name"]))
+    return tuple(required), tuple(optional)
+
+PANEL_REQUIRED_COLUMNS, PANEL_OPTIONAL_COLUMNS = _dataframe_schema_fields("paths.primary_panel_schema")
+DECOMP_REQUIRED_COLUMNS, DECOMP_OPTIONAL_COLUMNS = _dataframe_schema_fields("paths.decomposition_panel_schema")
 
 COMPONENT_REQUIRED_COLUMNS = (
     "date_utc",
@@ -158,25 +161,25 @@ def resolve_artifacts(mode: str, as_of_utc_date: str | None) -> dict[str, DataAr
         return {
             "vendor_panel": DataArtifact(
                 dataset="vendor_panel",
-                path=REPO_ROOT / "data" / "samples" / "growthepie" / "vendor_daily_rollup_panel_sample.csv",
+                path=REPO_ROOT / pack_value(PACK, "paths.vendor_panel_sample"),
                 manifest_path=None,
                 as_of_utc_date=None,
             ),
             "l1_decomposition": DataArtifact(
                 dataset="l1_decomposition",
-                path=REPO_ROOT / "data" / "samples" / "l1_rent" / "daily_l1_rent_decomposition_sample.csv",
+                path=REPO_ROOT / pack_value(PACK, "paths.decomposition_sample"),
                 manifest_path=None,
                 as_of_utc_date=None,
             ),
             "rent_components": DataArtifact(
                 dataset="rent_components",
-                path=REPO_ROOT / "data" / "samples" / "l1_rent" / "daily_rollup_rent_components_sample.csv",
+                path=REPO_ROOT / pack_value(PACK, "paths.rent_components_sample"),
                 manifest_path=None,
                 as_of_utc_date=None,
             ),
             "authoritative_panel": DataArtifact(
                 dataset="authoritative_panel",
-                path=REPO_ROOT / "data" / "samples" / "panels" / "daily_rollup_panel_sample.csv",
+                path=REPO_ROOT / pack_value(PACK, "paths.primary_panel_sample"),
                 manifest_path=None,
                 as_of_utc_date=None,
             ),
@@ -187,20 +190,20 @@ def resolve_artifacts(mode: str, as_of_utc_date: str | None) -> dict[str, DataAr
 
     manifests = {
         "vendor_panel": (
-            REPO_ROOT / "data" / "processed_manifest" / f"vendor_daily_rollup_panel_{as_of_utc_date}.json",
-            "vendor_daily_rollup_panel.csv",
+            REPO_ROOT / pack_value(PACK, "paths.vendor_panel_manifest_pattern").format(date=as_of_utc_date),
+            Path(pack_value(PACK, "paths.vendor_panel")).name,
         ),
         "l1_decomposition": (
-            REPO_ROOT / "data" / "processed_manifest" / f"daily_l1_rent_decomposition_{as_of_utc_date}.json",
-            "daily_l1_rent_decomposition.csv",
+            REPO_ROOT / pack_value(PACK, "paths.decomposition_manifest_pattern").format(date=as_of_utc_date),
+            Path(pack_value(PACK, "paths.decomposition")).name,
         ),
         "rent_components": (
-            REPO_ROOT / "data" / "processed_manifest" / f"daily_rollup_rent_components_{as_of_utc_date}.json",
-            "daily_rollup_rent_components.csv",
+            REPO_ROOT / pack_value(PACK, "paths.rent_components_manifest_pattern").format(date=as_of_utc_date),
+            Path(pack_value(PACK, "paths.rent_components")).name,
         ),
         "authoritative_panel": (
-            REPO_ROOT / "data" / "processed_manifest" / f"daily_rollup_panel_{as_of_utc_date}.json",
-            "daily_rollup_panel.csv",
+            REPO_ROOT / pack_value(PACK, "paths.primary_panel_manifest_pattern").format(date=as_of_utc_date),
+            Path(pack_value(PACK, "paths.primary_panel")).name,
         ),
     }
 

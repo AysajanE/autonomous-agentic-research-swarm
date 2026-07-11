@@ -73,11 +73,12 @@ from swarm_taskfile import parse_status_value as _parse_status_value
 from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 from swarm_taskfile import parse_task_id_from_branch as _parse_task_id_from_branch
 from swarm_taskfile import update_task_status_and_notes as _shared_update_task_status_and_notes
+from pack_config import load_pack_config, manifest_schema_version
 
 
-SWARM_RUN_MANIFEST_SCHEMA_VERSION = "research_swarm.runtime_run_manifest.v2"
+SWARM_RUN_MANIFEST_SCHEMA_VERSION = manifest_schema_version("run", Path(__file__).resolve().parents[1])
 SWARM_RUN_MANIFEST_SCHEMA_VERSION_V1 = "research_swarm.runtime_run_manifest.v1"
-JUDGE_REVIEW_LOG_SCHEMA_VERSION = "research_swarm.judge_review_log.v2"
+JUDGE_REVIEW_LOG_SCHEMA_VERSION = manifest_schema_version("judge_review", Path(__file__).resolve().parents[1])
 MOCK_TRANSCRIPT_SCHEMA_VERSION = "research_swarm.mock_transcript.v1"
 EXECUTOR_SESSION_SCHEMA_VERSION = "research_swarm.executor_session.v1"
 MOCK_PLANNER_SCHEMA_VERSION = "research_swarm.mock_planner.v1"
@@ -131,14 +132,14 @@ DEFAULT_ALLOWED_STATES = (
 DEFAULT_ALLOWED_ROLES = ("Planner", "Worker", "Judge", "Operator")
 DEFAULT_TASK_EXECUTION_ROLES = ("Worker", "Operator")
 DEFAULT_SCIENTIFIC_REVIEW_ROLE = "Judge"
-DEFAULT_NETWORK_WORKSTREAMS = ("W1", "W2", "W3")
+DEFAULT_NETWORK_WORKSTREAMS: tuple[str, ...] = ()
 DEFAULT_PROMPT_TEMPLATES = {
     "planner": "docs/prompts/planner.md",
     "worker": "docs/prompts/worker.md",
     "judge": "docs/prompts/judge.md",
     "operator": "docs/prompts/operator.md",
 }
-DEFAULT_INTEGRATION_READY_ELIGIBLE_WORKSTREAMS = ("W0", "W3", "W8", "W9")
+DEFAULT_INTEGRATION_READY_ELIGIBLE_WORKSTREAMS: tuple[str, ...] = ()
 DEFAULT_INTEGRATION_READY_ELIGIBLE_TASK_KINDS = (
     "protocol",
     "registry",
@@ -259,6 +260,19 @@ def _read_text(path: Path) -> str:
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _require_manifest_schema(payload: object, schema_path: Path) -> None:
+    """Fail before writing when a runtime generator diverges from its schema."""
+
+    from quality_gates import _schema_failures
+
+    failures = _schema_failures(payload, schema_path)
+    if failures:
+        raise ValueError(
+            "generated_manifest_schema_violation:"
+            + json.dumps(failures, sort_keys=True, separators=(",", ":"))
+        )
 
 
 def _record_swarm_event(
@@ -1806,6 +1820,14 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
     if not isinstance(raw, dict):
         raise SystemExit(f"Expected a JSON object in {framework_path}")
 
+    try:
+        pack = load_pack_config(repo)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    workflow = pack.get("workflow")
+    if not isinstance(workflow, dict):
+        raise SystemExit("pack_config_workflow_not_object")
+
     roles = raw.get("roles")
     states = raw.get("states")
     review_bundle = raw.get("review_bundle")
@@ -1848,18 +1870,9 @@ def load_framework_contract(repo: Path) -> FrameworkContract:
         key: _resolve_repo_relative_path(repo, value) for key, value in prompt_templates.items()
     }
 
-    network_workstreams = tuple(
-        _coerce_str_list(raw.get("network_workstreams")) or list(DEFAULT_NETWORK_WORKSTREAMS)
-    )
+    network_workstreams = tuple(_coerce_str_list(workflow.get("network_workstreams")))
 
-    eligible_workstreams = tuple(
-        _coerce_str_list(
-            integration_ready_policy.get("eligible_workstreams")
-            if isinstance(integration_ready_policy, dict)
-            else None
-        )
-        or list(DEFAULT_INTEGRATION_READY_ELIGIBLE_WORKSTREAMS)
-    )
+    eligible_workstreams = tuple(_coerce_str_list(workflow.get("integration_ready_eligible_workstreams")))
     eligible_task_kinds = tuple(
         _coerce_str_list(
             integration_ready_policy.get("eligible_task_kinds")
@@ -9703,6 +9716,10 @@ def cmd_run_task(args: argparse.Namespace) -> int:
         run_manifest["claim"] = claim_stamp
     if executor_usage is not None:
         run_manifest["usage"] = executor_usage
+    _require_manifest_schema(
+        run_manifest,
+        repo / "contracts" / "schemas" / "swarm_run_manifest_v2.json",
+    )
     _write_json(run_manifest_path, run_manifest)
     _record_swarm_event(
         repo,
@@ -10037,6 +10054,10 @@ def cmd_judge_task(args: argparse.Namespace) -> int:
             "note": decision_note,
         },
     }
+    _require_manifest_schema(
+        review_log,
+        repo / "contracts" / "schemas" / "judge_review_log_v2.json",
+    )
     _write_json(review_log_path, review_log)
     review_event = {
         "task_id": task.task_id,

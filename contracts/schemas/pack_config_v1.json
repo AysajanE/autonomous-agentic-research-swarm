@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "research_swarm.pack.v1.schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kernel_requires", "scaffold", "project", "workflow", "paths", "protocol", "paper", "analysis"],
+  "properties": {
+    "schema_version": {"const": "research_swarm.pack.v1"},
+    "kernel_requires": {"type": "string", "pattern": "^>=[0-9]+\\.[0-9]+\\.[0-9]+,<([0-9]+)\\.([0-9]+)\\.([0-9]+)$"},
+    "scaffold": {"type": "boolean"},
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package_name", "primary_metric_label"],
+      "properties": {
+        "package_name": {"type": "string", "minLength": 1},
+        "primary_metric_label": {"type": "string", "minLength": 1}
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network_workstreams", "local_etl_workstreams", "operator_workstream", "integration_ready_eligible_workstreams"],
+      "properties": {
+        "network_workstreams": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "local_etl_workstreams": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "operator_workstream": {"type": "string", "minLength": 1},
+        "integration_ready_eligible_workstreams": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
+    },
+    "paths": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required_headings"],
+      "properties": {"required_headings": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true}}
+    },
+    "paper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entrypoint", "build_dir", "artifact_basename", "render_manifest", "verified_include_targets"],
+      "properties": {
+        "entrypoint": {"type": "string", "minLength": 1},
+        "build_dir": {"type": "string", "minLength": 1},
+        "artifact_basename": {"type": "string", "minLength": 1},
+        "render_manifest": {"type": "string", "minLength": 1},
+        "verified_include_targets": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["validation_bundle", "outputs", "exhibits"],
+      "properties": {
+        "validation_bundle": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "outputs": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
+        "exhibits": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}}
+      }
+    },
+    "historical_manifest_replacements": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}}
+  }
+}

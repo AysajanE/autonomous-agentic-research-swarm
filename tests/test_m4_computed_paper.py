@@ -53,6 +53,7 @@ FIXTURE_PATHS = (
     "reports/validation/rollup_panel_validation.json",
     "reports/validation/cross_source_reconciliation.json",
     "contracts/claims.yaml",
+    "contracts/pack.json",
     "docs/protocol.md",
 )
 

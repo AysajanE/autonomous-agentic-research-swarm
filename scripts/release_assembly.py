@@ -9,11 +9,7 @@ release-relevant state into:
 - reports/status/releases/release_<YYYY-MM-DD>.json
 - reports/catalog.yaml
 
-The canonical release-candidate paper surface is the Operator-owned T080 build:
-
-- reports/paper/build/l2_l1_rent_working_paper.html
-- reports/paper/build/l2_l1_rent_working_paper.pdf
-- reports/paper/build/render_manifest.json
+The canonical release-candidate paper surface is declared by the active pack.
 
 Until those three files exist together, the release manifest records
 paper.status = "pending_stage2".
@@ -33,8 +29,14 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
-RELEASE_MANIFEST_SCHEMA_VERSION = "research_swarm.release_manifest.v1"
+from pack_config import load_pack_config, manifest_schema_version, pack_value
+
+
+RELEASE_MANIFEST_SCHEMA_VERSION = manifest_schema_version("release", Path(__file__).resolve().parents[1])
 CATALOG_SCHEMA_VERSION = "research_swarm.results_catalog.v1"
 CATALOG_MANAGED_BY = "python scripts/release_assembly.py --write"
 RELEASE_ASSEMBLY_COMMAND_TEMPLATE = (
@@ -44,22 +46,14 @@ CANONICAL_RELEASE_MANIFEST_PATTERN = "reports/status/releases/release_<YYYY-MM-D
 RELEASE_NAMESPACE = Path("reports/status/releases")
 CATALOG_PATH = Path("reports/catalog.yaml")
 PAPER_BUILD_NAMESPACE = "reports/paper/build/"
-CANONICAL_PAPER_BUILD_REL_PATHS = (
-    "reports/paper/build/l2_l1_rent_working_paper.html",
-    "reports/paper/build/l2_l1_rent_working_paper.pdf",
-    "reports/paper/build/render_manifest.json",
-)
-REQUIRED_RELEASE_PERIMETER_PATHS = (
-    "reports/paper/index.qmd",
+GENERIC_RELEASE_PERIMETER_PATHS = (
     "reports/paper/references.bib",
     "reports/paper/_quarto.yml",
-    "reports/paper/paper_values.json",
-    "data/processed/panels/daily_rollup_panel.csv",
-    "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
 )
 RELEASE_MANIFEST_FILENAME_RE = re.compile(r"^release_(\d{4}-\d{2}-\d{2})\.json$")
 
 ALL_STAGE4_GATE_NAMES = (
+    "pack_compat",
     "framework_contract",
     "repo_structure",
     "project_contract",
@@ -97,14 +91,46 @@ CONTRACT_AND_PROTOCOL_PATHS = (
     "contracts/data_dictionary.md",
     "contracts/decisions.md",
     "contracts/model_spec.md",
-    "contracts/schemas/panel_schema.yaml",
-    "contracts/schemas/panel_schema_str_v1.yaml",
-    "contracts/schemas/panel_schema_decomp_v1.yaml",
     "contracts/schemas/swarm_run_manifest_v1.yaml",
     "contracts/schemas/judge_review_log_v1.yaml",
     "contracts/schemas/release_manifest_v1.yaml",
+    "contracts/schemas/raw_manifest_v1.json",
+    "contracts/schemas/processed_manifest_v2.json",
+    "contracts/schemas/kernel_interface_v1.json",
+    "contracts/schemas/pack_config_v1.json",
 )
-REGISTRY_PATHS = ("registry/rollup_registry_v1.csv",)
+
+
+def _contract_and_protocol_paths(repo_root: Path) -> tuple[str, ...]:
+    pack = load_pack_config(repo_root)
+    return (
+        *CONTRACT_AND_PROTOCOL_PATHS,
+        pack_value(pack, "paths.panel_schema_index"),
+        pack_value(pack, "paths.primary_panel_schema"),
+        pack_value(pack, "paths.decomposition_panel_schema"),
+    )
+
+
+def _canonical_paper_build_rel_paths(repo_root: Path) -> tuple[str, ...]:
+    pack = load_pack_config(repo_root)
+    build_dir = Path(pack_value(pack, "paper.build_dir"))
+    basename = pack_value(pack, "paper.artifact_basename")
+    return (
+        (build_dir / f"{basename}.html").as_posix(),
+        (build_dir / f"{basename}.pdf").as_posix(),
+        (build_dir / pack_value(pack, "paper.render_manifest")).as_posix(),
+    )
+
+
+def _required_release_perimeter_paths(repo_root: Path) -> tuple[str, ...]:
+    pack = load_pack_config(repo_root)
+    return (
+        pack_value(pack, "paper.entrypoint"),
+        *GENERIC_RELEASE_PERIMETER_PATHS,
+        pack_value(pack, "analysis.outputs.paper_values"),
+        pack_value(pack, "paths.primary_panel"),
+        pack_value(pack, "paths.decomposition"),
+    )
 
 EXCLUDED_REPORT_FILENAMES = {"README.md", ".gitkeep"}
 ARTIFACT_SECTION_NAMES = (
@@ -317,7 +343,7 @@ def _render_manifest_perimeter_failures(repo_root: Path) -> list[str]:
         if isinstance(item, dict) and isinstance(item.get("path"), str)
     }
     failures: list[str] = []
-    for relpath in REQUIRED_RELEASE_PERIMETER_PATHS:
+    for relpath in _required_release_perimeter_paths(repo_root):
         entry = by_path.get(relpath)
         if entry is None:
             failures.append(f"release_perimeter_artifact_missing:render_manifest.inputs:{relpath}")
@@ -495,9 +521,10 @@ def assemble_release_manifest(
     required_gate_failures = sorted(set(required_gate_failures))
 
     contracts_and_protocol, missing_contracts = _collect_explicit_artifacts(
-        repo_root, CONTRACT_AND_PROTOCOL_PATHS
+        repo_root, _contract_and_protocol_paths(repo_root)
     )
-    registry, missing_registry = _collect_explicit_artifacts(repo_root, REGISTRY_PATHS)
+    registry_path = pack_value(load_pack_config(repo_root), "paths.registry")
+    registry, missing_registry = _collect_explicit_artifacts(repo_root, (registry_path,))
     raw_manifests = _collect_dir_artifacts(
         repo_root, "data/raw_manifest", suffixes={".json"}
     )
@@ -518,10 +545,10 @@ def assemble_release_manifest(
     figures = _collect_dir_artifacts(repo_root, "reports/figures")
     tables = _collect_dir_artifacts(repo_root, "reports/tables")
     paper_artifacts, missing_paper_artifacts = _collect_explicit_artifacts(
-        repo_root, CANONICAL_PAPER_BUILD_REL_PATHS
+        repo_root, _canonical_paper_build_rel_paths(repo_root)
     )
     release_perimeter, missing_release_perimeter = _collect_explicit_artifacts(
-        repo_root, REQUIRED_RELEASE_PERIMETER_PATHS
+        repo_root, _required_release_perimeter_paths(repo_root)
     )
     # F14: the manuscript-source + processed-panel perimeter is enforced fail-closed
     # ONLY for releases that actually ship a manuscript (either computed-paper surface
@@ -781,6 +808,16 @@ def validate_release_manifest(path: Path, repo_root: Path) -> list[str]:
         failures.append(str(exc))
         return failures
 
+    from quality_gates import _schema_failures
+
+    failures.extend(
+        f"{relpath}:schema:{issue}"
+        for issue in _schema_failures(
+            payload,
+            repo_root / "contracts" / "schemas" / "release_manifest_v1.yaml",
+        )
+    )
+
     failures.extend(
         _require_keys(
             payload,
@@ -1014,7 +1051,7 @@ def validate_release_manifest(path: Path, repo_root: Path) -> list[str]:
                 # manuscript (either computed-paper surface present). A modeling-only or
                 # manuscript-free release legitimately carries an empty perimeter section.
                 if _manuscript_surface_present(repo_root):
-                    for required_path in REQUIRED_RELEASE_PERIMETER_PATHS:
+                    for required_path in _required_release_perimeter_paths(repo_root):
                         if required_path not in perimeter_paths:
                             failures.append(
                                 f"{relpath}:release_perimeter_artifact_missing:{required_path}"
@@ -1203,11 +1240,11 @@ def build_catalog_payload(
         "managed_by": CATALOG_MANAGED_BY,
         "project": {
             "mode": project_mode,
-            "primary_metric": "Settlement Take Rate (STR)",
+            "primary_metric": pack_value(load_pack_config(repo_root), "project.primary_metric_label"),
             "protocol_path": "docs/protocol.md",
             "data_dictionary_path": "contracts/data_dictionary.md",
             "decisions_path": "contracts/decisions.md",
-            "registry_path": "registry/rollup_registry_v1.csv",
+            "registry_path": pack_value(load_pack_config(repo_root), "paths.registry"),
         },
         "release_namespace": {
             "directory": RELEASE_NAMESPACE.as_posix(),

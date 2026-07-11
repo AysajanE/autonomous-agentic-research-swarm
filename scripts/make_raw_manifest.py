@@ -10,6 +10,8 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from pack_config import manifest_schema_version
+
 
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -67,9 +69,10 @@ def build_manifest(source: str, snapshot_dir: Path, command: str, *, as_of: date
 
     now = datetime.now(timezone.utc)
     return {
+        "schema_version": manifest_schema_version("raw", root),
         "source": source,
         "as_of_utc_date": as_of.isoformat(),
-        "fetched_at_utc": now.isoformat(),
+        "fetched_at_utc": now.isoformat().replace("+00:00", "Z"),
         "command": command,
         "files": files,
         "environment": {

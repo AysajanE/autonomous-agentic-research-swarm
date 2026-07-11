@@ -10,7 +10,16 @@ Delivery: one branch per milestone (`milestone/<id>-<slug>`), red/green-tested b
 
 ---
 
-## M4 — Computed paper, programs, replication (BATCH A MERGED #8 `6d3ddc3` · BATCH B MERGED #9 `870ed48` · BATCH C IN PROGRESS `milestone/m4c-replication`)
+## M5 — Framework/pack separation (BATCH A IN PROGRESS `milestone/m5a-config-extraction`)
+
+Scope: plan §4.5 step 1 / M5a — config extraction (project literals → pack config), executable schemas, framework-test decoupling, `swarm init` scaffold, STR-as-first-pack (zero kernel edits), versioned kernel-pack interface + compat preflight (Batch A). Eval CI held-out tier + seeded-defect drill harness + operator runbook = Batch B; physical packaging (M5b) is a deferred decision point.
+
+- **M5 Batch A (Codex workhorse, owner-reviewed).** Every hardcoded PROJECT literal moved out of the kernel into `contracts/pack.json` (validated by `contracts/schemas/pack_config_v1.json`): paper artifact basename/build dir, panel/table/figure/exhibit names, protocol headings, panel-schema paths, W1/W2/W9 workstream semantics, rollup-registry path, pyproject name, historical-manifest names. `scripts/pack_config.py` reads them; `gate_framework_contract` validates the pack-config SHAPE, not STR literals. Executable schemas are JSON via `json.loads` (NO pyyaml/pandera), versions sourced from `contracts/kernel_interface.json`; ETL/validation derive dataframe field order/nullability from the panel schemas. Framework tests decoupled via venue-profile-parameterized fixtures (EXPECTED_SECTIONS retired). `scripts/swarm_init.py --mode empirical|modeling|hybrid` scaffolds a new pack. `contracts/kernel_interface.json` descriptor (kernel_version 1.0.0, schema/gate-api/executor versions, breaking policy, reserved `refs/swarm/claims/<program>/T###`); pack `kernel_requires` + a `pack_compat` preflight failing on version mismatch.
+- **Owner verification (Python 3.11).** ZERO STR literals remain in kernel `scripts/`/`src/` (grep empty; W1/W2/W9 gone) — kernel is project-agnostic. `swarm_init --mode empirical` scaffolds a pack that PASSES `make gate`. `pack_compat` ok on `>=1.0.0,<2.0.0`, fails `>=2.0.0,<3.0.0`. Zero pyyaml/pandera; no dep/lockfile change. `make gate` exit 0 / 0 `ok=False`; `make reproduce-analysis` byte-identical (provenance-only changes); registry 12/12 failing; full suite 524 OK (skipped=1); 5 M5a goldens.
+
+---
+
+## M4 — Computed paper, programs, replication (BATCH A MERGED #8 `6d3ddc3` · BATCH B MERGED #9 `870ed48` · BATCH C MERGED #10 `8738b8d`) — COMPLETE
 
 Scope: plan §7.1 computed-paper machinery + F14 perimeter (Batch A, merged); §7.2 mode-parameterized W6/W7 program templates + exhibits manifest + failing-first paper registry (Batch B, merged); §7.3/§7.4 replication package generator + audit + venue/authorship/disclosure + release modes (Batch C).
 

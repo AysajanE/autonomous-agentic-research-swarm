@@ -12,9 +12,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 416,
+      "bytes": 559,
       "path": "Makefile",
-      "sha256": "10925305bbe6fe9a7ce60f1946294450765558b4a583da15d778e4e47ce2d089",
+      "sha256": "0ce265f8974ddd08c68ffebf519d178fcf40b41d1f98e22822c0af5147ab32c1",
       "verification_bar": "byte_identity"
     },
     {
@@ -30,15 +30,15 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 5479,
+      "bytes": 6110,
       "path": "contracts/CHANGELOG.md",
-      "sha256": "a135256b862f5028f8d382cc0af5c908301dad82e41359186d5463e4320d02df",
+      "sha256": "431ee229dd91517eac6a5db673b69084e53a399404b4e9d7dc918f741c903525",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 1871,
+      "bytes": 2187,
       "path": "contracts/README.md",
-      "sha256": "289ddec5a382fbe0c65c2d171a0a65ce20b20e42c4293e065619cc3b95c6a465",
+      "sha256": "f61ae1468e04b29c6fd3736b59359c9cfab1240819526c927df79efb62522851",
       "verification_bar": "byte_identity"
     },
     {
@@ -90,9 +90,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 7310,
+      "bytes": 6972,
       "path": "contracts/framework.json",
-      "sha256": "b04b259cef937ea7243fcf8a6eecda3d7184f89be4e954fc977c557959d4057f",
+      "sha256": "5960d35c4c2e1411d6eb438407a67b0036b6d5f3813042c6996d696fcef1736f",
       "verification_bar": "byte_identity"
     },
     {
@@ -132,15 +132,27 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 1030,
+      "bytes": 1224,
+      "path": "contracts/kernel_interface.json",
+      "sha256": "ad23d8759ba5226292852bbc44592fc4eeaa95371c5d85250e86bf6797f061fb",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 1575,
       "path": "contracts/manuscript_sections.yaml",
-      "sha256": "f30a45aa1a790f01609f90260bc4046475b33749b18549d4b25f64766e9dbecb",
+      "sha256": "66441efe7f29d37bb5b4a97846f2bd8ba15cca5d6fbd3136854849152bc63f68",
       "verification_bar": "byte_identity"
     },
     {
       "bytes": 454,
       "path": "contracts/model_spec.md",
       "sha256": "438048434fb5aa204e417eaae5ba01ccbb1016c73ec5c94c1bd4ab7f82118316",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 3971,
+      "path": "contracts/pack.json",
+      "sha256": "6a0f5ffcc150b11b06e9f944b88d38c2fbc8cda5ea932f851df0da313f84710b",
       "verification_bar": "byte_identity"
     },
     {
@@ -276,15 +288,15 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 940,
+      "bytes": 1423,
       "path": "contracts/schemas/README.md",
-      "sha256": "6de17ba9ac8e0649d75fab05be316c90024ff7368d3b8289019688968ab97277",
+      "sha256": "611f52dd1b5b48c98a119b0421e8952c3e271ef024d05dadf727f3f42e2f850f",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 2001,
+      "bytes": 2047,
       "path": "contracts/schemas/claims_v1.yaml",
-      "sha256": "a9e7c5a41ee2c857b6b8953a355c8c3e23bed8c870dba4d06ddac94555d450aa",
+      "sha256": "4ca2c88bd1c9a45544429b3c4fdff8df8597055232d137348161cdb696e5ee03",
       "verification_bar": "byte_identity"
     },
     {
@@ -318,9 +330,21 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 757,
+      "bytes": 969,
       "path": "contracts/schemas/judge_review_log_v1.yaml",
-      "sha256": "a2571fa8beb30a04ef7db1cb4c65b8e3d5200c57db21e9416c1ea4b8fc819e91",
+      "sha256": "0d790708f4d044f7a10011a52f8eaa09a8ba0a9c76fdeb9d1053deaf212e470a",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 978,
+      "path": "contracts/schemas/judge_review_log_v2.json",
+      "sha256": "22524cf0bee4cea3127e91b59e94dff5f7b42b663e2dabcf02789a14be8708b1",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 1485,
+      "path": "contracts/schemas/kernel_interface_v1.json",
+      "sha256": "efa9c0c112312cc000a5a5da6e3327b9e6c9b70c3746be9ea61c26b5cc9be428",
       "verification_bar": "byte_identity"
     },
     {
@@ -330,21 +354,27 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 227,
+      "bytes": 3136,
+      "path": "contracts/schemas/pack_config_v1.json",
+      "sha256": "6861f9aecbb1c9fe1ba9f614e8f5167e08d8bb0fca9d8e45636d317487bd7356",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 213,
       "path": "contracts/schemas/panel_schema.yaml",
-      "sha256": "e8aaf0bb64d1593301ead5aa3ae9234507b1435e1ee0d457c9ed5deb4f141c03",
+      "sha256": "8427f2d665d42e49e86d35cd17dce6eb94673e2dae3dc7d90bbaba6ae90278f7",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 1516,
+      "bytes": 767,
       "path": "contracts/schemas/panel_schema_decomp_v1.yaml",
-      "sha256": "2f94455e08228a9452cb98224251ffaf7c0b1f94657dce5c670e536c2dfd064e",
+      "sha256": "09292777d2d2d67ba91f2ac60e4904a8f3cdd8284afd6198cebe7deb94dbaab5",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 1178,
+      "bytes": 572,
       "path": "contracts/schemas/panel_schema_str_v1.yaml",
-      "sha256": "6dc78e70f67f750846d5623c42065a6962f5540eb03b2ac8b31ba302d7721e83",
+      "sha256": "1ba4e608046a0417580ce4f079d9ff6f3a6dd417802139dc5c9e23142b8a85cc",
       "verification_bar": "byte_identity"
     },
     {
@@ -354,9 +384,21 @@
       "verification_bar": "byte_identity"
     },
     {
+      "bytes": 1263,
+      "path": "contracts/schemas/processed_manifest_v2.json",
+      "sha256": "828d3fb571feb8fa868558c7556f2b5af236725f93276703587c828d7aa56906",
+      "verification_bar": "byte_identity"
+    },
+    {
       "bytes": 1800,
       "path": "contracts/schemas/program_template_v1.yaml",
       "sha256": "aea485ad76165311b526027d4a319c2ea625d927155112dc6cedd5e86f1cd265",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 850,
+      "path": "contracts/schemas/raw_manifest_v1.json",
+      "sha256": "92d4766c2ae1f8408183cc2d061f592b271dff661bc0d2a5abbea691e06ccab4",
       "verification_bar": "byte_identity"
     },
     {
@@ -366,15 +408,21 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 1583,
+      "bytes": 1169,
       "path": "contracts/schemas/release_manifest_v1.yaml",
-      "sha256": "1d95017dc49136a0bfea9a1d52c5337dff48bb7d5665afd835c5aca97b52547f",
+      "sha256": "b58537f992f32bd1f6e4d74f48905864a2a6cdc2f17f0cfb29727ef95179aebc",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 951,
+      "bytes": 1287,
       "path": "contracts/schemas/swarm_run_manifest_v1.yaml",
-      "sha256": "b50cf1a023d9e3b515e2b7087cfe3207bc42a961314e00913b5fcaecca6790be",
+      "sha256": "bdcc04ee9e9d5dd750b67d55108893d91892cd29f46553b816472a0d8168cec5",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 1425,
+      "path": "contracts/schemas/swarm_run_manifest_v2.json",
+      "sha256": "913fb63486af039015fdbb49776b0a279045094dd5839416e191d480d5e0dff0",
       "verification_bar": "byte_identity"
     },
     {
@@ -834,9 +882,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 4628,
+      "bytes": 4638,
       "path": "docs/runbook_swarm_automation.md",
-      "sha256": "8494269a6225fa7216dfbc637fdcbf3e3e1a93f40cd4652d918c744e594234a2",
+      "sha256": "145a336ca01f12129dd6f75ee8b5e99500da3fc938f90705a4b9fe8fc210ad5a",
       "verification_bar": "byte_identity"
     },
     {
@@ -890,7 +938,7 @@
     {
       "bytes": 6193,
       "path": "reports/exhibits/manifest.json",
-      "sha256": "1d2150107af41a59e07efd09a7b27c06dc67805f5be8ea8ec4be5e4afb740aca",
+      "sha256": "11eade5ada3eaf78b436acec242a6e5b6de0e369dc01b433de655b292e4c083a",
       "verification_bar": "byte_identity"
     },
     {
@@ -1556,9 +1604,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 10259,
+      "bytes": 10341,
       "path": "scripts/estimate_regimes.py",
-      "sha256": "5dfb3094b38c002d0a4b4d8185cf974ffbcea664c97a5b4665ab192356a18e55",
+      "sha256": "f01c696db0e8bd04bddf93c8e3b5518066477dca833dd0fb50d34d9829ed7174",
       "verification_bar": "byte_identity"
     },
     {
@@ -1574,9 +1622,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 19021,
+      "bytes": 19461,
       "path": "scripts/generate_revision_tasks.py",
-      "sha256": "ecbea22f39b17ea4c58dd0d290dcd0105ffad07a56bb7f627fd73014dc35cf84",
+      "sha256": "b32a746c9bd905e7ee7a035ec4571e897104af01c0ff3224a7e2c709054acd03",
       "verification_bar": "byte_identity"
     },
     {
@@ -1592,21 +1640,21 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 13374,
+      "bytes": 12881,
       "path": "scripts/m0_historical_remediation.py",
-      "sha256": "03efed303056bd5c86204ece1cde45ed13ac5cb9e690d102c35b34539e4141d4",
+      "sha256": "898be45510cfd9130cce626733a20096338a399d08ec69da0566adbc6ae22655",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 4296,
+      "bytes": 4432,
       "path": "scripts/make_raw_manifest.py",
-      "sha256": "dc8083602429d6ee7560e63b2e5b705ce1fa3379bbf447f5833b4adcd87b550a",
+      "sha256": "c85cb838fd83848d9d3f1fe81b1fa4881cea152ff9b5a083c782c90148749098",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 6520,
+      "bytes": 7054,
       "path": "scripts/manifest_tools.py",
-      "sha256": "4f8344344f16095cd18d8a6371215f69473fb3d0b0e80dc4e510362e5142b7f0",
+      "sha256": "df906c060a40beee5429ccb479ce9048bf6fd46e1caad7ecb322e75d7d2a6302",
       "verification_bar": "byte_identity"
     },
     {
@@ -1616,9 +1664,15 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 455177,
+      "bytes": 3037,
+      "path": "scripts/pack_config.py",
+      "sha256": "337fdb33f383b70862fc69ef7d41c818c3e45db5e68c2b348a683f4bd6cb93f5",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 464049,
       "path": "scripts/quality_gates.py",
-      "sha256": "5d71fb91228ed7f07fdac49a4cbe2c6c766528e37afc8742f1c9e7f82f3e1d9c",
+      "sha256": "f8dbcaeaf6b8d50488872b9d4453d3dd2ac131b06f482c0f726f87f2d7842986",
       "verification_bar": "byte_identity"
     },
     {
@@ -1628,9 +1682,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 56675,
+      "bytes": 58015,
       "path": "scripts/release_assembly.py",
-      "sha256": "d38cc38bab5f623bf73b1f5962fd55cf571147f4e66adb5d6391b66b60fc28bb",
+      "sha256": "2d9460e153567dfa6c675514e43ec14b959a05a02ce6263bc3f382a65db44a5d",
       "verification_bar": "byte_identity"
     },
     {
@@ -1646,27 +1700,27 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 40703,
+      "bytes": 41272,
       "path": "scripts/replication_package.py",
-      "sha256": "9f704dc1fa9cb60a53ab235abb85a49b57c533cc93d4d2df3bf00e83dae9f9a3",
+      "sha256": "14a295b0b39a8d6a5558d422122c2ec5aabadfc2c6a45fc7753fd6abf4bd21d6",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 7836,
+      "bytes": 8022,
       "path": "scripts/reproduce_analysis.py",
-      "sha256": "d6eea532275ebd98a6a30d484c80eccbd5b0ce76b76d4cecb0358948b6b9895d",
+      "sha256": "5a58b0f0d15294eb96f3334f70e3356197035ad73b0a88019816f4fa38b49e3a",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 13802,
+      "bytes": 13897,
       "path": "scripts/spec_curve.py",
-      "sha256": "aaaebdc456b044d892b6e2b12c795fdebf17cc605d07158370e95b3e520c9392",
+      "sha256": "8d32785d116a5de1d2ca16c9f2eacfeadaf3c8c4dafae2998762e69716e361d1",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 400572,
+      "bytes": 401426,
       "path": "scripts/swarm.py",
-      "sha256": "2ef83d9cfffd5b1cc2b4a45b4153769e0d7f4f4d1d56ac9a0e0c46423ce3be84",
+      "sha256": "74ab1ab1553d4d376f1babcfc0cdcfd28689d9eaad5e6355c388ab7262bf0053",
       "verification_bar": "byte_identity"
     },
     {
@@ -1685,6 +1739,12 @@
       "bytes": 4884,
       "path": "scripts/swarm_events.py",
       "sha256": "42425dc9a3062d7f63cea73f23890c4784a29deb2cb2b5534e9091bc955f628c",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 8387,
+      "path": "scripts/swarm_init.py",
+      "sha256": "3e901c6f7107efca5c77fb02f58a5736ce80d7681c03e656ef4c0850bfa69246",
       "verification_bar": "byte_identity"
     },
     {
@@ -1730,9 +1790,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 36228,
+      "bytes": 36089,
       "path": "src/analysis/build_str_release_outputs.py",
-      "sha256": "8b81aaf0f16e0bdb2e8e800a15a0c3cbe03b53ce0ee632730ca3206b0c235f42",
+      "sha256": "0f332ae8cb97014dcdbf8c10228b68df805e59eeca1da558aa67f826ada00bef",
       "verification_bar": "byte_identity"
     },
     {
@@ -1742,15 +1802,15 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 2068,
+      "bytes": 2076,
       "path": "src/analysis/metrics_str.py",
-      "sha256": "ecfdd999fafb59a94a46bffa1f7daa11f0904fd2aded3af33c460722565331fe",
+      "sha256": "5dfbd4ec6f57adefc17747eea351d2d8154175c3db5f3795216a620ea1ace681",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 5471,
+      "bytes": 5757,
       "path": "src/analysis/uncertainty.py",
-      "sha256": "5d750e46fcc8c46bc6d1cae0fa1cae85ece33c02cd8d4a030e6dc4440599e04f",
+      "sha256": "06bdbb0e197aa8db188fcc2f6768d8b8f9641cd47c85006ed3977ef40deba90a",
       "verification_bar": "byte_identity"
     },
     {
@@ -1760,15 +1820,15 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 272115,
+      "bytes": 272157,
       "path": "src/etl/build_l1_rent_panel.py",
-      "sha256": "c8f931ea51ee99d72c76d715093845bd6585e94884294ebe16be85bfd25f2799",
+      "sha256": "8995b040f77364862a246b6ab0bab199c4aaa544f4a98d4b92c497674f729596",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 19551,
+      "bytes": 19681,
       "path": "src/etl/growthepie_fetch.py",
-      "sha256": "aa279e8e0c62a6f42a6b009455fc8fa4421a69928294c91bf53604bf1d3cb410",
+      "sha256": "7869940e07f6754972f0f6de1a93286cc79383f20662370dd5f20a5d8042acb9",
       "verification_bar": "byte_identity"
     },
     {
@@ -1790,9 +1850,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 68073,
+      "bytes": 68893,
       "path": "src/validation/validate_str_pipeline.py",
-      "sha256": "07ed085ba053d49a3d93e550c08a606b28042e26df327a761e5ebb065518b986",
+      "sha256": "6e50edfdb46fef22f8ffc994908ed9747a6a1bfc23780d94e730b11edc793a8a",
       "verification_bar": "byte_identity"
     }
   ],

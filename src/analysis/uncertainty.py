@@ -9,7 +9,19 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+import sys
 from typing import Iterable, Mapping
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from pack_config import load_pack_config, pack_value  # noqa: E402
+
+
+PACK = load_pack_config(REPO_ROOT)
 
 
 def headline_uncertainty_artifact(
@@ -110,7 +122,7 @@ def render_limitations(caveats: Iterable[Mapping[str, str]]) -> str:
     lines = [
         "## Registry-derived coverage limitations",
         "",
-        "This section is generated from `registry/rollup_registry_v1.csv`; edit the registry, not this text.",
+        f"This section is generated from `{pack_value(PACK, 'paths.registry')}`; edit the registry, not this text.",
         "",
     ]
     if not items:

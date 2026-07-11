@@ -10,6 +10,17 @@
     "section_uncertainty_statement",
     "section_provenance_and_limitations"
   ],
+  "section_headings": {
+    "section_abstract": "## Abstract",
+    "section_research_question": "## Research Question",
+    "section_data_and_protocol": "## Data And Protocol",
+    "section_validation": "## Validation",
+    "section_results": "## Results",
+    "section_evidence_table": "## Evidence table",
+    "section_alternative_explanations_considered": "## Alternative explanations considered",
+    "section_uncertainty_statement": "## Uncertainty statement",
+    "section_provenance_and_limitations": "## Provenance And Limitations"
+  },
   "policy": "Every canonical section requires its own failing-first paper-registry entry and per-section referee evidence before passing.",
   "required_statement_bindings": {
     "ai_use_disclosure": {

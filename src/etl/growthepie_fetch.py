@@ -19,17 +19,20 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from pack_config import dataframe_schema_field_names, load_pack_config, pack_value  # noqa: E402
+from manifest_tools import build_processed_manifest as build_executable_processed_manifest  # noqa: E402
+
+
 MASTER_URL = "https://api.growthepie.com/v1/master.json"
 CHAIN_METRIC_URL = "https://api.growthepie.com/v1/metrics/chains/{chain}/{metric}.json"
 PROTOCOL_START = date(2022, 1, 1)
-OUTPUT_HEADERS = [
-    "date_utc",
-    "rollup_id",
-    "l2_fees_eth",
-    "rent_paid_eth",
-    "profit_eth",
-    "txcount",
-]
+OUTPUT_HEADERS = list(
+    dataframe_schema_field_names(Path(__file__).resolve().parents[2], "paths.primary_panel_schema")
+)
 SAMPLE_ROLLUPS = ("arbitrum", "base", "optimism")
 SAMPLE_DATES = ("2024-03-13", "2024-03-14", "2024-03-15")
 REQUIRED_METRICS = ("fees", "rent_paid")
@@ -318,23 +321,15 @@ def build_processed_manifest(
     run_date: date,
     output_paths: list[Path],
 ) -> dict[str, Any]:
-    return {
-        "as_of_utc_date": run_date.isoformat(),
-        "inputs": [f"data/raw_manifest/growthepie_{run_date.isoformat()}.json"],
-        "transform": {
-            "script_path": "src/etl/growthepie_fetch.py",
-            "git_sha": git_sha(root),
-            "command": command_string(run_date),
-        },
-        "outputs": [
-            {
-                "path": str(path.relative_to(root)),
-                "sha256": sha256_file(path),
-                "bytes": path.stat().st_size,
-            }
-            for path in sorted(output_paths)
-        ],
-    }
+    return build_executable_processed_manifest(
+        repo=root,
+        as_of_utc_date=run_date.isoformat(),
+        inputs=[f"data/raw_manifest/growthepie_{run_date.isoformat()}.json"],
+        script_path="src/etl/growthepie_fetch.py",
+        command=command_string(run_date),
+        outputs=output_paths,
+        allow_dirty_with_diff=True,
+    )
 
 
 def sample_rows_or_die(rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -355,15 +350,17 @@ def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     root = repo_root()
+    pack = load_pack_config(root)
     run_date = args.run_date
     snapshot_dir = root / "data" / "raw" / "growthepie" / run_date.isoformat()
     processed_dir = root / "data" / "processed" / "growthepie"
-    panel_path = processed_dir / "vendor_daily_rollup_panel.csv"
-    sample_path = root / "data" / "samples" / "growthepie" / "vendor_daily_rollup_panel_sample.csv"
-    processed_manifest_path = (
-        root / "data" / "processed_manifest" / f"vendor_daily_rollup_panel_{run_date.isoformat()}.json"
-    )
-    registry_path = root / "registry" / "rollup_registry_v1.csv"
+    panel_path = root / pack_value(pack, "paths.vendor_panel")
+    sample_path = root / pack_value(pack, "paths.vendor_panel_sample")
+    processed_manifest_path = root / pack_value(
+        pack,
+        "paths.vendor_panel_manifest_pattern",
+    ).format(date=run_date.isoformat())
+    registry_path = root / pack_value(pack, "paths.registry")
 
     ensure_fresh_snapshot_dir(snapshot_dir)
     ensure_new_processed_manifest(processed_manifest_path)

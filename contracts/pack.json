@@ -1,0 +1,79 @@
+{
+  "schema_version": "research_swarm.pack.v1",
+  "kernel_requires": ">=1.0.0,<2.0.0",
+  "scaffold": false,
+  "project": {
+    "package_name": "l2-l1-rent-analysis",
+    "primary_metric_label": "Settlement Take Rate (STR)"
+  },
+  "workflow": {
+    "network_workstreams": ["W1", "W2", "W3", "W-Lit"],
+    "local_etl_workstreams": ["W1", "W2"],
+    "operator_workstream": "W9",
+    "integration_ready_eligible_workstreams": ["W0", "W3", "W8", "W9"]
+  },
+  "paths": {
+    "registry": "registry/rollup_registry_v1.csv",
+    "panel_schema_index": "contracts/schemas/panel_schema.yaml",
+    "primary_panel_schema": "contracts/schemas/panel_schema_str_v1.yaml",
+    "decomposition_panel_schema": "contracts/schemas/panel_schema_decomp_v1.yaml",
+    "primary_panel": "data/processed/panels/daily_rollup_panel.csv",
+    "primary_panel_sample": "data/samples/panels/daily_rollup_panel_sample.csv",
+    "primary_panel_manifest_glob": "data/processed_manifest/daily_rollup_panel_*.json",
+    "primary_panel_manifest_pattern": "data/processed_manifest/daily_rollup_panel_{date}.json",
+    "vendor_panel": "data/processed/growthepie/vendor_daily_rollup_panel.csv",
+    "vendor_panel_sample": "data/samples/growthepie/vendor_daily_rollup_panel_sample.csv",
+    "vendor_panel_manifest_pattern": "data/processed_manifest/vendor_daily_rollup_panel_{date}.json",
+    "rent_components": "data/processed/l1_rent/daily_rollup_rent_components.csv",
+    "rent_components_sample": "data/samples/l1_rent/daily_rollup_rent_components_sample.csv",
+    "rent_components_manifest_pattern": "data/processed_manifest/daily_rollup_rent_components_{date}.json",
+    "decomposition": "data/processed/l1_rent/daily_l1_rent_decomposition.csv",
+    "decomposition_sample": "data/samples/l1_rent/daily_l1_rent_decomposition_sample.csv",
+    "decomposition_manifest_pattern": "data/processed_manifest/daily_l1_rent_decomposition_{date}.json"
+  },
+  "protocol": {
+    "required_headings": [
+      "## Rollup inclusion criteria",
+      "## Data source priority",
+      "## Known regime dates",
+      "## Validation tolerances"
+    ]
+  },
+  "paper": {
+    "entrypoint": "reports/paper/index.qmd",
+    "build_dir": "reports/paper/build/",
+    "artifact_basename": "l2_l1_rent_working_paper",
+    "render_manifest": "render_manifest.json",
+    "verified_include_targets": ["reports/tables/str_regime_summary.md"]
+  },
+  "analysis": {
+    "validation_bundle": [
+      "reports/validation/rollup_panel_validation.json",
+      "reports/validation/l1_rent_decomposition_validation.json",
+      "reports/validation/cross_source_reconciliation.json"
+    ],
+    "outputs": {
+      "ecosystem_figure": "reports/figures/str_ecosystem_timeseries.svg",
+      "ecosystem_figure_data": "reports/figures/str_ecosystem_timeseries.data.json",
+      "regime_figure": "reports/figures/str_post_dencun_regimes.svg",
+      "regime_figure_data": "reports/figures/str_post_dencun_regimes.data.json",
+      "regime_table_csv": "reports/tables/str_regime_summary.csv",
+      "regime_table_markdown": "reports/tables/str_regime_summary.md",
+      "paper_values": "reports/paper/paper_values.json",
+      "exhibits_manifest": "reports/exhibits/manifest.json"
+    },
+    "exhibits": {
+      "ecosystem_timeseries": "str_ecosystem_timeseries",
+      "post_regime_figure": "str_post_dencun_regimes",
+      "regime_summary": "str_regime_summary"
+    }
+  },
+  "historical_manifest_replacements": {
+    "daily_l1_rent_decomposition_2026-04-01.json": "daily_l1_rent_decomposition_2026-04-09.json",
+    "daily_l1_rent_decomposition_2026-04-08.json": "daily_l1_rent_decomposition_2026-04-09.json",
+    "daily_rollup_panel_2026-04-01.json": "daily_rollup_panel_2026-04-09.json",
+    "daily_rollup_panel_2026-04-08.json": "daily_rollup_panel_2026-04-09.json",
+    "vendor_daily_rollup_panel_2026-04-01.json": "vendor_daily_rollup_panel_2026-04-09.json",
+    "vendor_daily_rollup_panel_2026-04-08.json": "vendor_daily_rollup_panel_2026-04-09.json"
+  }
+}

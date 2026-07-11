@@ -301,6 +301,25 @@ def write_framework_json(
     if overrides:
         for key, value in overrides.items():
             payload[key] = value
+    pack = json.loads((REPO_ROOT / "contracts/pack.json").read_text(encoding="utf-8"))
+    pack["project"]["package_name"] = "test-project"
+    pack["project"]["primary_metric_label"] = "Fixture metric"
+    pack["analysis"]["outputs"] = {
+        key: value.replace("str_", "fixture_")
+        for key, value in pack["analysis"]["outputs"].items()
+    }
+    if overrides and isinstance(overrides.get("network_workstreams"), list):
+        pack["workflow"]["network_workstreams"] = overrides["network_workstreams"]
+    integration = overrides.get("integration_ready_policy") if overrides else None
+    if isinstance(integration, dict) and isinstance(integration.get("eligible_workstreams"), list):
+        pack["workflow"]["integration_ready_eligible_workstreams"] = integration["eligible_workstreams"]
+    write_json(root, "contracts/pack.json", pack)
+    for rel in (
+        "contracts/kernel_interface.json",
+        "contracts/schemas/kernel_interface_v1.json",
+        "contracts/schemas/pack_config_v1.json",
+    ):
+        write_text(root, rel, (REPO_ROOT / rel).read_text(encoding="utf-8"))
     return write_json(root, "contracts/framework.json", payload)
 
 
@@ -350,6 +369,8 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
         "contracts/schemas/instance_manifest_v1.json",
         "contracts/schemas/experiment_spec_v1.json",
         "contracts/schemas/experiment_manifest_v1.json",
+        "contracts/schemas/raw_manifest_v1.json",
+        "contracts/schemas/processed_manifest_v2.json",
         "contracts/schemas/integrity_audit_v1.json",
         "contracts/schemas/literature_manifest_v1.json",
     ):
@@ -357,11 +378,16 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     write_text(root, "contracts/instances/README.md", "# instance manifests\n")
     write_text(root, "contracts/experiments/README.md", "# experiment specs\n")
     write_text(root, "contracts/schemas/README.md", "# schemas\n")
-    write_text(root, "contracts/schemas/panel_schema.yaml", "version: 1\n")
-    write_text(root, "contracts/schemas/panel_schema_str_v1.yaml", "version: 1\nfields: []\n")
-    write_text(root, "contracts/schemas/panel_schema_decomp_v1.yaml", "version: 1\nfields: []\n")
-    write_text(root, "contracts/schemas/swarm_run_manifest_v1.yaml", "version: 1\nartifact: swarm_run_manifest\n")
-    write_text(root, "contracts/schemas/judge_review_log_v1.yaml", "version: 1\nartifact: judge_review_log\n")
+    for rel in (
+        "contracts/schemas/panel_schema.yaml",
+        "contracts/schemas/panel_schema_str_v1.yaml",
+        "contracts/schemas/panel_schema_decomp_v1.yaml",
+        "contracts/schemas/swarm_run_manifest_v1.yaml",
+        "contracts/schemas/swarm_run_manifest_v2.json",
+        "contracts/schemas/judge_review_log_v1.yaml",
+        "contracts/schemas/judge_review_log_v2.json",
+    ):
+        write_text(root, rel, (REPO_ROOT / rel).read_text(encoding="utf-8"))
     write_json(
         root,
         "contracts/claims.yaml",
@@ -371,7 +397,7 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
             "claims": [],
         },
     )
-    write_text(root, "contracts/schemas/claims_v1.yaml", "type: object\n")
+    write_text(root, "contracts/schemas/claims_v1.yaml", (REPO_ROOT / "contracts/schemas/claims_v1.yaml").read_text(encoding="utf-8"))
     write_text(
         root,
         "contracts/integrity_audit_seed.txt",

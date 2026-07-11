@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Estimate and manifest structural breaks from the committed rollup panel.
 
-Input: data/processed/panels/daily_rollup_panel.csv plus its processed manifest.
+Input: the active pack's primary panel plus its processed manifest.
 Output: reports/analysis/regime_breaks.json.
 
 Run: python scripts/estimate_regimes.py
@@ -28,9 +28,11 @@ from inference import bai_perron_breaks  # noqa: E402
 from metrics_str import compute_ecosystem_str  # noqa: E402
 from spec_curve import statistical_config_from_lock  # noqa: E402
 from swarm_taskfile import load_prereg_lock  # noqa: E402
+from pack_config import load_pack_config, pack_value  # noqa: E402
 
 
-DEFAULT_PANEL = Path("data/processed/panels/daily_rollup_panel.csv")
+PACK = load_pack_config(REPO_ROOT)
+DEFAULT_PANEL = Path(pack_value(PACK, "paths.primary_panel"))
 DEFAULT_OUTPUT = Path("reports/analysis/regime_breaks.json")
 
 

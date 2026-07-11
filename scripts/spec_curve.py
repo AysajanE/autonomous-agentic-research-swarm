@@ -40,9 +40,11 @@ from inference import (  # noqa: E402
     two_way_clustered_se,
 )
 from swarm_taskfile import load_prereg_lock  # noqa: E402
+from pack_config import load_pack_config, pack_value  # noqa: E402
 
 
-DEFAULT_PANEL = Path("data/processed/panels/daily_rollup_panel.csv")
+PACK = load_pack_config(REPO_ROOT)
+DEFAULT_PANEL = Path(pack_value(PACK, "paths.primary_panel"))
 DEFAULT_LOCK = Path("docs/prereg/analysis_plan.lock.md")
 _JSON_FENCE_RE = re.compile(r"```json\s*(\{.*?\})\s*```", flags=re.DOTALL | re.IGNORECASE)
 
