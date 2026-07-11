@@ -2222,8 +2222,11 @@ def gate_raw_manifest_validity() -> GateResult:
 
         failures.extend(
             f"{path}:{failure}"
-            for failure in _validate_required_keys(payload, {"source", "fetched_at_utc", "command", "files"}, "top")
+            for failure in _validate_required_keys(payload, {"source", "fetched_at_utc", "files"}, "top")
         )
+        command = payload.get("command", payload.get("access_instruction"))
+        if not isinstance(command, str) or not command.strip():
+            failures.append(f"{path}:command_blank")
 
         files = payload.get("files")
         if not isinstance(files, list):
@@ -10067,6 +10070,72 @@ def _raw_loss_amendment_coverage(repo: Path) -> tuple[set[str], list[str]]:
     return covered, amendments
 
 
+def _artifact_is_tracked_if_git_repo(repo: Path, path: Path) -> bool:
+    if not (repo / ".git").exists():
+        return True
+    try:
+        relpath = path.resolve().relative_to(repo.resolve()).as_posix()
+    except ValueError:
+        return False
+    return subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "--error-unmatch", "--", relpath],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+
+
+def _resolve_hash_bound_artifact(repo: Path, pointer: object) -> Path | None:
+    if not isinstance(pointer, dict):
+        return None
+    relpath = _safe_repo_relative_path(pointer.get("path"))
+    expected_sha = pointer.get("sha256")
+    if relpath is None or not isinstance(expected_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        return None
+    path = repo / relpath
+    if (
+        not path.is_file()
+        or hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha
+        or not _artifact_is_tracked_if_git_repo(repo, path)
+    ):
+        return None
+    return path
+
+
+def _archive_pointer_resolves(repo: Path, payload: dict[str, object]) -> tuple[bool, bool]:
+    archive_url = payload.get("archive_url")
+    archive_sha = payload.get("archive_sha256", payload.get("sha256"))
+    if (
+        not isinstance(archive_url, str)
+        or not re.match(r"^(?:https|s3|gs|file)://\S+$", archive_url)
+        or not isinstance(archive_sha, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", archive_sha)
+    ):
+        return False, False
+    remote = not archive_url.startswith("file://")
+    if not remote:
+        archive_path = Path(archive_url[7:])
+        return (
+            archive_path.is_file()
+            and hashlib.sha256(archive_path.read_bytes()).hexdigest() == archive_sha,
+            False,
+        )
+    receipt_path = _resolve_hash_bound_artifact(repo, payload.get("archive_receipt"))
+    if receipt_path is None:
+        return False, True
+    receipt, error = _load_json_file(receipt_path)
+    retrieval = receipt.get("retrieval_metadata") if isinstance(receipt, dict) else None
+    receipt_ok = bool(
+        error is None
+        and isinstance(receipt, dict)
+        and receipt.get("archive_url") == archive_url
+        and receipt.get("archive_sha256") == archive_sha
+        and isinstance(retrieval, dict)
+        and retrieval
+    )
+    return receipt_ok, True
+
+
 def check_raw_retention(repo: Path = Path(".")) -> GateResult:
     """Require live raw files, a versioned archive pointer, or an explicit amendment."""
     repo = repo.resolve()
@@ -10084,6 +10153,14 @@ def check_raw_retention(repo: Path = Path(".")) -> GateResult:
         checked += 1
         files = payload.get("files")
         entries = files if isinstance(files, list) else []
+        access_instruction = payload.get("command", payload.get("access_instruction"))
+        if not isinstance(access_instruction, str) or not access_instruction.strip():
+            failures.append(
+                _m4c_failure(
+                    "raw_retention_access_instruction_missing",
+                    subject=relpath,
+                )
+            )
         absent = [
             str(item.get("path"))
             for item in entries
@@ -10091,30 +10168,38 @@ def check_raw_retention(repo: Path = Path(".")) -> GateResult:
             and isinstance(item.get("path"), str)
             and not (repo / str(item["path"])).is_file()
         ]
-        if not absent:
+        empty_inventory = len(entries) == 0
+        if not absent and not empty_inventory:
             continue
-        archive_url = payload.get("archive_url")
-        archive_sha = payload.get("archive_sha256", payload.get("sha256"))
-        pointer_ok = (
-            isinstance(archive_url, str)
-            and bool(re.match(r"^(?:https|s3|gs|file)://\S+$", archive_url))
-            and isinstance(archive_sha, str)
-            and bool(re.fullmatch(r"[0-9a-f]{64}", archive_sha))
-        )
-        if pointer_ok and archive_url.startswith("file://"):
-            archive_path = Path(archive_url[7:])
-            pointer_ok = archive_path.is_file() and hashlib.sha256(archive_path.read_bytes()).hexdigest() == archive_sha
+        pointer_ok, remote_pointer = _archive_pointer_resolves(repo, payload)
         if pointer_ok:
             archive_satisfied.append(relpath)
         elif relpath in covered:
             amendment_satisfied.append(relpath)
+        elif empty_inventory:
+            failures.append(
+                _m4c_failure(
+                    "raw_retention_empty_inventory_uncovered",
+                    subject=relpath,
+                    expected="resolvable archive pointer/receipt or covering raw_evidence_unavailable amendment",
+                )
+            )
+        elif remote_pointer:
+            failures.append(
+                _m4c_failure(
+                    "raw_retention_remote_pointer_unresolved",
+                    subject=relpath,
+                    absent_file_count=len(absent),
+                    expected="hash-bound offline archive receipt or covering raw_evidence_unavailable amendment",
+                )
+            )
         else:
             failures.append(
                 _m4c_failure(
                     "raw_retention_unresolvable_pointer",
                     subject=relpath,
                     absent_file_count=len(absent),
-                    expected="archive_url+sha256 or covering raw_evidence_unavailable amendment",
+                    expected="verified file:// archive, hash-bound remote receipt, or covering raw_evidence_unavailable amendment",
                 )
             )
     return GateResult(
@@ -10142,6 +10227,48 @@ def _load_yaml_object(path: Path) -> tuple[dict[str, object] | None, str | None]
     except (OSError, yaml.YAMLError) as exc:
         return None, str(exc)
     return (payload, None) if isinstance(payload, dict) else (None, "top_level_not_object")
+
+
+def _evidence_pointer_resolves(repo: Path, pointer: object) -> bool:
+    return _resolve_hash_bound_artifact(repo, pointer) is not None
+
+
+def _statement_binding_resolves(
+    repo: Path,
+    binding: object,
+    canonical_ids: set[str],
+    manuscript_ids: set[str],
+) -> bool:
+    if not isinstance(binding, dict):
+        return False
+    section_id = binding.get("section_id")
+    if isinstance(section_id, str):
+        return section_id in canonical_ids and section_id in manuscript_ids
+    relpath = _safe_repo_relative_path(binding.get("path"))
+    if relpath is None:
+        return False
+    path = repo / relpath
+    if not path.is_file() or not _artifact_is_tracked_if_git_repo(repo, path):
+        return False
+    selector = binding.get("selector")
+    if selector is None:
+        return True
+    if not isinstance(selector, str) or not selector.strip():
+        return False
+    try:
+        if path.suffix.lower() == ".json":
+            value: object = json.loads(path.read_text(encoding="utf-8"))
+        elif path.suffix.lower() in {".yaml", ".yml"}:
+            value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        else:
+            return False
+    except (OSError, json.JSONDecodeError, yaml.YAMLError):
+        return False
+    for part in selector.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return False
+        value = value[part]
+    return value is not None and value != "" and value != [] and value != {}
 
 
 def check_venue_compliance(
@@ -10202,6 +10329,16 @@ def check_venue_compliance(
             failures.append(_m4c_failure("venue_compliance_consent_incompatible"))
         if not author or author_consent.get("status") != "consented":
             failures.append(_m4c_failure("venue_compliance_no_consented_author"))
+        if author and author_consent.get("status") == "consented" and not _evidence_pointer_resolves(
+            repo, author_consent.get("evidence_pointer")
+        ):
+            failures.append(_m4c_failure("venue_compliance_consent_evidence_unresolved"))
+        if consent.get("real_submission_authorized") is True:
+            ai_policy = venue.get("ai_policy") if isinstance(venue.get("ai_policy"), dict) else {}
+            if not _evidence_pointer_resolves(repo, consent.get("evidence_pointer")) or not _evidence_pointer_resolves(
+                repo, ai_policy.get("evidence_pointer")
+            ):
+                failures.append(_m4c_failure("venue_compliance_venue_evidence_unresolved"))
 
     disclosure_path = repo / "reports/paper/disclosure.md"
     expected_disclosure = generate_disclosure.generate_disclosure(repo)
@@ -10246,6 +10383,22 @@ def check_venue_compliance(
             failures.append(_m4c_failure("venue_compliance_submission_program_not_instantiated", actual=program.details.get("failures")))
         if not canonical_ids or missing_registry:
             failures.append(_m4c_failure("venue_compliance_submission_disclosure_bundle_incomplete"))
+        required_statements = venue.get("required_statements")
+        bindings = sections.get("required_statement_bindings")
+        for statement in required_statements if isinstance(required_statements, list) else []:
+            binding = bindings.get(statement) if isinstance(bindings, dict) and isinstance(statement, str) else None
+            if not isinstance(statement, str) or not _statement_binding_resolves(
+                repo,
+                binding,
+                canonical_ids,
+                manuscript_ids,
+            ):
+                failures.append(
+                    _m4c_failure(
+                        "venue_compliance_required_statement_missing",
+                        subject=statement,
+                    )
+                )
 
     return GateResult(
         ok=not failures,
@@ -10269,9 +10422,15 @@ def gate_venue_compliance(*, submission_declared: bool | None = None) -> GateRes
 def check_replication_package_audit(
     repo: Path = Path("."),
     *,
-    execute_empirical_master: bool = True,
+    release_perimeter: bool = False,
+    execute_empirical_master: bool | None = None,
 ) -> GateResult:
-    result = replication_package.audit_repo_profiles(repo, execute_empirical_master=execute_empirical_master)
+    if execute_empirical_master is not None:
+        release_perimeter = execute_empirical_master
+    result = replication_package.audit_repo_profiles(
+        repo,
+        execute_empirical_master=release_perimeter,
+    )
     failures: list[dict[str, object]] = []
     profiles = result.get("profiles")
     if isinstance(profiles, dict):
@@ -10280,14 +10439,19 @@ def check_replication_package_audit(
                 failures.append(_m4c_failure("replication_package_profile_failed", subject=profile, actual=profile_result))
     return GateResult(
         ok=not failures,
-        details={"status": "active", "profiles": profiles, "failures": failures},
+        details={
+            "status": "release_perimeter" if release_perimeter else "active_lightweight",
+            "release_perimeter": release_perimeter,
+            "profiles": profiles,
+            "failures": failures,
+        },
     )
 
 
-def gate_replication_package_audit() -> GateResult:
+def gate_replication_package_audit(*, release_perimeter: bool = False) -> GateResult:
     if not Path("scripts/replication_package.py").is_file():
         return GateResult(ok=True, details={"status": "inactive_m4c_not_installed", "skipped": True, "failures": []})
-    return check_replication_package_audit(Path("."))
+    return check_replication_package_audit(Path("."), release_perimeter=release_perimeter)
 
 
 _CORE_GATE_NAMES = (

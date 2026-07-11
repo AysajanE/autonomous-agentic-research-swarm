@@ -7,7 +7,7 @@ Run `./MASTER.sh` to execute the package master command: `make reproduce-analysi
 ## Reproduction levels
 
 - **Functional:** package construction and the declared master traversal are machine-audited.
-- **Reproduced:** requires a recorded clean-room run by a non-author agent. The live empirical package reports this level as pending; it is never inferred from an authoring run.
+- **Reproduced:** requires an observed clean-workspace master run whose regenerated outputs satisfy every declared verification bar. The live empirical package reports this level as pending a non-author run; identity is never inferred from an authoring run.
 
 ## Verification bars
 

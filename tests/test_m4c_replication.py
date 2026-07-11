@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -41,6 +47,16 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _refresh_member_hash(package: Path, relpath: str) -> None:
+    manifest_path = package / "package_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    member = next(item for item in manifest["members"] if item["path"] == relpath)
+    path = package / relpath
+    member["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    member["bytes"] = path.stat().st_size
+    _write_json(manifest_path, manifest)
+
+
 def _venue_fixture(root: Path) -> None:
     for relpath in (
         "contracts/venue.yaml",
@@ -66,6 +82,85 @@ class M4cReplicationTests(unittest.TestCase):
         self.assertFalse(profiles["empirical"]["levels"]["Reproduced"])
         self.assertTrue(profiles["modeling"]["levels"]["Reproduced"])
         self.assertTrue(profiles["hybrid"]["levels"]["Reproduced"])
+        self.assertEqual(profiles["empirical"]["master_execution"], "staged_release_perimeter")
+        self.assertTrue(profiles["hybrid"]["bridge_traversed"])
+
+    def test_hybrid_generator_writes_deterministic_instance_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "fixture"
+            shutil.copytree(ROOT / "tests/fixtures/m4c_hybrid", fixture)
+            instance = fixture / "modeling/instance_manifest.json"
+            expected = hashlib.sha256(instance.read_bytes()).hexdigest()
+            instance.unlink()
+            completed = subprocess.run(
+                [sys.executable, "bridge/generate_instances.py"],
+                cwd=fixture,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(instance.is_file(), "generator must write the instance, not print a digest")
+            self.assertEqual(hashlib.sha256(instance.read_bytes()).hexdigest(), expected)
+
+    def test_replication_gate_stages_empirical_master_until_release_perimeter(self) -> None:
+        result = {
+            "ok": True,
+            "profiles": {
+                profile: {"ok": True, "profile": profile, "levels": {"Functional": True, "Reproduced": profile != "empirical"}, "failures": []}
+                for profile in ("empirical", "modeling", "hybrid")
+            },
+        }
+        with mock.patch.object(quality_gates.replication_package, "audit_repo_profiles", return_value=result) as audit:
+            lightweight = quality_gates.check_replication_package_audit(ROOT)
+            audit.assert_called_once_with(ROOT, execute_empirical_master=False)
+            self.assertEqual(lightweight.details["status"], "active_lightweight")
+        with mock.patch.object(quality_gates.replication_package, "audit_repo_profiles", return_value=result) as audit:
+            release = quality_gates.check_replication_package_audit(ROOT, release_perimeter=True)
+            audit.assert_called_once_with(ROOT, execute_empirical_master=True)
+            self.assertEqual(release.details["status"], "release_perimeter")
+
+    def test_fixture_audit_passes_from_successor_tree_tracked_only_export(self) -> None:
+        # A temporary index models the uncommitted successor without touching the real index/history.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            staging = tmp_path / "staging"
+            staging.mkdir()
+            shutil.copyfile(ROOT / ".gitignore", staging / ".gitignore")
+            for profile in ("modeling", "hybrid"):
+                destination = staging / f"tests/fixtures/m4c_{profile}"
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(ROOT / f"tests/fixtures/m4c_{profile}", destination)
+            subprocess.run(["git", "init", "-q"], cwd=staging, check=True)
+            index = tmp_path / "successor.index"
+            environment = {**os.environ, "GIT_INDEX_FILE": str(index)}
+            subprocess.run(
+                ["git", "add", "-A", "--", ".gitignore", "tests/fixtures/m4c_modeling", "tests/fixtures/m4c_hybrid"],
+                cwd=staging,
+                env=environment,
+                check=True,
+            )
+            tree = subprocess.run(
+                ["git", "write-tree"], cwd=staging, env=environment, check=True, capture_output=True, text=True
+            ).stdout.strip()
+            archive = tmp_path / "fixtures.tar"
+            with archive.open("wb") as handle:
+                subprocess.run(
+                    ["git", "archive", tree, "tests/fixtures/m4c_modeling", "tests/fixtures/m4c_hybrid"],
+                    cwd=staging,
+                    env=environment,
+                    check=True,
+                    stdout=handle,
+                )
+            export = tmp_path / "export"
+            export.mkdir()
+            with tarfile.open(archive) as handle:
+                handle.extractall(export, filter="data")
+            for profile in ("modeling", "hybrid"):
+                package = tmp_path / f"package-{profile}"
+                replication.generate_package(export / f"tests/fixtures/m4c_{profile}", package, profile=profile)
+                result = replication.audit_package(package)
+                self.assertTrue(result["ok"], result)
 
     def test_readme_uses_declared_versions_and_truthfully_marks_unlogged_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,6 +234,135 @@ class M4cReplicationTests(unittest.TestCase):
             reasons = _reasons(result)
             self.assertIn("venue_compliance_submission_manuscript_perimeter_missing", reasons)
             self.assertIn("venue_compliance_submission_program_not_instantiated", reasons)
+
+    def test_remote_archive_url_without_offline_receipt_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_json(
+                root / "data/raw_manifest/remote.json",
+                {
+                    "source": "fixture",
+                    "command": "fixture acquisition command",
+                    "archive_url": "https://example.invalid/archive.tar.zst",
+                    "archive_sha256": "a" * 64,
+                    "files": [{"path": "data/raw/missing.csv", "sha256": "b" * 64, "bytes": 1}],
+                },
+            )
+            result = quality_gates.check_raw_retention(root)
+            self.assertIn("raw_retention_remote_pointer_unresolved", _reasons(result))
+
+    def test_hash_bound_offline_archive_receipt_satisfies_remote_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_url = "s3://fixture-bucket/snapshot-v1.tar.zst"
+            archive_sha = "a" * 64
+            receipt_path = root / "data/raw_manifest/receipts/snapshot-v1.json"
+            _write_json(
+                receipt_path,
+                {
+                    "archive_url": archive_url,
+                    "archive_sha256": archive_sha,
+                    "retrieval_metadata": {"verified_at_utc": "2026-01-01T00:00:00Z", "operator": "fixture"},
+                },
+            )
+            _write_json(
+                root / "data/raw_manifest/remote.json",
+                {
+                    "source": "fixture",
+                    "command": "fixture acquisition command",
+                    "archive_url": archive_url,
+                    "archive_sha256": archive_sha,
+                    "archive_receipt": {
+                        "path": "data/raw_manifest/receipts/snapshot-v1.json",
+                        "sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+                    },
+                    "files": [{"path": "data/raw/missing.csv", "sha256": "b" * 64, "bytes": 1}],
+                },
+            )
+            result = quality_gates.check_raw_retention(root)
+            self.assertTrue(result.ok, result.details)
+            self.assertEqual(result.details["archive_satisfied"], ["data/raw_manifest/remote.json"])
+
+    def test_empty_raw_inventory_without_retention_coverage_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_json(
+                root / "data/raw_manifest/empty.json",
+                {"source": "fixture", "command": "fixture acquisition command", "files": []},
+            )
+            result = quality_gates.check_raw_retention(root)
+            self.assertIn("raw_retention_empty_inventory_uncovered", _reasons(result))
+
+    def test_blank_raw_access_command_fails_manifest_validity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_json(
+                root / "data/raw_manifest/blank.json",
+                {
+                    "source": "fixture",
+                    "fetched_at_utc": "2026-01-01T00:00:00Z",
+                    "command": "   ",
+                    "files": [],
+                },
+            )
+            with contextlib.chdir(root):
+                result = quality_gates.gate_raw_manifest_validity()
+            self.assertFalse(result.ok)
+            self.assertTrue(any(failure.endswith(":command_blank") for failure in result.details["failures"]))
+
+    def test_claimed_consent_with_dangling_evidence_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _venue_fixture(root)
+            authorship_path = root / "contracts/authorship.yaml"
+            authorship = yaml.safe_load(authorship_path.read_text(encoding="utf-8"))
+            authorship["human_author_of_record"] = "Fixture Author"
+            authorship["human_author_consent"] = {
+                "status": "consented",
+                "evidence_pointer": {"path": "evidence/missing-consent.json", "sha256": "a" * 64},
+            }
+            authorship_path.write_text(yaml.safe_dump(authorship, sort_keys=False), encoding="utf-8")
+            manuscript = root / "reports/paper/index.qmd"
+            manuscript.write_text(
+                manuscript.read_text(encoding="utf-8").replace("author: null", 'author: "Fixture Author"'),
+                encoding="utf-8",
+            )
+            venue_path = root / "contracts/venue.yaml"
+            venue = yaml.safe_load(venue_path.read_text(encoding="utf-8"))
+            venue["venue_consent"].update(
+                {
+                    "real_submission_authorized": True,
+                    "evidence_pointer": {"path": "evidence/missing-venue.json", "sha256": "b" * 64},
+                }
+            )
+            venue["ai_policy"]["evidence_pointer"] = {
+                "path": "evidence/missing-policy.json",
+                "sha256": "c" * 64,
+            }
+            venue_path.write_text(yaml.safe_dump(venue, sort_keys=False), encoding="utf-8")
+            result = quality_gates.check_venue_compliance(root, submission_declared=True)
+            reasons = _reasons(result)
+            self.assertIn("venue_compliance_consent_evidence_unresolved", reasons)
+            self.assertIn("venue_compliance_venue_evidence_unresolved", reasons)
+
+    def test_declared_submission_missing_required_statement_binding_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _venue_fixture(root)
+            sections_path = root / "contracts/manuscript_sections.yaml"
+            sections = yaml.safe_load(sections_path.read_text(encoding="utf-8"))
+            del sections["required_statement_bindings"]["data_availability"]
+            sections_path.write_text(yaml.safe_dump(sections, sort_keys=False), encoding="utf-8")
+            result = quality_gates.check_venue_compliance(root, submission_declared=True)
+            failures = result.details["failures"]
+            self.assertTrue(
+                any(
+                    item.get("reason") == "venue_compliance_required_statement_missing"
+                    and item.get("subject") == "data_availability"
+                    for item in failures
+                    if isinstance(item, dict)
+                )
+            )
 
 
 if __name__ == "__main__":

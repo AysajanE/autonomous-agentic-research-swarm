@@ -1,8 +1,5 @@
 {
   "agent_role": "clean_room_reproducer",
-  "master_script_returncode": 0,
-  "non_author_agent": "fixture-independent-agent",
-  "regenerated_instances": true,
-  "regenerated_source_sha256": "01620d232cd85b92c3864b59688689d77a75eba0691e4d6133e2c5911238c215",
-  "traversed_bridge": true
+  "identity_attestation": "out_of_band_fixture_metadata",
+  "non_author_agent": "fixture-independent-agent"
 }

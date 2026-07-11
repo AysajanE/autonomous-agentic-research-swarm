@@ -18,9 +18,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 4986,
+      "bytes": 5066,
       "path": "README.md",
-      "sha256": "32fcf23a23fc9ae618cffefff6d87a274fb65cc69cd4717b2221bfb6a0fe182d",
+      "sha256": "23128be4383ffa09834905a132021ccfb69100e253156a22fe0ea61d39372df7",
       "verification_bar": "byte_identity"
     },
     {
@@ -30,9 +30,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 5101,
+      "bytes": 5479,
       "path": "contracts/CHANGELOG.md",
-      "sha256": "ffa6cf4e96ef9c36f227fa32fcaf6a874b46c55d8ea5265e0afc5ebbb8e10dbb",
+      "sha256": "a135256b862f5028f8d382cc0af5c908301dad82e41359186d5463e4320d02df",
       "verification_bar": "byte_identity"
     },
     {
@@ -132,9 +132,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 500,
+      "bytes": 864,
       "path": "contracts/manuscript_sections.yaml",
-      "sha256": "03dc60593561167b42b5b1c94cfdd9be6dd97b65bf02e3519588b9f6ed85a6df",
+      "sha256": "b68e2d5a6ba2dadf4eed6af8582441d1b55b7a9d28f0dd31fc18f93c5a50aa75",
       "verification_bar": "byte_identity"
     },
     {
@@ -510,9 +510,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 524,
+      "bytes": 1306,
       "path": "data/raw_manifest/README.md",
-      "sha256": "ddfac1668bebce31c44409d09d13f66a6cac65a12aaeb7e5dafa22fc0dfba3dc",
+      "sha256": "2ec908cc883c85256bab9061e1fd828d7bca8051887f46e6378e980cf529ae66",
       "verification_bar": "byte_identity"
     },
     {
@@ -636,24 +636,6 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 13787,
-      "path": "docs/feedbacks/RUNNER_PLAYBOOK.md",
-      "sha256": "c00840c7fc1517c75a6436484760f8306dc0e4b0fd91ec7ea9dd2435b67b6800",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 84,
-      "path": "docs/feedbacks/Sakana_AI_scientist.md",
-      "sha256": "b410c6021ed96834b70f77da2f49c0d12955877977b606af4805febf85cfb404",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 21834,
-      "path": "docs/feedbacks/framework_project_structure_integration_2026-02-05.md",
-      "sha256": "c70caa589fb98ce666cb064602128eb5c06e9425465dc7b05a933e7d4d6a3f03",
-      "verification_bar": "byte_identity"
-    },
-    {
       "bytes": 10054,
       "path": "docs/feedbacks/runner_task_packs/research_swarm_post_battletest_improvement/README.md",
       "sha256": "6601c4c56e015d92df69651989bd8fa5ba681f5f8e04b96e7c7125b76bc975bd",
@@ -750,249 +732,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 12307,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/README.md",
-      "sha256": "abf13563afceabe98ec96894971eff58c7de398297f9fb165ab4aaf1d108c91a",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 2036,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/corpus/external_benchmark_context.md",
-      "sha256": "78de77ad1af210a9a12aa256952bda49d3edb18c509475604101a9d812f53b9c",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 3052,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/corpus/mission_brief.md",
-      "sha256": "3c65c8ca26fa6a9d81ef41eda51fbf9fe4185fa77b0a9662c2e11cdb95d2e54b",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 3621,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/inputs/legacy_stage3_final_rewrite_packet.input_manifest.json",
-      "sha256": "b3f7c2e047e940ded40634348416d0cca4f91dea6594fa3c4c891f48762aa599",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 3566,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/inputs/stage1_diagnosis.input_manifest.json",
-      "sha256": "8ff12888ff6dcef386e5f3df0f9fb260148fe96633770038a33448e0563c6677",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 3602,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/inputs/stage2_target_architecture.input_manifest.json",
-      "sha256": "3daa5553a8595179078e9dc9ced5c615aafc2192b44eb0c6830a0bc46943eb0b",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 5296,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/inputs/stage3_rewrite_foundations.input_manifest.json",
-      "sha256": "77abdade4c7756fc180b7564bb277216a4ed6814f3a751e4a0041a63a5b8ee39",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 4942,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/inputs/stage4_final_rewrite_packet.input_manifest.json",
-      "sha256": "aa0bb627d17da48dc67e216f08708b60a3ab7664930222c17da74df172759dc5",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 4374,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/inputs/stage4_runtime_and_gates_packet.input_manifest.json",
-      "sha256": "42545e978051dbd20143804c2ac307627d0b7129fd07b10559db19fdf9c67627",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 4208,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/inputs/stage5_release_and_catalog_packet.input_manifest.json",
-      "sha256": "8c272ab74aea3e6af76d8b72f1e36c343f9efe6421355a0eb4faeb9affa3d97c",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 4279,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/inputs/stage5_release_and_paper_packet.input_manifest.json",
-      "sha256": "8c43df217f2499a794c2d2cdb18f1a60ceb1fc3acfabcfad49c1a485c7faa571",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 3688,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/inputs/stage6_paper_packet.input_manifest.json",
-      "sha256": "cebd2e3c24a0e058ff71ebdd573201ac95e5b47355e7919b7b7444092818949a",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 4287,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/prompts/legacy_stage3_final_rewrite_packet.md",
-      "sha256": "12e47c73f0cf0263fe754c6c9fc154f1cf4db10113dad57b72cac345da58dd58",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 3365,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/prompts/stage1_diagnosis.md",
-      "sha256": "0e58c21594867ac5cd1a634e9f3f87751efb32ad21c3557178766fc6b1c60e6f",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 4278,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/prompts/stage2_target_architecture.md",
-      "sha256": "5872c759281e5aef09e832f39e6058df39df866a11b364f8b9bdc9824759dae1",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 7270,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/prompts/stage3_rewrite_foundations.md",
-      "sha256": "9e2e47b708032963eee4ee3d7a937576a5024285d49e571614f69abfb4553de9",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 5735,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/prompts/stage4_final_rewrite_packet.md",
-      "sha256": "dad6939c0fe1184828c6c0af3d9ae8bd669325b46163b294fd4cc1483ba009a5",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 6654,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/prompts/stage4_runtime_and_gates_packet.md",
-      "sha256": "4d04d7eaee90e51510f3cf550e4aca66a9b33a12d6f9659c6fcc4a526899cd0d",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 7702,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/prompts/stage5_release_and_catalog_packet.md",
-      "sha256": "2009169eaec3a6a0fbdebc6567930037d063cc3f22b5b4de4c8b01988e92da7d",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 6152,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/prompts/stage5_release_and_paper_packet.md",
-      "sha256": "53833b62f311df47813d0f4326cef3c3192175a9014c9542a96f2146b4677e22",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 7040,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/prompts/stage6_paper_packet.md",
-      "sha256": "25dd00f5fbc3989535ac46eb642720a0776729b8970d2db2555f2a107e8faf93",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 1884,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/review_bundles/five_stage_stage3_rewrite_foundations.review_bundle.json",
-      "sha256": "e60bb9b0af0a47544ad0c2d0d2c2f146843fe0ba951b2b00f9f31f8c833a7635",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 2041,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/review_bundles/five_stage_stage4_runtime_and_gates_packet.review_bundle.json",
-      "sha256": "045ee3c5dcfa92e04574a814978abed7d53da8eb7f309916c52f1583f61652ad",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 1298,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/review_bundles/four_stage_stage1_diagnosis.review_bundle.json",
-      "sha256": "7175a5c6a796af447f6089a08f526ff78f8e3782a576a38a123267ebe71de826",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 1338,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/review_bundles/four_stage_stage2_target_architecture.review_bundle.json",
-      "sha256": "aeb47692832cf900665c092a637ddf445fe44b5bba66fc5b621f007415087f68",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 1884,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/review_bundles/four_stage_stage3_rewrite_foundations.review_bundle.json",
-      "sha256": "e60bb9b0af0a47544ad0c2d0d2c2f146843fe0ba951b2b00f9f31f8c833a7635",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 3152,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/review_bundles/stage1_diagnosis.review_bundle.json",
-      "sha256": "95462ad13aaf84287b4e143c94e8af0ecf34c0b1c12ec67992864830efd676ab",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 809,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/review_bundles/stage1_diagnosis.reviewer_notes.md",
-      "sha256": "a040b7c39acc03911fb18f3dd0f529738895b53b1f4673ec7317d5b8dc4b8d3b",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 3322,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/review_bundles/stage2_target_architecture.review_bundle.json",
-      "sha256": "cc2ebe1107fd22feadd2450a32ed10016a11e033bcddafd785dd8afae3d98b68",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 1458,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/review_bundles/stage2_target_architecture.reviewer_notes.md",
-      "sha256": "ab0e78e39b43fe29ca035124bac3118245bcd7a9a65050a0b455eca438d5a300",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 1886,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/review_bundles/stage3_rewrite_foundations.reviewer_notes.md",
-      "sha256": "611946372d6e24ede3034be62826c968271e4d6ff308aaf81d80e7ddeb1c51f2",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 4007,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/review_bundles/stage4_runtime_and_gates_packet.reviewer_notes.md",
-      "sha256": "d51609095448df679406adfc64c68939b4954d81b065fbc2272b500ba0b29291",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 1760,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/schemas/final_rewrite_packet_index.schema.json",
-      "sha256": "c2620a69e7cf3625b36888a751bce0bf1271dcc4cb3b7ae7a3738301671965af",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 5544,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/shared_instructions.md",
-      "sha256": "e9ff7b58b84e40314cb3518da3cffe36555a316f448f16be2b3f86328c3d22fb",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 18,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/tools/no_tools.profile.json",
-      "sha256": "e392651dfa64976a1586a25fe709f37f2606914a0d3f043a5b0a2865834992f0",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 173,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/tools/web_search.profile.json",
-      "sha256": "882f620f0029b14e46b9e078cb6e8b619fbafb43311d132838d743a05896dc45",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 4630,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/workflows/five_stage_rewrite.workflow.json",
-      "sha256": "661b1ead9bc9652266de3cdba7257bce16dd65b3a5b651cab0c0667477c89718",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 3896,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/workflows/four_stage_rewrite.workflow.json",
-      "sha256": "2d80514dd0134a6df0950e2d74c2977bc32329f3132c2522a719aab3eeb56582",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 3450,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/workflows/legacy_reviewed_three_stage.workflow.json",
-      "sha256": "512fcaeb355dd35855fa9c8e8b27aeb73b27b1218223a1efcb79f88c9fa568c9",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 5288,
-      "path": "docs/feedbacks/runner_task_packs/research_swarm_v1_rewrite/workflows/six_stage_rewrite.workflow.json",
-      "sha256": "2753f9c8226dd45bc80ccdacce27878738451bfd60cf8b02d514c3f12464eda7",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 64546,
+      "bytes": 69621,
       "path": "docs/first_class_swarm_execution_log.md",
-      "sha256": "280c62973e58880da630f5f5d066494e56a248201b1ff1b1fdc43c1396073890",
+      "sha256": "2952d4eb0df19a3754baeb595ca7946b1877abab23f77b969373847a837bc44e",
       "verification_bar": "byte_identity"
     },
     {
@@ -1874,9 +1616,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 448454,
+      "bytes": 455034,
       "path": "scripts/quality_gates.py",
-      "sha256": "94092e0f44272205cc56ccf5049286201833064322ecbc27b3ff5e84e288f6a8",
+      "sha256": "d2796701a2433e7cd6bb0065bf7e1363d8e1165160e9748812bb6cb9664414b9",
       "verification_bar": "byte_identity"
     },
     {
@@ -1886,9 +1628,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 56646,
+      "bytes": 56675,
       "path": "scripts/release_assembly.py",
-      "sha256": "af58e1c19b344d7d66039ee32f1a0c5a0f391e7073becb7a8408b81b577db71e",
+      "sha256": "d38cc38bab5f623bf73b1f5962fd55cf571147f4e66adb5d6391b66b60fc28bb",
       "verification_bar": "byte_identity"
     },
     {
@@ -1904,9 +1646,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 29456,
+      "bytes": 39797,
       "path": "scripts/replication_package.py",
-      "sha256": "197cd74f9f654dc2022627cc0dca637351a85ebfd33de1e54154adbe75ce1bbd",
+      "sha256": "fdbe464efa9c8ced6835e9ccad31c43464f0967de6e2faa717319e71c2c1b11a",
       "verification_bar": "byte_identity"
     },
     {
@@ -2030,36 +1772,6 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 298,
-      "path": "src/l2_l1_rent_analysis.egg-info/PKG-INFO",
-      "sha256": "9ecd6d3d2e0a59983f4697780eb752e75f63ab866406192d1d54231dfbe58148",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 831,
-      "path": "src/l2_l1_rent_analysis.egg-info/SOURCES.txt",
-      "sha256": "e82431ae95a5df24aa384a6bb58dc0aa2cad6fcf65a55faf138f30be5a80269b",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 1,
-      "path": "src/l2_l1_rent_analysis.egg-info/dependency_links.txt",
-      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 34,
-      "path": "src/l2_l1_rent_analysis.egg-info/requires.txt",
-      "sha256": "f7192a55be465b55f8775b3f7de43e32830fa8e5c0e72ed69cd4ff4c8013f753",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "bytes": 30,
-      "path": "src/l2_l1_rent_analysis.egg-info/top_level.txt",
-      "sha256": "9f89615ac77ad7a93d78ce69ec5118cf4b4407d8b82827ba6b78c9adcfd5ba10",
-      "verification_bar": "byte_identity"
-    },
-    {
       "bytes": 602,
       "path": "src/model/AGENTS.md",
       "sha256": "bb2cac3f93fd8435d3cb02ce0025adc384045a74401574da3d69751ce5b225ff",
@@ -2101,21 +1813,6 @@
       "verification_bar": "byte_identity"
     },
     {
-      "artifact_class": "deterministic_output",
-      "path": "reports/paper/paper_values.json",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "artifact_class": "deterministic_output",
-      "path": "reports/tables/str_regime_summary.csv",
-      "verification_bar": "byte_identity"
-    },
-    {
-      "artifact_class": "deterministic_output",
-      "path": "reports/tables/str_regime_summary.md",
-      "verification_bar": "byte_identity"
-    },
-    {
       "artifact_class": "figure_or_sidecar",
       "path": "reports/figures/str_ecosystem_timeseries.data.json",
       "verification_bar": "content_equivalence"
@@ -2134,6 +1831,21 @@
       "artifact_class": "figure_or_sidecar",
       "path": "reports/figures/str_post_dencun_regimes.svg",
       "verification_bar": "content_equivalence"
+    },
+    {
+      "artifact_class": "deterministic_output",
+      "path": "reports/paper/paper_values.json",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "artifact_class": "deterministic_output",
+      "path": "reports/tables/str_regime_summary.csv",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "artifact_class": "deterministic_output",
+      "path": "reports/tables/str_regime_summary.md",
+      "verification_bar": "byte_identity"
     }
   ],
   "schema_version": "research_swarm.replication_package.v1"

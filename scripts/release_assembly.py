@@ -410,7 +410,7 @@ def _collect_stage4_gate_results(repo_root: Path) -> dict[str, dict[str, Any]]:
             func = getattr(quality_gates, f"gate_{gate_name}")
             if gate_name == "citation_integrity":
                 result = func(require_literature_corpus=True)
-            elif gate_name in {"paper_registry", "program_conformance"}:
+            elif gate_name in {"paper_registry", "program_conformance", "replication_package_audit"}:
                 result = func(release_perimeter=True)
             else:
                 result = func()

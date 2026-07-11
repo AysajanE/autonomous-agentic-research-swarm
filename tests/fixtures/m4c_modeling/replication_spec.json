@@ -2,6 +2,11 @@
   "package_members": [
     "modeling"
   ],
+  "reproduction_bars": [
+    {
+      "path": "modeling/convergence.jsonl",
+      "verification_bar": "byte_identity"
+    }
+  ],
   "profile": "modeling"
 }
-

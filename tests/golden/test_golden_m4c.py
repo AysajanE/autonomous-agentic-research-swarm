@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -51,6 +52,21 @@ def _reasons(result) -> set[str]:
     }
 
 
+def _write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _refresh_member_hash(package: Path, relpath: str) -> None:
+    manifest_path = package / "package_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    member = next(item for item in manifest["members"] if item["path"] == relpath)
+    path = package / relpath
+    member["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    member["bytes"] = path.stat().st_size
+    _write_json(manifest_path, manifest)
+
+
 class GoldenM4cTests(unittest.TestCase):
     def _hybrid_package(self, root: Path) -> Path:
         package = root / "package"
@@ -74,6 +90,7 @@ class GoldenM4cTests(unittest.TestCase):
             payload = json.loads(path.read_text(encoding="utf-8"))
             payload["instance_manifest"]["sha256"] = "0" * 64
             path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _refresh_member_hash(package, "bridge/experiment_output.json")
             result = replication.audit_package(package)
             self.assertFalse(result["ok"])
             self.assertIn("replication_cross_layer_hash_link_broken", result["failures"])
@@ -92,19 +109,100 @@ class GoldenM4cTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertTrue(any(item.startswith("replication_bar_mismatch:") for item in result["failures"]))
 
-    def test_clean_room_that_consumes_instances_without_bridge_traversal_fails(self) -> None:
-        # Independent expected value: Reproduced requires traversed_bridge and regenerated_instances true.
+    def test_clean_room_that_consumes_committed_instances_without_regeneration_fails(self) -> None:
+        # Independent expected: the audit deletes the committed instance, so a hash-printing stub cannot recreate it.
         with tempfile.TemporaryDirectory() as tmp:
             package = self._hybrid_package(Path(tmp))
-            path = package / "bridge/clean_room.json"
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            generator = package / "bridge/generate_instances.py"
+            generator.write_text(
+                "from pathlib import Path\nimport hashlib\n"
+                "p=Path('data/processed_manifest/source.json')\nprint(hashlib.sha256(p.read_bytes()).hexdigest())\n",
+                encoding="utf-8",
+            )
+            _refresh_member_hash(package, "bridge/generate_instances.py")
+            metadata_path = package / "bridge/clean_room.json"
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
             payload["traversed_bridge"] = False
             payload["regenerated_instances"] = False
-            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            metadata_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _refresh_member_hash(package, "bridge/clean_room.json")
             result = replication.audit_package(package)
             self.assertFalse(result["ok"])
             self.assertFalse(result["levels"]["Reproduced"])
             self.assertIn("replication_hybrid_clean_room_bridge_not_traversed", result["failures"])
+
+    def test_self_asserted_true_clean_room_flags_do_not_rescue_stub_generator(self) -> None:
+        # Independent expected: advisory booleans cannot substitute for an observed recreated file.
+        with tempfile.TemporaryDirectory() as tmp:
+            package = self._hybrid_package(Path(tmp))
+            generator = package / "bridge/generate_instances.py"
+            generator.write_text("print('pretend-regenerated')\n", encoding="utf-8")
+            _refresh_member_hash(package, "bridge/generate_instances.py")
+            metadata_path = package / "bridge/clean_room.json"
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            payload.update(
+                {
+                    "traversed_bridge": True,
+                    "regenerated_instances": True,
+                    "regenerated_source_sha256": "a" * 64,
+                    "master_script_returncode": 0,
+                }
+            )
+            _write_json(metadata_path, payload)
+            _refresh_member_hash(package, "bridge/clean_room.json")
+            result = replication.audit_package(package)
+            self.assertFalse(result["levels"]["Reproduced"])
+            self.assertIn("replication_hybrid_clean_room_bridge_not_traversed", result["failures"])
+
+    def test_omitted_expected_bar_fails_complete_coverage(self) -> None:
+        # Independent expected: all eight empirical outputs are fixed by EMPIRICAL_EXPECTED_BARS.
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "package"
+            replication.generate_package(ROOT, package, profile="empirical")
+            manifest_path = package / "package_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            omitted = "reports/paper/paper_values.json"
+            manifest["reproduction_bars"] = [item for item in manifest["reproduction_bars"] if item["path"] != omitted]
+            _write_json(manifest_path, manifest)
+            result = replication.audit_package(package)
+            self.assertFalse(result["ok"])
+            self.assertIn(f"replication_bar_coverage_missing:{omitted}", result["failures"])
+
+    def test_master_returncode_zero_but_wrong_output_fails_reproduced(self) -> None:
+        # Independent expected: rc=0 cannot override a byte mismatch in a declared output.
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "package"
+            replication.generate_package(ROOT / "tests/fixtures/m4c_modeling", package, profile="modeling")
+            script = package / "modeling/derivation_check.py"
+            script.write_text(
+                "from pathlib import Path\nPath('modeling/convergence.jsonl').write_text('wrong\\n', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            _refresh_member_hash(package, "modeling/derivation_check.py")
+            result = replication.audit_package(package)
+            self.assertFalse(result["levels"]["Reproduced"])
+            self.assertIn(
+                "replication_reproduced_byte_mismatch:modeling/convergence.jsonl",
+                result["failures"],
+            )
+
+    def test_release_perimeter_empirical_master_wrong_bar_blocks(self) -> None:
+        # Independent expected: release execution snapshots the table before a zero-rc master corrupts it.
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "package"
+            replication.generate_package(ROOT, package, profile="empirical")
+            master = package / "MASTER.sh"
+            master.write_text(
+                "#!/bin/sh\nset -eu\nprintf 'corrupt\\n' > reports/tables/str_regime_summary.csv\n",
+                encoding="utf-8",
+            )
+            _refresh_member_hash(package, "MASTER.sh")
+            result = replication.audit_package(package, execute_master=True)
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                "replication_reproduced_byte_mismatch:reports/tables/str_regime_summary.csv",
+                result["failures"],
+            )
 
     def test_absent_raw_without_archive_or_amendment_fails(self) -> None:
         # Independent expected value: an absent manifested file has neither permitted satisfier here.
@@ -116,6 +214,7 @@ class GoldenM4cTests(unittest.TestCase):
                 json.dumps(
                     {
                         "source": "fixture",
+                        "command": "fixture acquisition command",
                         "files": [{"path": "data/raw/missing.csv", "sha256": "a" * 64, "bytes": 1}],
                     },
                     indent=2,
@@ -127,6 +226,34 @@ class GoldenM4cTests(unittest.TestCase):
             result = quality_gates.check_raw_retention(root)
             reasons = {item["reason"] for item in result.details["failures"]}
             self.assertEqual(reasons, {"raw_retention_unresolvable_pointer"})
+
+    def test_remote_url_with_unverified_digest_is_not_archive_evidence(self) -> None:
+        # Independent expected: offline code cannot resolve a remote URL without a bound receipt.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_json(
+                root / "data/raw_manifest/remote.json",
+                {
+                    "source": "fixture",
+                    "command": "fixture acquisition command",
+                    "archive_url": "https://example.invalid/fabricated.tar.zst",
+                    "archive_sha256": "a" * 64,
+                    "files": [{"path": "data/raw/missing", "sha256": "b" * 64, "bytes": 1}],
+                },
+            )
+            result = quality_gates.check_raw_retention(root)
+            self.assertIn("raw_retention_remote_pointer_unresolved", _reasons(result))
+
+    def test_empty_raw_inventory_is_not_vacuously_retained(self) -> None:
+        # Independent expected: zero files supplies no evidence of a retained snapshot.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_json(
+                root / "data/raw_manifest/empty.json",
+                {"source": "fixture", "command": "fixture acquisition command", "files": []},
+            )
+            result = quality_gates.check_raw_retention(root)
+            self.assertIn("raw_retention_empty_inventory_uncovered", _reasons(result))
 
     def test_release_mode_conflict_is_refused(self) -> None:
         # Independent expected value: mainstream is not a member of the mutated venue allowlist.

@@ -10,5 +10,16 @@ canonical_section_ids:
   - section_alternative_explanations_considered
   - section_uncertainty_statement
   - section_provenance_and_limitations
+required_statement_bindings:
+  ai_use_disclosure:
+    path: reports/paper/disclosure.md
+  data_availability:
+    path: contracts/authorship.yaml
+    selector: availability.data
+  code_availability:
+    path: contracts/authorship.yaml
+    selector: availability.code
+  authorship_contributions:
+    path: contracts/authorship.yaml
+    selector: credit_contributions
 policy: "Every canonical section requires its own failing-first paper-registry entry and per-section referee evidence before passing."
-
