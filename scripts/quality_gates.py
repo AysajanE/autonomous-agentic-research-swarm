@@ -4430,6 +4430,7 @@ def _validate_spec_curve(
     claim_id: str,
     config: dict[str, object],
     lock_sha: str,
+    table_headline_estimate: float | None = None,
 ) -> list[dict[str, object]]:
     payload, error = _load_json_file(path)
     if error is not None or payload is None:
@@ -4530,6 +4531,25 @@ def _validate_spec_curve(
                         actual=spec.get("vce"),
                     )
                 )
+        # The cells must cover the EXACT locked Cartesian product, not merely
+        # match in count with unique ids — else N copies of one favorable cell
+        # (with distinct fabricated spec_ids) omit the unfavorable locked cells
+        # and inflate survival (Codex R2-3). spec_id is canonical.
+        expected_spec_ids = {
+            f"keying={k}|missingness={m}|analysis={a}"
+            for k in expected_grid["keying"]
+            for m in expected_grid["missingness"]
+            for a in expected_grid["analysis_variant"]
+        }
+        if seen != expected_spec_ids:
+            failures.append(
+                _science_failure(
+                    "spec_curve_cells_do_not_cover_locked_grid",
+                    subject=claim_id,
+                    expected=sorted(expected_spec_ids),
+                    actual=sorted(seen),
+                )
+            )
     locked_threshold = curve.get("survival_threshold") if isinstance(curve, dict) else None
     if payload.get("survival_threshold") != locked_threshold:
         failures.append(
@@ -4547,6 +4567,22 @@ def _validate_spec_curve(
                 "spec_curve_headline_estimate_not_numeric",
                 subject=claim_id,
                 actual=payload.get("headline_estimate"),
+            )
+        )
+    # the curve's headline_estimate must equal the unique headline TABLE row's
+    # estimate — otherwise a favorable curve can be centered on a value the
+    # manuscript never reported (Codex R2-3).
+    if (
+        headline is not None
+        and table_headline_estimate is not None
+        and not math.isclose(headline, table_headline_estimate, rel_tol=1e-9, abs_tol=1e-12)
+    ):
+        failures.append(
+            _science_failure(
+                "spec_curve_headline_estimate_mismatch",
+                subject=claim_id,
+                expected=table_headline_estimate,
+                actual=headline,
             )
         )
     if headline is not None and len(valid_cells) == expected_count:
@@ -4671,6 +4707,7 @@ def gate_statistical_reporting() -> GateResult:
             table_artifacts_by_claim[claim_id] = artifacts
     rows_by_claim: dict[str, list[tuple[Path, dict[str, object]]]] = {}
     headline_rows_by_claim: dict[str, int] = {}
+    headline_estimate_by_claim: dict[str, list] = {}
     recognized_suffixes = {".md", ".csv", ".json"}
     referenced_paths = {
         path for paths in table_artifacts_by_claim.values() for path in paths
@@ -4728,7 +4765,9 @@ def gate_statistical_reporting() -> GateResult:
                         _finite_number(row.get("se")),
                         _finite_number(row.get("standard_error")),
                     )
-                    if number is not None
+                    # a standard error must be non-negative — a negative SE is not
+                    # a valid uncertainty (Codex R2-4)
+                    if number is not None and number >= 0.0
                 ),
                 None,
             )
@@ -4774,6 +4813,9 @@ def gate_statistical_reporting() -> GateResult:
                 )
             if reported_headline is True:
                 headline_rows_by_claim[claim_id] = headline_rows_by_claim.get(claim_id, 0) + 1
+                headline_estimate_by_claim.setdefault(claim_id, []).append(
+                    _finite_number(row.get("estimate"))
+                )
 
     for path in sorted(referenced_paths):
         if path.suffix.lower() not in recognized_suffixes:
@@ -4799,8 +4841,21 @@ def gate_statistical_reporting() -> GateResult:
             if not curve_path.is_file():
                 failures.append(_science_failure("headline_spec_curve_required", subject=claim_id))
             else:
+                # the unique headline TABLE estimate the curve must be centered on
+                table_headlines = headline_estimate_by_claim.get(claim_id, [])
+                table_headline_estimate = (
+                    table_headlines[0]
+                    if len(table_headlines) == 1 and table_headlines[0] is not None
+                    else None
+                )
                 failures.extend(
-                    _validate_spec_curve(curve_path, claim_id=claim_id, config=config, lock_sha=lock_sha)
+                    _validate_spec_curve(
+                        curve_path,
+                        claim_id=claim_id,
+                        config=config,
+                        lock_sha=lock_sha,
+                        table_headline_estimate=table_headline_estimate,
+                    )
                 )
             uncertainty = claim.get("uncertainty_artifact")
             uncertainty_path = (
@@ -4835,19 +4890,38 @@ def gate_statistical_reporting() -> GateResult:
             )
             if error is not None or payload is None:
                 failures.append(_science_failure("causal_sensitivity_artifact_invalid", subject=claim_id, actual=error))
-            elif (
-                payload.get("method") not in {"oster_delta", "cinelli_hazlett_rv"}
-                or not isinstance(payload.get("value"), (int, float))
-                or not isinstance(payload.get("benchmark"), (int, float))
-                or not isinstance(payload.get("threshold"), (int, float))
-                or not isinstance(payload.get("passes"), bool)
-            ):
-                failures.append(
-                    _science_failure(
-                        "causal_sensitivity_benchmark_threshold_required",
-                        subject=claim_id,
+            else:
+                # _finite_number rejects bool + NaN/inf (json.loads accepts both),
+                # so a boolean or non-finite value/benchmark/threshold no longer
+                # satisfies the shape check (Codex R2-4).
+                value = _finite_number(payload.get("value"))
+                benchmark = _finite_number(payload.get("benchmark"))
+                threshold = _finite_number(payload.get("threshold"))
+                reported_passes = payload.get("passes")
+                if (
+                    payload.get("method") not in {"oster_delta", "cinelli_hazlett_rv"}
+                    or value is None
+                    or benchmark is None
+                    or threshold is None
+                    or not isinstance(reported_passes, bool)
+                ):
+                    failures.append(
+                        _science_failure(
+                            "causal_sensitivity_benchmark_threshold_required",
+                            subject=claim_id,
+                        )
                     )
-                )
+                elif reported_passes is not (value >= threshold):
+                    # `passes` is RECOMPUTED from value vs threshold (for both RV
+                    # and Oster δ, larger = more robust), not trusted self-asserted.
+                    failures.append(
+                        _science_failure(
+                            "causal_sensitivity_passes_mismatch",
+                            subject=claim_id,
+                            expected=value >= threshold,
+                            actual=reported_passes,
+                        )
+                    )
 
     return GateResult(
         ok=not failures,

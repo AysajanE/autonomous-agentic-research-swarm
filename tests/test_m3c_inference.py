@@ -214,6 +214,26 @@ class M3cInferenceKnownAnswerTest(unittest.TestCase):
         )
         self.assertEqual((breaks, ssr), ([], 0.0))
 
+    def test_bai_perron_break_count_is_scale_invariant(self) -> None:
+        # R2-2: a tiny-valued series with a genuine break must still find it —
+        # break-count selection must not depend on measurement units.
+        tiny = np.array([0.0] * 10 + [1e-9] * 10)
+        scaled = tiny * 1e9
+        self.assertEqual(list(bai_perron_breaks(tiny, max_breaks=3, min_segment=2)[0]), [10])
+        self.assertEqual(
+            list(bai_perron_breaks(tiny, max_breaks=3, min_segment=2)[0]),
+            list(bai_perron_breaks(scaled, max_breaks=3, min_segment=2)[0]),
+        )
+
+    def test_driscoll_kraay_rejects_nan_time_id(self) -> None:
+        # R2-1: a null/NaN time id defines no period (NaN != NaN) and would
+        # silently drop its score — reject rather than miscompute.
+        with self.assertRaises(ValueError):
+            driscoll_kraay_se(
+                np.array([1.0, -1, 2, -2]), np.ones((4, 1)),
+                np.array([1.0, 2, 3, np.nan]), 0, min_time_periods=4,
+            )
+
     def test_oster_textbook_proportional_selection_example(self) -> None:
         # ((.4-0)*(.3-.1))/((.5-.4)*(.6-.3)) = 8/3.
         self.assertAlmostEqual(oster_delta(0.4, 0.5, 0.3, 0.1, 0.6), 8.0 / 3.0, places=12)

@@ -22,6 +22,26 @@ class SmallTError(ValueError):
     """Raised when Driscoll--Kraay asymptotics are not credible for the panel."""
 
 
+def _reject_missing_ids(values: list, kind: str) -> None:
+    """Raise if any identifier is null/NaN/NaT/non-finite — such an id defines no
+    valid group (NaN != NaN) and would silently drop its observation."""
+    for value in values:
+        invalid = value is None
+        if isinstance(value, (float, complex, np.floating, np.complexfloating)):
+            invalid = invalid or not bool(np.isfinite(value))
+        elif isinstance(value, (np.datetime64, np.timedelta64)):
+            invalid = invalid or bool(np.isnat(value))
+        elif callable(getattr(value, "is_finite", None)):
+            invalid = invalid or not bool(value.is_finite())
+        else:
+            try:
+                invalid = invalid or not bool(value == value)
+            except (TypeError, ValueError):
+                invalid = True
+        if invalid:
+            raise ValueError(f"{kind} must be non-null and finite")
+
+
 def _regression_arrays(residuals: ArrayLike, X: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
     u = np.asarray(residuals, dtype=float).reshape(-1)
     design = np.asarray(X, dtype=float)
@@ -92,6 +112,10 @@ def driscoll_kraay_se(
         raise ValueError("time_ids and X must have the same number of rows")
     if not isinstance(min_time_periods, int) or min_time_periods < 2:
         raise ValueError("min_time_periods must be an integer of at least 2")
+    # Reject null/NaN/NaT time IDs BEFORE dedup — a missing period would satisfy
+    # the large-T guard yet match no observation (NaN != NaN), silently dropping
+    # its score and corrupting the DK meat and the guard (Codex R2-1).
+    _reject_missing_ids(times.tolist(), "time identifiers")
     unique_times = list(dict.fromkeys(times.tolist()))
     try:
         unique_times.sort()
@@ -124,22 +148,7 @@ def _cluster_covariance(
     if len(clusters) != len(residuals):
         raise ValueError("cluster_ids and X must have the same number of rows")
     cluster_values = clusters.tolist()
-    for value in cluster_values:
-        invalid = value is None
-        if isinstance(value, (float, complex, np.floating, np.complexfloating)):
-            invalid = invalid or not bool(np.isfinite(value))
-        elif isinstance(value, (np.datetime64, np.timedelta64)):
-            invalid = invalid or bool(np.isnat(value))
-        elif callable(getattr(value, "is_finite", None)):
-            invalid = invalid or not bool(value.is_finite())
-        else:
-            try:
-                self_equal = value == value
-                invalid = invalid or not bool(self_equal)
-            except (TypeError, ValueError):
-                invalid = True
-        if invalid:
-            raise ValueError("cluster identifiers must be non-null and finite")
+    _reject_missing_ids(cluster_values, "cluster identifiers")
     try:
         unique_clusters = list(dict.fromkeys(cluster_values))
     except TypeError as exc:
@@ -295,6 +304,14 @@ def bai_perron_breaks(
         total = prefix[end] - prefix[start]
         return float(max(prefix_sq[end] - prefix_sq[start] - total * total / count, 0.0))
 
+    # SCALE-AWARE tolerances (Codex R2-2): an ABSOLUTE zero-SSR / DP tolerance
+    # makes break-count selection depend on measurement units — a tiny-valued
+    # series' genuinely-positive no-break SSR falls under an absolute threshold
+    # and is misread as a perfect fit. Tie the tolerance to the total sum of
+    # squares (no >=1 floor) so scaling the series does not change the answer.
+    scale = float(np.dot(values, values))
+    zero_tolerance = np.finfo(float).eps * scale * n
+
     infinity = float("inf")
     dp = np.full((max_segments + 1, n + 1), infinity)
     previous = np.full((max_segments + 1, n + 1), -1, dtype=int)
@@ -306,12 +323,10 @@ def bai_perron_breaks(
             start_max = end - min_segment
             for start in range(start_min, start_max + 1):
                 candidate = dp[count - 1, start] + cost(start, end)
-                if candidate < dp[count, end] - 1e-12:
+                if candidate < dp[count, end] - zero_tolerance:
                     dp[count, end] = candidate
                     previous[count, end] = start
 
-    scale = max(float(np.dot(values, values)), 1.0)
-    zero_tolerance = np.finfo(float).eps * scale * n
     selected_segments = 1
     selected_criterion = float("inf")
     for segments in range(1, max_segments + 1):
