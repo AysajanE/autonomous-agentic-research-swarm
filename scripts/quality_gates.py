@@ -11015,8 +11015,12 @@ def gate_bt2_bar() -> GateResult:
             continue
         # DOMAIN constraints — a well-typed number is not enough: an out-of-range
         # bar would silently weaken the committed invariant or the abort policy.
-        if key == "seeded_defect_catch_rate_min" and not (0.0 < value <= 1.0):
-            failures.append("bt2_bar_catch_threshold_out_of_range")
+        # The catch threshold is a FIRM invariant (the fabrication class is
+        # unforgivable, §2), so it is PINNED to 1.0 — exactly like the ratio and
+        # fabrication-ceiling pins — not merely range-checked, so a future bar
+        # cannot silently lower the catch invariant the gate exists to defend.
+        if key == "seeded_defect_catch_rate_min" and value != 1.0:
+            failures.append("bt2_bar_catch_threshold_not_unforgivable_one")
         if key == "registered_vs_reported_hypothesis_ratio" and value != 1:
             failures.append("bt2_bar_hypothesis_ratio_invariant_not_one")
         if key == "unresolved_fabrication_findings_max" and (isinstance(value, float) or value != 0):

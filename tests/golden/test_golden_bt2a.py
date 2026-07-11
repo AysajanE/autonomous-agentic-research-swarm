@@ -180,6 +180,21 @@ class GoldenBt2aTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertIn("bt2_bar_hypothesis_ratio_invariant_not_one", _reasons(result))
 
+    def test_bt2_bar_gate_fails_when_catch_invariant_silently_lowered(self) -> None:
+        # The catch threshold is a FIRM invariant (unforgivable class): a bar that
+        # lowers it below 1.0 must fail, not silently weaken the invariant.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bar = {
+                **_VALID_BAR,
+                "pass_fail_bar": {**_VALID_BAR["pass_fail_bar"], "seeded_defect_catch_rate_min": 0.6},
+            }
+            _write_bar_and_report(root, bar=bar, report=_VALID_REPORT)
+            with chdir(root):
+                result = quality_gates.gate_bt2_bar()
+            self.assertFalse(result.ok)
+            self.assertIn("bt2_bar_catch_threshold_not_unforgivable_one", _reasons(result))
+
     def test_bt2_bar_gate_fails_on_null_abort_triggers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

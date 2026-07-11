@@ -792,9 +792,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 94847,
+      "bytes": 96333,
       "path": "docs/first_class_swarm_execution_log.md",
-      "sha256": "586b97d0f511acd4040337253224c208d1ab3b439b643ba19f7efb5f56c1a278",
+      "sha256": "05232561cc8038a9a858b512ac3c5013078491b55f2a034e701f55536b744444",
       "verification_bar": "byte_identity"
     },
     {
@@ -1616,9 +1616,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 9750,
+      "bytes": 10391,
       "path": "scripts/bt2a_rehearsal.py",
-      "sha256": "1d7a64c05424a67b535659a38a3f27cafc09349eb8e101a004f4e748ef5fa149",
+      "sha256": "17b7f4550544b0466a574c5850d02d45f89f9c11df2673ab75c588ad7eecf77f",
       "verification_bar": "byte_identity"
     },
     {
@@ -1694,9 +1694,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 484326,
+      "bytes": 484642,
       "path": "scripts/quality_gates.py",
-      "sha256": "af12dd03d28bf7a36638bbf080f7b90d689addad316dc8253760701194c43535",
+      "sha256": "da78fafe1fd33648dc7003c7276c1ffe2d5ca2632adf41a13a9bf2288b920bdd",
       "verification_bar": "byte_identity"
     },
     {

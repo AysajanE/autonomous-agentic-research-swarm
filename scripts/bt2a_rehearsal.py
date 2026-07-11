@@ -16,8 +16,10 @@ perimeter that fails to block is a RED regression.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -47,6 +49,16 @@ def _utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+@contextlib.contextmanager
+def _in_repo_root():
+    previous = os.getcwd()
+    os.chdir(REPO_ROOT)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
+
+
 def _run_returns_zero(callable_, *args) -> str | None:
     """Invoke a `main()`-style entrypoint that returns 0 or raises SystemExit."""
     try:
@@ -67,7 +79,9 @@ def assert_reproduction() -> list[str]:
     coverage.append("reproduce_analysis_byte_and_content_identity")
     drift = _run_returns_zero(render_paper.main, [])
     if drift is not None:
-        raise RehearsalRed(f"computed_paper_resolution_drift:{drift}")
+        # render_paper resolves the computed-paper {{value:…}} tokens (fails on a
+        # missing key); byte/content drift itself is caught by reproduce_analysis.
+        raise RehearsalRed(f"computed_paper_key_resolution_failed:{drift}")
     coverage.append("computed_paper_key_resolution")
     return coverage
 
@@ -140,10 +154,15 @@ def hypothesis_ratio() -> float:
     hypotheses, empty outcomes), so the invariant holds trivially → 1.0.  A real
     prereg-conformance violation fails the rehearsal RED.
     """
-    if not quality_gates.gate_prereg_conformance().ok:
-        raise RehearsalRed("prereg_conformance_violated")
-    lock_path = Path(quality_gates.PREREG_PHASE_FILES["2b"])
-    lock, _ = quality_gates.load_prereg_lock(lock_path, expected_phase="2b")
+    # The kernel gate helpers resolve contracts/docs relative to CWD; run them
+    # from REPO_ROOT so the rehearsal is robust to the caller's working directory
+    # (the rest of the module already uses REPO_ROOT-absolute paths).
+    with _in_repo_root():
+        if not quality_gates.gate_prereg_conformance().ok:
+            raise RehearsalRed("prereg_conformance_violated")
+        lock_path = Path(quality_gates.PREREG_PHASE_FILES["2b"])
+        lock, _ = quality_gates.load_prereg_lock(lock_path, expected_phase="2b")
+        outcomes, _ = quality_gates._load_prereg_outcomes()
     active_lock = lock if lock is not None and lock.get("active") is True else None
     registered = {
         hypothesis["hypothesis_id"]
@@ -152,7 +171,6 @@ def hypothesis_ratio() -> float:
     }
     if not registered:
         return 1.0
-    outcomes, _ = quality_gates._load_prereg_outcomes()
     reported = sum(
         1
         for hid in registered
