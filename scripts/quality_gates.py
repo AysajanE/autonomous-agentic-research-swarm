@@ -15,7 +15,7 @@ import argparse
 import csv
 from dataclasses import dataclass
 import datetime as dt
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation
 import difflib
 import hashlib
 import json
@@ -6178,11 +6178,17 @@ def gate_manuscript_computed_paper() -> GateResult:
         try:
             source_value = _extract_paper_source_value(source_path, selector)
             precision = _display_precision(str(entry["display"]))
-            quantum = Decimal(1).scaleb(-precision)
-            recomputed = source_value.quantize(quantum, rounding=ROUND_HALF_UP)
-            declared = Decimal(str(entry["value"])).quantize(quantum, rounding=ROUND_HALF_UP)
-            displayed = _display_decimal(str(entry["display"])).quantize(quantum, rounding=ROUND_HALF_UP)
-        except (ValueError, InvalidOperation, json.JSONDecodeError) as exc:
+            # Recompute with the generator's EXACT rounding: build_str_release_outputs
+            # produces every paper value via Python round(float(source), precision).
+            # Matching that operation here (rather than Decimal ROUND_HALF_UP) guarantees
+            # the gate can never spuriously reject the repo's own generated output on a
+            # future source value that lands on a rounding boundary. It stays fail-closed
+            # against a genuine source/value/display divergence: any real forgery differs
+            # at the display-precision level, far above float round-off (~1e-10).
+            recomputed = round(float(source_value), precision)
+            declared = round(float(entry["value"]), precision)
+            displayed = round(float(_display_decimal(str(entry["display"]))), precision)
+        except (ValueError, InvalidOperation, json.JSONDecodeError, TypeError) as exc:
             failures.append(_paper_value_failure("paper_value_source_selector_invalid", subject=subject, actual=str(exc)))
             continue
         if recomputed != declared or displayed != declared:

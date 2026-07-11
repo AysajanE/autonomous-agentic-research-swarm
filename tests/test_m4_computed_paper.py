@@ -124,6 +124,82 @@ class M4ComputedPaperTest(unittest.TestCase):
             self.assertIn("claims_paper_values_divergence", _failure_text(result))
             self.assertIn("99.99%", _failure_text(result))
 
+    def test_no_manuscript_surface_skips_gate(self) -> None:
+        # Finding 2 (activation signal): with NEITHER computed-paper surface on disk
+        # (a modeling-only / not-yet-written project), the gate is inactive, not failing.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with chdir(root):
+                result = quality_gates.gate_manuscript_computed_paper()
+            self.assertTrue(result.ok, result.details)
+            self.assertEqual(result.details["status"], "inactive_no_manuscript")
+            self.assertTrue(result.details["skipped"])
+
+    def test_partial_manuscript_deletion_keeps_gate_active_and_fails(self) -> None:
+        # Finding 2 (consistency): paper_values.json present but index.qmd deleted is a
+        # partial-deletion state. The gate must stay ACTIVE (either surface present) and
+        # FAIL closed — matching the release perimeter, which uses the same activation
+        # signal (_manuscript_surface_present). It must NOT silently skip.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _copy_computed_paper_fixture(root)
+            (root / "reports/paper/index.qmd").unlink()
+            with chdir(root):
+                result = quality_gates.gate_manuscript_computed_paper()
+            self.assertFalse(result.ok, result.details)
+            self.assertEqual(result.details["status"], "active")
+            self.assertIn("manuscript_computed_paper_missing", _failure_text(result))
+
+    def test_recompute_matches_generator_rounding_on_boundary(self) -> None:
+        # Finding 4 (rounding-mode): the gate recomputes with the generator's exact
+        # operation, round(float(source), precision). On a rounding boundary where
+        # Decimal ROUND_HALF_UP would disagree with Python round(), the gate must ACCEPT
+        # the value the generator actually produced (round semantics), not spuriously
+        # reject the repo's own output. 2.675 -> round(2.675, 2) == 2.67 (float), whereas
+        # Decimal('2.675').quantize(.01, HALF_UP) == 2.68. The generator writes 2.67, so
+        # the gate must pass 2.67 and reject the HALF_UP artifact 2.68.
+        self.assertEqual(round(2.675, 2), 2.67)  # independent statement of the boundary
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _copy_computed_paper_fixture(root)
+            probe_csv = root / "reports/tables/boundary_probe.csv"
+            probe_csv.write_text("regime_id,val\nprobe,2.675000\n", encoding="utf-8")
+            import hashlib
+
+            probe_sha = hashlib.sha256(probe_csv.read_bytes()).hexdigest()
+            values_path = root / "reports/paper/paper_values.json"
+            payload = json.loads(values_path.read_text(encoding="utf-8"))
+            template = payload["values"]["pre_dencun_mean_str_pct"]
+            base_entry = {
+                "unit": "ratio",
+                "type": template["type"],
+                "citation_key": template["citation_key"],
+                "source_artifact": "reports/tables/boundary_probe.csv",
+                "source_sha256": probe_sha,
+                "source_selector": "regime_id=probe;column=val",
+                "uncertainty": template["uncertainty"],
+            }
+
+            def _run(probe_value: float, probe_display: str):
+                payload["values"]["boundary_probe"] = {
+                    **base_entry,
+                    "value": probe_value,
+                    "display": probe_display,
+                }
+                values_path.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
+                with chdir(root):
+                    return quality_gates.gate_manuscript_computed_paper()
+
+            # Generator's round() result is accepted…
+            ok_result = _run(2.67, "2.67")
+            self.assertTrue(ok_result.ok, ok_result.details)
+            # …and the HALF_UP artifact (2.68) is rejected as a source mismatch.
+            bad_result = _run(2.68, "2.68")
+            self.assertFalse(bad_result.ok)
+            self.assertIn("paper_value_mismatch_source", _failure_text(bad_result))
+
 
 if __name__ == "__main__":
     unittest.main()

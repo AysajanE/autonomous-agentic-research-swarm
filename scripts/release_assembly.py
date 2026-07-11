@@ -250,6 +250,27 @@ def _collect_explicit_artifacts(
     return artifacts, missing
 
 
+def _manuscript_surface_present(repo_root: Path) -> bool:
+    """A manuscript program is in play iff EITHER computed-paper surface exists on
+    disk — the manuscript source (`index.qmd`) or the computed values
+    (`paper_values.json`). This is the single activation signal shared by every F14
+    perimeter site AND by `gate_manuscript_computed_paper`, so the release perimeter
+    and the science gate can never disagree (a partial deletion — one surface present,
+    the other gone — fails BOTH: the perimeter reports the missing member and the gate
+    reports the missing surface). A manuscript-free repo (both absent) has no
+    manuscript perimeter to enforce, keeping empty modeling/hybrid fixtures green.
+    NOTE (bounded residual, owned by M4-C release-stage + a BT2 drill): this cannot
+    distinguish "empirical project that deleted its ENTIRE manuscript" from "project
+    that has not written it yet" — both surfaces absent reads as no-manuscript, so a
+    total-manuscript-deletion at continuous-gate time is not caught here. Closing that
+    requires a release-stage "declared paper submission" signal, which the scaffold
+    fixtures' unconditional `features.paper: true` makes unavailable at this layer."""
+    return (
+        (repo_root / "reports/paper/index.qmd").is_file()
+        or (repo_root / "reports/paper/paper_values.json").is_file()
+    )
+
+
 def _collect_dir_artifacts(
     repo_root: Path,
     rel_dir: str,
@@ -496,14 +517,16 @@ def assemble_release_manifest(
         repo_root, REQUIRED_RELEASE_PERIMETER_PATHS
     )
     # F14: the manuscript-source + processed-panel perimeter is enforced fail-closed
-    # ONLY for releases that actually ship a manuscript (empirical/hybrid with a paper
-    # source on disk). A modeling-only profile or a minimal fixture that carries no
-    # manuscript has no manuscript perimeter to enforce, so its absence is structural,
-    # not a dropped artifact. When a manuscript IS present, a MISSING declared member
-    # still fails closed — the F14 intent (a declared-but-absent artifact never silently
-    # skips) is preserved. (Per-profile panel membership for the modeling/hybrid
-    # replication profiles is refined in M4-C.)
-    manuscript_present = (repo_root / "reports/paper/index.qmd").is_file()
+    # ONLY for releases that actually ship a manuscript (either computed-paper surface
+    # present — see _manuscript_surface_present). A modeling-only profile or a minimal
+    # fixture that carries no manuscript has no manuscript perimeter to enforce, so its
+    # absence is structural, not a dropped artifact. When a manuscript IS present, a
+    # MISSING declared member still fails closed — the F14 intent (a declared-but-absent
+    # artifact never silently skips) is preserved, and this is the SAME activation
+    # signal gate_manuscript_computed_paper uses, so the two never disagree.
+    # (Per-profile panel membership for the modeling/hybrid replication profiles is
+    # refined in M4-C.)
+    manuscript_present = _manuscript_surface_present(repo_root)
     if not manuscript_present:
         missing_release_perimeter = []
 
@@ -958,9 +981,9 @@ def validate_release_manifest(path: Path, repo_root: Path) -> list[str]:
                         perimeter_paths.add(str(entry["path"]))
                 # F14 (validator side): mirror assemble_release_manifest — require the
                 # full manuscript perimeter only for releases that actually ship a
-                # manuscript (index.qmd present). A modeling-only or manuscript-free
-                # release legitimately carries an empty perimeter section.
-                if (repo_root / "reports/paper/index.qmd").is_file():
+                # manuscript (either computed-paper surface present). A modeling-only or
+                # manuscript-free release legitimately carries an empty perimeter section.
+                if _manuscript_surface_present(repo_root):
                     for required_path in REQUIRED_RELEASE_PERIMETER_PATHS:
                         if required_path not in perimeter_paths:
                             failures.append(
