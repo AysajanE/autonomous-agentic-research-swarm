@@ -35,6 +35,14 @@ jobs:
       - name: Resolve computed paper
         run: make paper
 
+      - name: BT2 Stage A rehearsal (frozen-reference regression + drills)
+        run: |
+          # Run BEFORE `make gate` so the bt2_bar gate validates a FRESH rehearsal
+          # report (not a stale committed one); the deterministic report must be
+          # byte-stable, so a drift under current machinery dirties the tree.
+          make bt2a-rehearsal
+          git diff --exit-code reports/status/bt2a/rehearsal.json
+
       - name: Run quality gates
         run: make gate
 

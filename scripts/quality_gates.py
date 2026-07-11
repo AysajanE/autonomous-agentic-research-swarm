@@ -10969,6 +10969,129 @@ def gate_replication_package_audit(*, release_perimeter: bool = False) -> GateRe
     return check_replication_package_audit(Path("."), release_perimeter=release_perimeter)
 
 
+BT2_BAR_PATH = Path("contracts/bt2_bar.json")
+BT2_BAR_SCHEMA_VERSION = "research_swarm.bt2_bar.v1"
+BT2A_REHEARSAL_SCHEMA_VERSION = "research_swarm.bt2a_rehearsal.v1"
+_BT2_BAR_NUMBER_KEYS = (
+    "seeded_defect_catch_rate_min",
+    "human_review_hours_per_artifact_max",
+    "token_dollar_ceiling_usd",
+    "unresolved_fabrication_findings_max",
+    "registered_vs_reported_hypothesis_ratio",
+)
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def gate_bt2_bar() -> GateResult:
+    """Validate the pre-committed BT2 pass/fail bar (§10) and hold the LATEST
+    frozen-reference rehearsal to it: the bar must be present + well-formed with
+    the abort clause, and the committed rehearsal report's measured seeded-defect
+    catch rate must meet `seeded_defect_catch_rate_min`, its registered-vs-reported
+    hypothesis ratio must equal the committed invariant, its release perimeter must
+    have blocked as expected, and its frozen-reference known answers must have
+    reproduced.  Absent on a pack that has not committed a bar → skip."""
+    if not BT2_BAR_PATH.exists():
+        return GateResult(ok=True, details={"status": "no_bt2_bar", "skipped": True, "failures": []})
+
+    failures: list[str] = []
+    bar, error = _load_json_file(BT2_BAR_PATH)
+    if error is not None or not isinstance(bar, dict):
+        return GateResult(ok=False, details={"failures": [f"{BT2_BAR_PATH}:{error or 'not_object'}"]})
+    if bar.get("schema_version") != BT2_BAR_SCHEMA_VERSION:
+        failures.append("bt2_bar_invalid_schema_version")
+
+    pass_fail_bar = bar.get("pass_fail_bar")
+    if not isinstance(pass_fail_bar, dict):
+        failures.append("bt2_bar_pass_fail_bar_missing")
+        pass_fail_bar = {}
+    provenance = bar.get("number_provenance") if isinstance(bar.get("number_provenance"), dict) else {}
+    for key in _BT2_BAR_NUMBER_KEYS:
+        value = pass_fail_bar.get(key)
+        if not _is_number(value):
+            failures.append(f"bt2_bar_number_missing_or_invalid:{key}")
+            continue
+        # DOMAIN constraints — a well-typed number is not enough: an out-of-range
+        # bar would silently weaken the committed invariant or the abort policy.
+        # The catch threshold is a FIRM invariant (the fabrication class is
+        # unforgivable, §2), so it is PINNED to 1.0 — exactly like the ratio and
+        # fabrication-ceiling pins — not merely range-checked, so a future bar
+        # cannot silently lower the catch invariant the gate exists to defend.
+        if key == "seeded_defect_catch_rate_min" and value != 1.0:
+            failures.append("bt2_bar_catch_threshold_not_unforgivable_one")
+        if key == "registered_vs_reported_hypothesis_ratio" and value != 1:
+            failures.append("bt2_bar_hypothesis_ratio_invariant_not_one")
+        if key == "unresolved_fabrication_findings_max" and (isinstance(value, float) or value != 0):
+            failures.append("bt2_bar_fabrication_ceiling_not_zero")
+        if key in {"human_review_hours_per_artifact_max", "token_dollar_ceiling_usd"} and not value > 0:
+            failures.append(f"bt2_bar_nonpositive:{key}")
+        if not isinstance(provenance.get(key), str) or not provenance.get(key, "").strip():
+            failures.append(f"bt2_bar_number_provenance_missing:{key}")
+
+    abort = bar.get("stage_b_abort_clause")
+    triggers = abort.get("triggers") if isinstance(abort, dict) else None
+    valid_triggers = (
+        isinstance(triggers, list)
+        and len(triggers) >= 4
+        and all(isinstance(t, str) and t.strip() for t in triggers)
+        and len({t for t in triggers if isinstance(t, str)}) == len(triggers)
+    )
+    if (
+        not isinstance(abort, dict)
+        or not valid_triggers
+        or not isinstance(abort.get("required_artifact"), str)
+        or not abort.get("required_artifact", "").strip()
+    ):
+        failures.append("bt2_bar_abort_clause_malformed")
+
+    rehearsal_rel = bar.get("rehearsal_report")
+    if not isinstance(rehearsal_rel, str) or not rehearsal_rel.strip():
+        failures.append("bt2_bar_rehearsal_report_unbound")
+    else:
+        report, rerror = _load_json_file(Path(rehearsal_rel))
+        if rerror is not None or not isinstance(report, dict):
+            failures.append(f"bt2_bar_rehearsal_report_unreadable:{rerror or 'not_object'}")
+        else:
+            if report.get("schema_version") != BT2A_REHEARSAL_SCHEMA_VERSION:
+                failures.append("bt2_bar_rehearsal_invalid_schema")
+            if report.get("all_known_answers_reproduced") is not True:
+                failures.append("bt2_bar_rehearsal_reference_not_reproduced")
+            # Reconcile the summary catch rate against the drill list rather than
+            # trusting the reported number: a report claiming 1.0 with a drill
+            # marked caught:false must NOT pass.
+            drills = report.get("drills")
+            catch = report.get("seeded_defect_catch_rate")
+            min_catch = pass_fail_bar.get("seeded_defect_catch_rate_min")
+            if not isinstance(drills, list) or not drills or not all(isinstance(d, dict) for d in drills):
+                failures.append("bt2_bar_rehearsal_drills_missing")
+            else:
+                caught = sum(1 for d in drills if d.get("caught") is True)
+                recomputed = caught / len(drills)
+                if not _is_number(catch) or abs(catch - recomputed) > 1e-9:
+                    failures.append("bt2_bar_catch_rate_inconsistent_with_drills")
+                elif not _is_number(min_catch) or recomputed < min_catch:
+                    failures.append("bt2_bar_catch_rate_below_threshold")
+            if report.get("registered_vs_reported_hypothesis_ratio") != pass_fail_bar.get(
+                "registered_vs_reported_hypothesis_ratio"
+            ):
+                failures.append("bt2_bar_hypothesis_ratio_violated")
+            perimeter = report.get("release_perimeter")
+            if (
+                not isinstance(perimeter, dict)
+                or perimeter.get("release_blocked_as_expected") is not True
+                or perimeter.get("registry_all_failing") is not True
+                or perimeter.get("blocked_by_registry") is not True
+            ):
+                failures.append("bt2_bar_release_perimeter_not_exercised")
+
+    return GateResult(
+        ok=not failures,
+        details={"status": "bt2_bar", "failures": [{"reason": reason} for reason in failures]},
+    )
+
+
 _CORE_GATE_NAMES = (
     "pack_compat",
     "scaffold_safety",
@@ -11018,6 +11141,7 @@ _MODE_INDEPENDENT_SCIENCE_GATES = (
     "render_qa",
     "text_overlap",
     "checklist_derivation",
+    "bt2_bar",
 )
 _EMPIRICAL_SCIENCE_GATES = (
     "prereg_conformance",
@@ -11063,6 +11187,7 @@ _ALL_GATE_NAMES = _CORE_GATE_NAMES + (
     "render_qa",
     "text_overlap",
     "checklist_derivation",
+    "bt2_bar",
 )
 
 
@@ -11127,6 +11252,7 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
         "network_strings": gate_network_strings,
         "task_lint": gate_task_lint,
         "runbook_staleness": gate_runbook_staleness,
+        "bt2_bar": gate_bt2_bar,
         "prereg_lock_coverage": gate_prereg_lock_coverage,
         "raw_retention": gate_raw_retention,
         "program_conformance": gate_program_conformance,

@@ -12,9 +12,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 706,
+      "bytes": 775,
       "path": "Makefile",
-      "sha256": "c6802f386d345cbccacff6c0ead5eb3cd7f3aab2f61b09cedfd441fb198251a0",
+      "sha256": "bfc0d96d40e4224b5ae2f0534379a442a9d69da4f9cbd0e790bc94f55cf4171d",
       "verification_bar": "byte_identity"
     },
     {
@@ -51,6 +51,12 @@
       "bytes": 1644,
       "path": "contracts/authorship.yaml",
       "sha256": "7e45d72e38cc87d886e79a292ddf73393127d8d8d341b8525facba0a262bd212",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 3591,
+      "path": "contracts/bt2_bar.json",
+      "sha256": "7b487eaced605769ddf75a20d2a7205e57e2779a96e3e6b379b7fcff117e80b5",
       "verification_bar": "byte_identity"
     },
     {
@@ -786,9 +792,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 87760,
+      "bytes": 96333,
       "path": "docs/first_class_swarm_execution_log.md",
-      "sha256": "4b1d3ed0c2cea7133443382756d5f24c4c1e1427553443aee255825b976f892f",
+      "sha256": "05232561cc8038a9a858b512ac3c5013078491b55f2a034e701f55536b744444",
       "verification_bar": "byte_identity"
     },
     {
@@ -798,9 +804,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 11495,
+      "bytes": 13744,
       "path": "docs/operator_runbook.md",
-      "sha256": "53b675342bac659604c12efc44c93eda49c6517dca951ec6c3cf52bb6746d21d",
+      "sha256": "43d4577f31a4b4e823199e6250232ec7ff3132b30aff1665da85aebdcd0a47a6",
       "verification_bar": "byte_identity"
     },
     {
@@ -1610,6 +1616,12 @@
       "verification_bar": "byte_identity"
     },
     {
+      "bytes": 10391,
+      "path": "scripts/bt2a_rehearsal.py",
+      "sha256": "17b7f4550544b0466a574c5850d02d45f89f9c11df2673ab75c588ad7eecf77f",
+      "verification_bar": "byte_identity"
+    },
+    {
       "bytes": 35489,
       "path": "scripts/calibrate_referee.py",
       "sha256": "c583200f084444f9a78703672a06a1df9e6a1db3207cc85a97dcfe9d0fdd9ca3",
@@ -1682,9 +1694,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 478064,
+      "bytes": 484642,
       "path": "scripts/quality_gates.py",
-      "sha256": "e6ef8425560a18a5f0464dddbf758f7044ae80d18a476afe6e82fb50a41b3a4f",
+      "sha256": "da78fafe1fd33648dc7003c7276c1ffe2d5ca2632adf41a13a9bf2288b920bdd",
       "verification_bar": "byte_identity"
     },
     {
