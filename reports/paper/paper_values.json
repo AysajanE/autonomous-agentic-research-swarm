@@ -1,0 +1,231 @@
+{
+  "as_of": "2026-04-09",
+  "generated_by": "src/analysis/build_str_release_outputs.py",
+  "schema_version": "research_swarm.paper_values.v1",
+  "values": {
+    "blob_fee_floor_min_consecutive_days": {
+      "citation_key": "protocol_lock",
+      "display": "7",
+      "source_artifact": "docs/protocol.md",
+      "source_selector": "protocol_constant=blob_fee_floor_min_consecutive_days",
+      "source_sha256": "ff925b900f59476213b5924f2e07aac43e45b8d1973ba4124ddbf97e5da8f1ea",
+      "type": "methodological",
+      "uncertainty": {
+        "justification": "A locked protocol definition (a constant, not a measured quantity); its authority is the hash-pinned protocol lock, so no numeric uncertainty band applies.",
+        "kind": "protocol_constant"
+      },
+      "unit": "days",
+      "value": 7
+    },
+    "blob_fee_floor_threshold_multiplier": {
+      "citation_key": "protocol_lock",
+      "display": "1.05 x",
+      "source_artifact": "docs/protocol.md",
+      "source_selector": "protocol_constant=blob_fee_floor_threshold_multiplier",
+      "source_sha256": "ff925b900f59476213b5924f2e07aac43e45b8d1973ba4124ddbf97e5da8f1ea",
+      "type": "methodological",
+      "uncertainty": {
+        "justification": "A locked protocol definition (a constant, not a measured quantity); its authority is the hash-pinned protocol lock, so no numeric uncertainty band applies.",
+        "kind": "protocol_constant"
+      },
+      "unit": "multiplier",
+      "value": 1.05
+    },
+    "panel_date_count": {
+      "citation_key": "rollup_panel_validation",
+      "display": "1,559",
+      "source_artifact": "reports/validation/rollup_panel_validation.json",
+      "source_selector": "json_path=summary.date_count",
+      "source_sha256": "9e2489263099da247582a775d0fb193baef76a108c6919e4a73809ae2c36d66c",
+      "type": "methodological",
+      "uncertainty": {
+        "justification": "Dataset cardinality counts (rows/rollups/dates) are exact properties of the committed, hash-pinned panel-validation artifact, not inferential estimates; coverage caveats are documented in the release limitations.",
+        "kind": "methodological_exact"
+      },
+      "unit": "count",
+      "value": 1559
+    },
+    "panel_rollup_count": {
+      "citation_key": "rollup_panel_validation",
+      "display": "14",
+      "source_artifact": "reports/validation/rollup_panel_validation.json",
+      "source_selector": "json_path=summary.rollup_count",
+      "source_sha256": "9e2489263099da247582a775d0fb193baef76a108c6919e4a73809ae2c36d66c",
+      "type": "methodological",
+      "uncertainty": {
+        "justification": "Dataset cardinality counts (rows/rollups/dates) are exact properties of the committed, hash-pinned panel-validation artifact, not inferential estimates; coverage caveats are documented in the release limitations.",
+        "kind": "methodological_exact"
+      },
+      "unit": "count",
+      "value": 14
+    },
+    "panel_row_count": {
+      "citation_key": "rollup_panel_validation",
+      "display": "12,434",
+      "source_artifact": "reports/validation/rollup_panel_validation.json",
+      "source_selector": "json_path=summary.row_count",
+      "source_sha256": "9e2489263099da247582a775d0fb193baef76a108c6919e4a73809ae2c36d66c",
+      "type": "methodological",
+      "uncertainty": {
+        "justification": "Dataset cardinality counts (rows/rollups/dates) are exact properties of the committed, hash-pinned panel-validation artifact, not inferential estimates; coverage caveats are documented in the release limitations.",
+        "kind": "methodological_exact"
+      },
+      "unit": "count",
+      "value": 12434
+    },
+    "post_dencun_blob_floor_mean_str_pct": {
+      "citation_key": "str_regime_summary",
+      "display": "8.98%",
+      "source_artifact": "reports/tables/str_regime_summary.csv",
+      "source_selector": "regime_id=post_dencun_blob_floor;column=mean_str_pct",
+      "source_sha256": "35657202938c6ca63beb67f97b51d961b2fe4a66818a31ed2167b837a8a40f4c",
+      "type": "descriptive",
+      "uncertainty": {
+        "justification_artifact": "reports/validation/cross_source_reconciliation.md",
+        "kind": "descriptive_no_sampling_band"
+      },
+      "unit": "percent",
+      "value": 8.98
+    },
+    "post_dencun_mean_rent_paid_eth": {
+      "citation_key": "str_regime_summary",
+      "display": "19.064 ETH",
+      "source_artifact": "reports/tables/str_regime_summary.csv",
+      "source_selector": "regime_id=post_dencun;column=mean_rent_paid_eth",
+      "source_sha256": "35657202938c6ca63beb67f97b51d961b2fe4a66818a31ed2167b837a8a40f4c",
+      "type": "descriptive",
+      "uncertainty": {
+        "justification_artifact": "reports/validation/cross_source_reconciliation.md",
+        "kind": "descriptive_no_sampling_band"
+      },
+      "unit": "eth",
+      "value": 19.064
+    },
+    "post_dencun_mean_str_pct": {
+      "citation_key": "str_regime_summary",
+      "display": "11.68%",
+      "source_artifact": "reports/tables/str_regime_summary.csv",
+      "source_selector": "regime_id=post_dencun;column=mean_str_pct",
+      "source_sha256": "35657202938c6ca63beb67f97b51d961b2fe4a66818a31ed2167b837a8a40f4c",
+      "type": "descriptive",
+      "uncertainty": {
+        "justification_artifact": "reports/validation/cross_source_reconciliation.md",
+        "kind": "descriptive_no_sampling_band"
+      },
+      "unit": "percent",
+      "value": 11.68
+    },
+    "post_dencun_non_floor_mean_str_pct": {
+      "citation_key": "str_regime_summary",
+      "display": "12.77%",
+      "source_artifact": "reports/tables/str_regime_summary.csv",
+      "source_selector": "regime_id=post_dencun_non_floor;column=mean_str_pct",
+      "source_sha256": "35657202938c6ca63beb67f97b51d961b2fe4a66818a31ed2167b837a8a40f4c",
+      "type": "descriptive",
+      "uncertainty": {
+        "justification_artifact": "reports/validation/cross_source_reconciliation.md",
+        "kind": "descriptive_no_sampling_band"
+      },
+      "unit": "percent",
+      "value": 12.77
+    },
+    "pre_dencun_mean_rent_paid_eth": {
+      "citation_key": "str_regime_summary",
+      "display": "147.014 ETH",
+      "source_artifact": "reports/tables/str_regime_summary.csv",
+      "source_selector": "regime_id=pre_dencun;column=mean_rent_paid_eth",
+      "source_sha256": "35657202938c6ca63beb67f97b51d961b2fe4a66818a31ed2167b837a8a40f4c",
+      "type": "descriptive",
+      "uncertainty": {
+        "justification_artifact": "reports/validation/cross_source_reconciliation.md",
+        "kind": "descriptive_no_sampling_band"
+      },
+      "unit": "eth",
+      "value": 147.014
+    },
+    "pre_dencun_mean_str_pct": {
+      "citation_key": "str_regime_summary",
+      "display": "69.14%",
+      "source_artifact": "reports/tables/str_regime_summary.csv",
+      "source_selector": "regime_id=pre_dencun;column=mean_str_pct",
+      "source_sha256": "35657202938c6ca63beb67f97b51d961b2fe4a66818a31ed2167b837a8a40f4c",
+      "type": "descriptive",
+      "uncertainty": {
+        "justification_artifact": "reports/validation/cross_source_reconciliation.md",
+        "kind": "descriptive_no_sampling_band"
+      },
+      "unit": "percent",
+      "value": 69.14
+    },
+    "reconciliation_2025_05_authoritative_rent_eth": {
+      "citation_key": "cross_source_reconciliation",
+      "display": "148.42 ETH",
+      "source_artifact": "reports/validation/cross_source_reconciliation.json",
+      "source_selector": "json_path=checks[5].details.unexplained_monthly_aggregate;match=month_utc=2025-05;column=rent_paid_eth_authoritative",
+      "source_sha256": "941533f8456e404015eba74e723e5e228c3fc5340d4954c77731f7a2681ce095",
+      "type": "methodological",
+      "uncertainty": {
+        "justification": "A data-quality reconciliation diagnostic (aggregate divergence and its worst-month residual), quantified directly in the committed reconciliation report and release-caveats handoff; it is itself the measurement-uncertainty context rather than an estimate carrying its own band.",
+        "kind": "methodological_exact"
+      },
+      "unit": "eth",
+      "value": 148.42
+    },
+    "reconciliation_2025_05_pct_difference": {
+      "citation_key": "cross_source_reconciliation",
+      "display": "12.37%",
+      "source_artifact": "reports/validation/cross_source_reconciliation.json",
+      "source_selector": "json_path=checks[5].details.unexplained_monthly_aggregate;match=month_utc=2025-05;column=pct_difference;scale=100",
+      "source_sha256": "941533f8456e404015eba74e723e5e228c3fc5340d4954c77731f7a2681ce095",
+      "type": "methodological",
+      "uncertainty": {
+        "justification": "A data-quality reconciliation diagnostic (aggregate divergence and its worst-month residual), quantified directly in the committed reconciliation report and release-caveats handoff; it is itself the measurement-uncertainty context rather than an estimate carrying its own band.",
+        "kind": "methodological_exact"
+      },
+      "unit": "percent",
+      "value": 12.37
+    },
+    "reconciliation_2025_05_vendor_rent_eth": {
+      "citation_key": "cross_source_reconciliation",
+      "display": "166.78 ETH",
+      "source_artifact": "reports/validation/cross_source_reconciliation.json",
+      "source_selector": "json_path=checks[5].details.unexplained_monthly_aggregate;match=month_utc=2025-05;column=rent_paid_eth_vendor",
+      "source_sha256": "941533f8456e404015eba74e723e5e228c3fc5340d4954c77731f7a2681ce095",
+      "type": "methodological",
+      "uncertainty": {
+        "justification": "A data-quality reconciliation diagnostic (aggregate divergence and its worst-month residual), quantified directly in the committed reconciliation report and release-caveats handoff; it is itself the measurement-uncertainty context rather than an estimate carrying its own band.",
+        "kind": "methodological_exact"
+      },
+      "unit": "eth",
+      "value": 166.78
+    },
+    "reconciliation_aggregate_rent_difference_pct": {
+      "citation_key": "cross_source_reconciliation",
+      "display": "0.02%",
+      "source_artifact": "reports/validation/cross_source_reconciliation.json",
+      "source_selector": "json_path=checks[5].details.overall_aggregate_pct_difference;scale=100",
+      "source_sha256": "941533f8456e404015eba74e723e5e228c3fc5340d4954c77731f7a2681ce095",
+      "type": "methodological",
+      "uncertainty": {
+        "justification": "A data-quality reconciliation diagnostic (aggregate divergence and its worst-month residual), quantified directly in the committed reconciliation report and release-caveats handoff; it is itself the measurement-uncertainty context rather than an estimate carrying its own band.",
+        "kind": "methodological_exact"
+      },
+      "unit": "percent",
+      "value": 0.02
+    },
+    "rent_component_row_count": {
+      "citation_key": "rollup_panel_validation",
+      "display": "12,563",
+      "source_artifact": "reports/validation/rollup_panel_validation.json",
+      "source_selector": "json_path=summary.rent_component_row_count",
+      "source_sha256": "9e2489263099da247582a775d0fb193baef76a108c6919e4a73809ae2c36d66c",
+      "type": "methodological",
+      "uncertainty": {
+        "justification": "Dataset cardinality counts (rows/rollups/dates) are exact properties of the committed, hash-pinned panel-validation artifact, not inferential estimates; coverage caveats are documented in the release limitations.",
+        "kind": "methodological_exact"
+      },
+      "unit": "count",
+      "value": 12563
+    }
+  }
+}

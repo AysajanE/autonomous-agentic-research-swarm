@@ -24,6 +24,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install .
 
+      - name: Reproduce analysis
+        run: make reproduce-analysis
+
+      - name: Resolve computed paper
+        run: make paper
+
       - name: Run quality gates
         run: make gate
 

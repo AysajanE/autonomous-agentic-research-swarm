@@ -15,6 +15,7 @@ import argparse
 import csv
 from dataclasses import dataclass
 import datetime as dt
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import difflib
 import hashlib
 import json
@@ -5900,6 +5901,365 @@ def _reportable_numeric_literals(text: str) -> list[dict[str, object]]:
     return results
 
 
+PAPER_VALUES_SCHEMA_VERSION = "research_swarm.paper_values.v1"
+PAPER_VALUE_UNITS = {"percent", "eth", "count", "ratio", "days", "multiplier"}
+PAPER_VALUE_REQUIRED_FIELDS = {
+    "value",
+    "unit",
+    "type",
+    "display",
+    "citation_key",
+    "source_artifact",
+    "source_sha256",
+    "source_selector",
+    "uncertainty",
+}
+PAPER_VALUE_TOKEN_RE = re.compile(r"\{\{value:([A-Za-z0-9_]+)\}\}")
+STRUCTURAL_DATE_RE = re.compile(r"\b(?:19|20)\d{2}-\d{2}(?:-\d{2})?\b")
+BARE_MANUSCRIPT_NUMBER_RE = re.compile(
+    r"(?<![\w])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*%|\s+(?:ETH|x)\b)?",
+    flags=re.IGNORECASE,
+)
+
+
+def _paper_value_failure(code: str, *, subject: str, actual: object | None = None) -> str:
+    suffix = f":actual={actual}" if actual is not None else ""
+    return f"{code}:subject={subject}{suffix}"
+
+
+def _safe_paper_source_path(raw_path: object) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    path = Path(raw_path)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    return path
+
+
+def _selector_parts(selector: str) -> dict[str, str]:
+    parts: dict[str, str] = {}
+    for item in selector.split(";"):
+        if "=" not in item:
+            raise ValueError(f"invalid_selector_part:{item}")
+        key, value = item.split("=", 1)
+        if not key or not value or key in parts:
+            raise ValueError(f"invalid_selector_part:{item}")
+        parts[key] = value
+    return parts
+
+
+def _json_path_value(payload: object, path: str) -> object:
+    current = payload
+    for key, index_text in re.findall(r"([^.\[\]]+)|\[(\d+)\]", path):
+        if key:
+            if not isinstance(current, dict) or key not in current:
+                raise ValueError(f"json_path_missing:{path}:{key}")
+            current = current[key]
+        else:
+            index = int(index_text)
+            if not isinstance(current, list) or index >= len(current):
+                raise ValueError(f"json_path_index_missing:{path}:{index}")
+            current = current[index]
+    return current
+
+
+def _extract_paper_source_value(path: Path, selector: str) -> Decimal:
+    parts = _selector_parts(selector)
+    value: object
+    if "regime_id" in parts:
+        if set(parts) != {"regime_id", "column"}:
+            raise ValueError("csv_selector_fields_invalid")
+        with path.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        matches = [row for row in rows if row.get("regime_id") == parts["regime_id"]]
+        if len(matches) != 1 or parts["column"] not in matches[0]:
+            raise ValueError("csv_selector_no_unique_match")
+        value = matches[0][parts["column"]]
+    elif "json_path" in parts:
+        payload = json.loads(_read_text(path))
+        value = _json_path_value(payload, parts["json_path"])
+        if "match" in parts:
+            if not isinstance(value, list) or "=" not in parts["match"]:
+                raise ValueError("json_selector_match_invalid")
+            match_key, match_value = parts["match"].split("=", 1)
+            matches = [
+                item
+                for item in value
+                if isinstance(item, dict) and str(item.get(match_key)) == match_value
+            ]
+            if len(matches) != 1:
+                raise ValueError("json_selector_no_unique_match")
+            value = matches[0]
+        if "column" in parts:
+            if not isinstance(value, dict) or parts["column"] not in value:
+                raise ValueError("json_selector_column_missing")
+            value = value[parts["column"]]
+    elif "protocol_constant" in parts:
+        if set(parts) != {"protocol_constant"}:
+            raise ValueError("protocol_selector_fields_invalid")
+        match = re.search(
+            r"contiguous runs of ≥(?P<days>\d+) days where `l1_blob_base_fee_gwei <= (?P<multiplier>\d+(?:\.\d+)?) × min",
+            _read_text(path),
+        )
+        if match is None:
+            raise ValueError("protocol_constant_parse_failed")
+        if parts["protocol_constant"] == "blob_fee_floor_threshold_multiplier":
+            value = match.group("multiplier")
+        elif parts["protocol_constant"] == "blob_fee_floor_min_consecutive_days":
+            value = match.group("days")
+        else:
+            raise ValueError("protocol_constant_unknown")
+    else:
+        raise ValueError("selector_kind_unknown")
+
+    try:
+        numeric = Decimal(str(value))
+        if "scale" in parts:
+            numeric *= Decimal(parts["scale"])
+        return numeric
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"selector_value_not_numeric:{value}") from exc
+
+
+def _display_precision(display: str) -> int:
+    match = re.search(r"[-+]?\d[\d,]*(?:\.(\d+))?", display)
+    if match is None:
+        raise ValueError("display_numeric_missing")
+    return len(match.group(1) or "")
+
+
+def _display_decimal(display: str) -> Decimal:
+    match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", display)
+    if match is None:
+        raise ValueError("display_numeric_missing")
+    return Decimal(match.group(0).replace(",", ""))
+
+
+def _claim_literal_value_unit(literal: str) -> tuple[Decimal, str] | None:
+    match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", literal)
+    if match is None:
+        return None
+    value = Decimal(match.group(0).replace(",", ""))
+    tail = literal[match.end() :].casefold()
+    if "%" in tail:
+        unit = "percent"
+    elif re.search(r"\beth\b", tail):
+        unit = "eth"
+    elif re.search(r"\bx\b", tail):
+        unit = "multiplier"
+    elif re.search(r"\bdays?\b", tail):
+        unit = "days"
+    else:
+        unit = "count"
+    return value, unit
+
+
+def _bare_manuscript_numerics(text: str) -> list[dict[str, object]]:
+    results: list[dict[str, object]] = []
+    in_frontmatter = text.startswith("---\n")
+    in_fence = False
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if line_number == 1 and in_frontmatter:
+            continue
+        if in_frontmatter:
+            if stripped == "---":
+                in_frontmatter = False
+            continue
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or re.search(r"\{\{<\s*include\b", raw_line):
+            continue
+        # Explicit structural allowlist: numbered headings are document
+        # organization; the STR notation line is mathematical notation; dates
+        # are sample boundaries; and accessibility/figure-geometry attributes
+        # describe rendering rather than reportable results.
+        if stripped.startswith("#") or "STR_t = (sum_i RentPaid_{i,t})" in raw_line:
+            continue
+        line = PAPER_VALUE_TOKEN_RE.sub(" ", raw_line)
+        line = STRUCTURAL_DATE_RE.sub(" ", line)
+        line = re.sub(r"\[@[^\]]+\]", " ", line)
+        line = re.sub(r"\b(?:fig-)?alt\s*=\s*(?:\"[^\"]*\"|'[^']*')", " ", line)
+        line = re.sub(r"\{[^{}]*(?:width|height|fig-width|fig-height)[^{}]*\}", " ", line)
+        for match in BARE_MANUSCRIPT_NUMBER_RE.finditer(line):
+            literal = match.group(0).strip()
+            results.append({"literal": literal, "line": line_number, "column": match.start() + 1})
+    return results
+
+
+def gate_manuscript_computed_paper() -> GateResult:
+    manuscript = Path("reports/paper/index.qmd")
+    values_path = Path("reports/paper/paper_values.json")
+    # The computed-paper gate applies to releases that actually ship a manuscript.
+    # A modeling-only profile or a manuscript-free repo has no computed paper to
+    # verify, so the gate is inactive there. If EITHER surface exists, the project
+    # is producing a computed paper and BOTH are required — a manuscript without its
+    # computed values, or values without a manuscript, still fails closed.
+    if not manuscript.is_file() and not values_path.is_file():
+        return GateResult(
+            ok=True,
+            details={
+                "status": "inactive_no_manuscript",
+                "value_count": 0,
+                "skipped": True,
+                "failures": [],
+            },
+        )
+    failures: list[str] = []
+    if not manuscript.is_file():
+        failures.append(_paper_value_failure("manuscript_computed_paper_missing", subject=manuscript.as_posix()))
+    if not values_path.is_file():
+        failures.append(_paper_value_failure("paper_values_missing", subject=values_path.as_posix()))
+    if failures:
+        return GateResult(ok=False, details={"status": "active", "value_count": 0, "failures": failures})
+
+    try:
+        payload = json.loads(_read_text(values_path))
+    except json.JSONDecodeError as exc:
+        return GateResult(
+            ok=False,
+            details={"status": "active", "value_count": 0, "failures": [f"paper_values_invalid_json:{exc}"]},
+        )
+    if not isinstance(payload, dict) or payload.get("schema_version") != PAPER_VALUES_SCHEMA_VERSION:
+        failures.append(_paper_value_failure("paper_values_schema_invalid", subject=values_path.as_posix()))
+    values = payload.get("values") if isinstance(payload, dict) else None
+    if not isinstance(values, dict) or not values:
+        failures.append(_paper_value_failure("paper_values_object_invalid", subject=values_path.as_posix()))
+        values = {}
+
+    claims_payload, claims_error = _load_json_file(Path("contracts/claims.yaml"))
+    raw_claims = claims_payload.get("claims") if claims_error is None and isinstance(claims_payload, dict) else None
+    claims = [claim for claim in raw_claims if isinstance(claim, dict)] if isinstance(raw_claims, list) else []
+    claims_by_citation = {
+        str(claim.get("citation_key")): claim
+        for claim in claims
+        if isinstance(claim.get("citation_key"), str)
+    }
+
+    for key, entry in values.items():
+        subject = f"{values_path.as_posix()}:{key}"
+        if not isinstance(key, str) or not isinstance(entry, dict):
+            failures.append(_paper_value_failure("paper_value_malformed", subject=subject))
+            continue
+        missing_fields = sorted(PAPER_VALUE_REQUIRED_FIELDS - set(entry))
+        if missing_fields:
+            failures.append(_paper_value_failure("paper_value_missing_field", subject=subject, actual=missing_fields))
+            continue
+        if entry.get("unit") not in PAPER_VALUE_UNITS:
+            failures.append(_paper_value_failure("paper_value_unknown_unit", subject=subject, actual=entry.get("unit")))
+        if isinstance(entry.get("value"), bool) or not isinstance(entry.get("value"), (int, float)):
+            failures.append(_paper_value_failure("paper_value_non_numeric", subject=subject, actual=entry.get("value")))
+            continue
+        if not isinstance(entry.get("display"), str):
+            failures.append(_paper_value_failure("paper_value_display_invalid", subject=subject))
+            continue
+        uncertainty = entry.get("uncertainty")
+        if not isinstance(uncertainty, dict) or not isinstance(uncertainty.get("kind"), str):
+            failures.append(_paper_value_failure("paper_value_uncertainty_invalid", subject=subject))
+
+        claim = claims_by_citation.get(str(entry.get("citation_key")))
+        if claim is None or entry.get("type") != claim.get("type"):
+            failures.append(_paper_value_failure("paper_value_claim_type_divergence", subject=subject))
+
+        source_path = _safe_paper_source_path(entry.get("source_artifact"))
+        if source_path is None or not source_path.is_file():
+            failures.append(_paper_value_failure("paper_value_source_missing", subject=subject, actual=entry.get("source_artifact")))
+            continue
+        expected_sha = entry.get("source_sha256")
+        actual_sha = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        if not isinstance(expected_sha, str) or expected_sha != actual_sha:
+            failures.append(_paper_value_failure("paper_value_source_hash_mismatch", subject=subject, actual=actual_sha))
+            continue
+        selector = entry.get("source_selector")
+        if not isinstance(selector, str):
+            failures.append(_paper_value_failure("paper_value_selector_invalid", subject=subject))
+            continue
+        try:
+            source_value = _extract_paper_source_value(source_path, selector)
+            precision = _display_precision(str(entry["display"]))
+            quantum = Decimal(1).scaleb(-precision)
+            recomputed = source_value.quantize(quantum, rounding=ROUND_HALF_UP)
+            declared = Decimal(str(entry["value"])).quantize(quantum, rounding=ROUND_HALF_UP)
+            displayed = _display_decimal(str(entry["display"])).quantize(quantum, rounding=ROUND_HALF_UP)
+        except (ValueError, InvalidOperation, json.JSONDecodeError) as exc:
+            failures.append(_paper_value_failure("paper_value_source_selector_invalid", subject=subject, actual=str(exc)))
+            continue
+        if recomputed != declared or displayed != declared:
+            failures.append(
+                _paper_value_failure(
+                    "paper_value_mismatch_source",
+                    subject=subject,
+                    actual=f"source={recomputed};value={declared};display={displayed}",
+                )
+            )
+
+    manuscript_text = _read_text(manuscript)
+    for match in PAPER_VALUE_TOKEN_RE.finditer(manuscript_text):
+        if match.group(1) not in values:
+            failures.append(
+                _paper_value_failure(
+                    "manuscript_unresolved_value_key",
+                    subject=manuscript.as_posix(),
+                    actual=match.group(1),
+                )
+            )
+    if "{{value:" in PAPER_VALUE_TOKEN_RE.sub("", manuscript_text):
+        failures.append(
+            _paper_value_failure(
+                "manuscript_unresolved_value_key",
+                subject=manuscript.as_posix(),
+                actual="malformed_value_token",
+            )
+        )
+    for item in _bare_manuscript_numerics(manuscript_text):
+        failures.append(
+            _paper_value_failure(
+                "manuscript_bare_numeric_literal",
+                subject=f"{manuscript.as_posix()}:{item['line']}",
+                actual=item["literal"],
+            )
+        )
+
+    available = [
+        (Decimal(str(entry["value"])), str(entry["unit"]), str(entry["citation_key"]))
+        for entry in values.values()
+        if isinstance(entry, dict)
+        and isinstance(entry.get("value"), (int, float))
+        and not isinstance(entry.get("value"), bool)
+        and isinstance(entry.get("unit"), str)
+        and isinstance(entry.get("citation_key"), str)
+    ]
+    for claim in claims:
+        for literal in claim.get("manuscript_numeric_literals", []):
+            parsed = _claim_literal_value_unit(literal) if isinstance(literal, str) else None
+            expected = (*parsed, str(claim.get("citation_key"))) if parsed is not None else None
+            if expected is not None and expected not in available:
+                failures.append(
+                    _paper_value_failure(
+                        "claims_paper_values_divergence",
+                        subject=str(claim.get("claim_id") or "unknown_claim"),
+                        actual=literal,
+                    )
+                )
+
+    return GateResult(
+        ok=not failures,
+        details={
+            "status": "active",
+            "value_count": len(values),
+            "token_count": len(PAPER_VALUE_TOKEN_RE.findall(manuscript_text)),
+            "structural_numeric_allowlist": [
+                "calendar dates (YYYY-MM-DD and YYYY-MM)",
+                "STR formula notation line",
+                "figure alt/geometry attributes",
+                "numbered section headings",
+            ],
+            "failures": failures,
+        },
+    )
+
+
 def _parse_utc_z(value: object) -> dt.datetime | None:
     if not isinstance(value, str) or not value.endswith("Z"):
         return None
@@ -8808,6 +9168,7 @@ _CORE_GATE_NAMES = (
     "prereg_lock_coverage",
 )
 _MODE_INDEPENDENT_SCIENCE_GATES = (
+    "manuscript_computed_paper",
     "citation_integrity",
     "literature_corpus",
     "recall_audit",
@@ -8839,6 +9200,7 @@ _MODELING_SCIENCE_GATES = (
 _ALL_GATE_NAMES = _CORE_GATE_NAMES + (
     "prereg_conformance",
     "claim_evidence_ledger",
+    "manuscript_computed_paper",
     "citation_integrity",
     "literature_corpus",
     "recall_audit",
@@ -8914,6 +9276,7 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
         "task_lint": gate_task_lint,
         "prereg_lock_coverage": gate_prereg_lock_coverage,
         "claim_evidence_ledger": gate_claim_evidence_ledger,
+        "manuscript_computed_paper": gate_manuscript_computed_paper,
         "citation_integrity": gate_citation_integrity,
         "literature_corpus": gate_literature_corpus,
         "recall_audit": gate_recall_audit,

@@ -1,7 +1,13 @@
-.PHONY: gate
+.PHONY: gate reproduce-analysis paper
 
 gate:
 	python scripts/quality_gates.py
+
+reproduce-analysis:
+	python scripts/reproduce_analysis.py
+
+paper:
+	python scripts/render_paper.py
 
 .PHONY: test
 
