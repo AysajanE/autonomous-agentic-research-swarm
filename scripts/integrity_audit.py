@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shlex
 import shutil
@@ -48,11 +49,51 @@ def _utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+# Credential scrubbing is by ALLOWLIST, not denylist: a name-based denylist
+# always leaks (DATABASE_URL, REDIS_URL, bare *_KEY/*_PASS, CI_JOB_JWT, ...), so
+# `environment_scrub_only` would be aspirational.  Instead every audit subprocess
+# starts from ONLY these known-benign names — anything else (i.e. any credential)
+# is dropped by construction.  Determinism/runtime vars a rebuild subprocess
+# genuinely needs are included; secrets are structurally excluded.
+_ALLOWLISTED_ENV_NAMES = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD",
+    "LANG", "LANGUAGE", "TZ", "TERM",
+    "TMPDIR", "TEMP", "TMP",
+    "PYTHONHASHSEED", "PYTHONPATH", "PYTHONUTF8", "PYTHONIOENCODING", "PYTHONDONTWRITEBYTECODE",
+    "MPLCONFIGDIR", "MPLBACKEND", "SOURCE_DATE_EPOCH",
+    "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "PYENV_ROOT",
+})
+_ALLOWLISTED_ENV_PREFIXES = ("LC_",)
+# The single credential the LIVE audit backend legitimately needs to reach its
+# vendor API.  Added back ON TOP of the benign allowlist for the live backend
+# only — every other secret stays excluded by the allowlist.
+_VENDOR_CREDENTIAL_PREFIXES = ("ANTHROPIC", "CLAUDE")
+
+
+def _is_allowlisted_env(name: str) -> bool:
+    return name in _ALLOWLISTED_ENV_NAMES or name.startswith(_ALLOWLISTED_ENV_PREFIXES)
+
+
+def _is_vendor_credential_env(name: str) -> bool:
+    return name.upper().startswith(_VENDOR_CREDENTIAL_PREFIXES)
+
+
+def _base_scrubbed_env() -> dict[str, str]:
+    """Only known-benign names survive — every credential is dropped by
+    construction (allowlist, not a leaky denylist)."""
+    return {key: value for key, value in os.environ.items() if _is_allowlisted_env(key)}
+
+
 def _offline_subprocess_env() -> dict[str, str]:
-    env = dict(os.environ)
+    """Environment for every OFFLINE audit subprocess (rebuilds/recomputes AND
+    the git worktree/inspection helpers): benign-only allowlist (so
+    `environment_scrub_only` is true) plus every proxy pointed at a dead local
+    port (so `proxy_environment_only` is true)."""
+    env = _base_scrubbed_env()
     dead_proxy = "http://127.0.0.1:9"
     env.update(
         {
+            "GIT_TERMINAL_PROMPT": "0",
             "http_proxy": dead_proxy,
             "https_proxy": dead_proxy,
             "HTTP_PROXY": dead_proxy,
@@ -64,6 +105,59 @@ def _offline_subprocess_env() -> dict[str, str]:
         }
     )
     return env
+
+
+def _live_backend_env() -> dict[str, str]:
+    """Environment for the LIVE audit backend.  It must reach the vendor API, so
+    the vendor credential is re-added on top of the benign allowlist — every
+    OTHER credential (repo, cloud, unrelated API) stays dropped by construction.
+    The confinement report labels this honestly (`vendor_credential_retained` +
+    `unrestricted_process_egress`), never claiming a full scrub or a proxy-only
+    network the live call does not enforce."""
+    env = _base_scrubbed_env()
+    for key, value in os.environ.items():
+        if _is_vendor_credential_env(key):
+            env[key] = value
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    return env
+
+
+def effective_confinement(backend: str = "mock") -> dict[str, object]:
+    """Report the confinement ACTUALLY enforced, per backend — never a control
+    that isn't applied to the launched subprocesses.
+
+    - ``mock`` (default, CI): the auditor transcript is read from a local file,
+      so no auditor egress; EVERY audit subprocess (rebuilds/recomputes and the
+      git helpers) is launched with the benign-only allowlist and dead proxies.
+      Hence `environment_scrub_only` + `proxy_environment_only`.
+    - live: the auditor subprocess reaches the vendor API and therefore retains
+      the vendor credential and UNRESTRICTED process egress (no namespace, proxy,
+      or destination allowlist is enforced at the process level).  Reported as
+      `vendor_credential_retained` + `unrestricted_process_egress` — the honest
+      weakest link, not a scrub/proxy-only claim the live call does not honour.
+    """
+    system = platform.system().lower() or "unknown"
+    if system != "linux":
+        reason = f"{system}_network_namespace_unavailable"
+    elif shutil.which("bwrap") is None:
+        reason = "bubblewrap_not_available"
+    else:
+        # Having a binary is not enforcement.  Until every rebuild/model/audit
+        # subprocess is launched through the reviewed profile, remain honest.
+        reason = "bubblewrap_profile_not_enabled"
+    if backend == "mock":
+        effective_network = "proxy_environment_only"
+        credential_isolation = "environment_scrub_only"
+    else:
+        effective_network = "unrestricted_process_egress"
+        credential_isolation = "vendor_credential_retained"
+    return {
+        "capability_probe": reason,
+        "os_enforced": False,
+        "effective_network": effective_network,
+        "credential_isolation": credential_isolation,
+        "filesystem_isolation": "scratch_worktree_plus_mutation_detection",
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -82,8 +176,13 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    # Every audit-launched subprocess — including local git inspection/worktree
+    # ops — runs under the scrubbed, dead-proxied env so the confinement report's
+    # `environment_scrub_only`/`proxy_environment_only` labels hold process-wide
+    # (e.g. a repo `post-checkout` hook cannot inherit credentials or network).
     return subprocess.run(
-        ["git", *args], cwd=repo, text=True, capture_output=True, check=check
+        ["git", *args], cwd=repo, text=True, capture_output=True, check=check,
+        env=_offline_subprocess_env(),
     )
 
 
@@ -141,7 +240,8 @@ def _make_scratch(repo: Path, destination: Path, *, hermetic_copy: bool) -> str:
         )
         return "hermetic_temp_copy"
     cp = subprocess.run(
-        scratch_worktree_argv(repo, destination), cwd=repo, text=True, capture_output=True
+        scratch_worktree_argv(repo, destination), cwd=repo, text=True, capture_output=True,
+        env=_offline_subprocess_env(),
     )
     if cp.returncode != 0:
         raise ValueError(f"scratch_worktree_create_failed:{cp.stderr[-1000:]}")
@@ -156,6 +256,7 @@ def _remove_scratch(repo: Path, destination: Path, scratch_kind: str) -> None:
             text=True,
             capture_output=True,
             check=False,
+            env=_offline_subprocess_env(),
         )
     else:
         shutil.rmtree(destination, ignore_errors=True)
@@ -576,6 +677,10 @@ def _load_transcript(
         text=True,
         capture_output=True,
         timeout=timeout,
+        # Vendor transport + vendor credential retained (the live auditor needs
+        # its API); every other credential is scrubbed — matches the honest
+        # `vendor_credential_retained` confinement label for the live backend.
+        env=_live_backend_env(),
     )
     if cp.returncode != 0:
         raise ValueError(f"audit_backend_failed:{cp.returncode}:{cp.stderr[-1000:]}")
@@ -878,9 +983,10 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             "builder_families": builders,
             "builder_run_manifest_evidence": builder_evidence,
             "profile": "scratch-worktree",
-            "network": "off",
+            "network": "requested_off",
             "commit_push_allowed": False,
             "scratch_kind": scratch_kind,
+            "effective_confinement": effective_confinement(args.backend),
         },
         "repo_confinement": {
             "excluded_prefixes": [".git/", "reports/status/integrity_audit/"],

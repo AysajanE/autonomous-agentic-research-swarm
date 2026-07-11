@@ -160,6 +160,13 @@
         "exhibits": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}}
       }
     },
-    "historical_manifest_replacements": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}}
+    "historical_manifest_replacements": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "historical_exemptions_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
   }
 }

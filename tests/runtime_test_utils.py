@@ -471,6 +471,11 @@ def scaffold_runtime_repo(root: Path, *, mode: str = "empirical") -> None:
     )
     write_text(root, "docs/runbook_swarm.md", "# runbook\n")
     write_text(root, "docs/runbook_swarm_automation.md", "# automation runbook\n")
+    write_text(
+        root,
+        "docs/operator_runbook.md",
+        (REPO_ROOT / "docs/operator_runbook.md").read_text(encoding="utf-8"),
+    )
     write_text(root, "docs/prompts/planner.md", "# planner prompt\n")
     write_text(root, "docs/prompts/worker.md", "# worker prompt\n")
     write_text(root, "docs/prompts/judge.md", "# judge prompt\n")
@@ -1040,7 +1045,31 @@ def register_historical_exemption(root: Path, *, section: str, rel_path: str, ex
     if extra:
         entry.update(extra)
     entries.append(entry)
-    return write_json(root, "contracts/historical_exemptions.json", payload)
+    written = write_json(root, "contracts/historical_exemptions.json", payload)
+    pin_pack_to_ledger(root)
+    return written
+
+
+def pin_pack_to_ledger(root: Path) -> None:
+    """Keep a fixture pack's exemption pin in sync with its exemption ledger.
+
+    Production freezes the immutable ledger against silent growth by pinning its
+    digest in ``contracts/pack.json`` (``gate_historical_exemptions``).  Fixtures
+    that build their own ledger must honour the same contract, so this recomputes
+    the pin whenever the fixture ledger changes (and drops it when there is no
+    ledger, since the gate then skips the freeze)."""
+    pack_path = root / "contracts/pack.json"
+    if not pack_path.is_file():
+        return
+    pack = json.loads(pack_path.read_text(encoding="utf-8"))
+    ledger = root / "contracts/historical_exemptions.json"
+    if ledger.is_file():
+        pack["integrity"] = {
+            "historical_exemptions_sha256": hashlib.sha256(ledger.read_bytes()).hexdigest()
+        }
+    else:
+        pack.pop("integrity", None)
+    write_json(root, "contracts/pack.json", pack)
 
 
 def attest_containment_fixture(root: Path) -> None:

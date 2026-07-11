@@ -48,6 +48,7 @@ from swarm_taskfile import parse_task_frontmatter as _parse_task_frontmatter
 from sweep_tasks import plan_sweep as _plan_sweep
 from falsify_claims import evaluate_falsification_spec
 from sweep_harness import enumerate_cells
+from swarm_events import ESCALATION_CLASSES
 from swarm_events import read_events as _read_swarm_events
 from calibrate_referee import calibration_report_failures
 import literature
@@ -3539,7 +3540,7 @@ def gate_historical_exemptions() -> GateResult:
         return GateResult(ok=False, details={"failures": [str(exc)]})
 
     failures: list[str] = []
-    exempted: dict[str, dict[str, str]] = {"run_manifests": {}, "review_logs": {}}
+    exempted: dict[str, dict[str, str]] = {"run_manifests": {}, "review_logs": {}, "tasks": {}}
     exemptions_path = Path("contracts/historical_exemptions.json")
 
     if exemptions_path.exists():
@@ -3548,7 +3549,26 @@ def gate_historical_exemptions() -> GateResult:
             return GateResult(ok=False, details={"failures": [f"{exemptions_path}:{error}"]})
         if payload.get("schema_version") != HISTORICAL_EXEMPTIONS_SCHEMA_VERSION:
             failures.append(f"{exemptions_path}:invalid_schema_version")
-        for kind in ("run_manifests", "review_logs"):
+
+        # The exemption ledger is one-time immutable historical remediation: it
+        # grandfathers pre-schema-v2 artifacts (incl. the two W6/W7 v1 tasks) out
+        # of strict checks.  A *new* entry silently added here bypasses a
+        # mandatory schema-v2 binding — e.g. adding a v1 W6/W7/W8 task exemption
+        # skips program tagging (task_lint honours anything on this list).  So
+        # the whole ledger is frozen: the pack declares its pinned digest and any
+        # drift (in ANY section, tasks included) is a deliberate, reviewable,
+        # dual-file change, never a silent side effect of task creation.
+        actual_ledger_sha, _ = _sha256_and_bytes(exemptions_path)
+        try:
+            pinned_sha = pack_value(load_pack_config(), "integrity.historical_exemptions_sha256", str)
+        except ValueError:
+            pinned_sha = None
+        if not isinstance(pinned_sha, str) or not pinned_sha:
+            failures.append("historical_exemptions_pin_missing")
+        elif actual_ledger_sha != pinned_sha:
+            failures.append("historical_exemptions_ledger_mutated")
+
+        for kind in ("run_manifests", "review_logs", "tasks"):
             for item in payload.get(kind, []):
                 if not isinstance(item, dict):
                     failures.append(f"{exemptions_path}:{kind}:invalid_entry")
@@ -3878,6 +3898,66 @@ def gate_task_lint() -> GateResult:
             "failures": [diagnostic.as_dict() for diagnostic in diagnostics],
         },
     )
+
+
+_RUNBOOK_GATE_RE = re.compile(r"^\s*-\s+gate:\s+([a-z][a-z0-9_]*)\s*$", re.MULTILINE)
+_RUNBOOK_ESCALATION_RE = re.compile(
+    r"^\s*-\s+escalation_class:\s+([a-z][a-z0-9_]*)\s*$", re.MULTILINE
+)
+
+
+def check_runbook_staleness(
+    path: Path = Path("docs/operator_runbook.md"),
+    *,
+    gate_names: tuple[str, ...] | None = None,
+    escalation_classes: tuple[str, ...] | None = None,
+) -> GateResult:
+    """Require an operator entry for every kernel gate and escalation class."""
+    expected_gates = set(gate_names if gate_names is not None else _ALL_GATE_NAMES)
+    expected_escalations = set(
+        escalation_classes if escalation_classes is not None else ESCALATION_CLASSES
+    )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return GateResult(
+            ok=False,
+            details={
+                "runbook": path.as_posix(),
+                "failures": [
+                    _science_failure(
+                        "operator_runbook_missing",
+                        subject=path.as_posix(),
+                        actual=f"{type(exc).__name__}:{exc}",
+                    )
+                ],
+            },
+        )
+    documented_gates = set(_RUNBOOK_GATE_RE.findall(text))
+    documented_escalations = set(_RUNBOOK_ESCALATION_RE.findall(text))
+    failures = [
+        *(
+            _science_failure("runbook_gate_missing", subject=name)
+            for name in sorted(expected_gates - documented_gates)
+        ),
+        *(
+            _science_failure("runbook_escalation_class_missing", subject=name)
+            for name in sorted(expected_escalations - documented_escalations)
+        ),
+    ]
+    return GateResult(
+        ok=not failures,
+        details={
+            "runbook": path.as_posix(),
+            "gate_count": len(expected_gates),
+            "escalation_class_count": len(expected_escalations),
+            "failures": failures,
+        },
+    )
+
+
+def gate_runbook_staleness() -> GateResult:
+    return check_runbook_staleness()
 
 
 def _science_failure(
@@ -7313,6 +7393,22 @@ def _integrity_builder_evidence_failures(
     return derived, failures
 
 
+# The ONLY implemented audit backends and the single honest confinement tuple
+# each may report (see integrity_audit.effective_confinement).  A report whose
+# backend is not a key here is rejected — an unimplemented/typo'd backend must
+# not inherit a live tuple by default.
+_INTEGRITY_CONFINEMENT_BY_BACKEND = {
+    "mock": {
+        "effective_network": "proxy_environment_only",
+        "credential_isolation": "environment_scrub_only",
+    },
+    "claude": {
+        "effective_network": "unrestricted_process_egress",
+        "credential_isolation": "vendor_credential_retained",
+    },
+}
+
+
 def gate_integrity_audit() -> GateResult:
     paths = sorted(Path("reports/status/integrity_audit").glob("*.json"))
     if not paths:
@@ -7363,8 +7459,35 @@ def gate_integrity_audit() -> GateResult:
             failures.append(_science_failure("integrity_audit_executor_contract_mismatch", subject=subject))
         if not isinstance(audit_family, str) or not isinstance(builders, list) or not builders:
             failures.append(_science_failure("integrity_audit_family_evidence_missing", subject=subject))
-        if executor.get("profile") != "scratch-worktree" or executor.get("network") != "off":
+        confinement = executor.get("effective_confinement")
+        if (
+            executor.get("profile") != "scratch-worktree"
+            or executor.get("network") != "requested_off"
+            or not isinstance(confinement, dict)
+        ):
             failures.append(_science_failure("integrity_audit_profile_invalid", subject=subject))
+        else:
+            # Bind the confinement labels to the backend and pin os_enforced=false:
+            # a hash-bound but DISHONEST report (e.g. a live backend claiming
+            # proxy-only network / full scrub, or any report claiming OS
+            # enforcement this implementation never provides) must not pass the
+            # gate.  Dispatch through an explicit KNOWN-backend map and reject
+            # unknown backends — an unimplemented/typo'd backend must not inherit
+            # the live tuple by default.  The mock backend confines every
+            # subprocess (scrub + dead proxy); the live claude backend honestly
+            # retains the vendor credential + unrestricted egress.
+            report_backend = executor.get("backend")
+            configured_backend = configured_executor["backend"] if configured_executor else None
+            expected_confinement = _INTEGRITY_CONFINEMENT_BY_BACKEND.get(report_backend)
+            if expected_confinement is None:
+                failures.append(_science_failure("integrity_audit_unknown_backend", subject=subject, actual=report_backend))
+            elif (
+                confinement.get("os_enforced") is not False
+                or confinement.get("effective_network") != expected_confinement["effective_network"]
+                or confinement.get("credential_isolation") != expected_confinement["credential_isolation"]
+                or (configured_backend is not None and report_backend != configured_backend)
+            ):
+                failures.append(_science_failure("integrity_audit_profile_invalid", subject=subject))
         if executor.get("commit_push_allowed") is not False:
             failures.append(_science_failure("integrity_audit_commit_push_enabled", subject=subject))
     inventory = payload.get("release_inventory")
@@ -10873,6 +10996,7 @@ _CORE_GATE_NAMES = (
     "historical_exemptions",
     "network_strings",
     "task_lint",
+    "runbook_staleness",
     "prereg_lock_coverage",
     "raw_retention",
 )
@@ -11002,6 +11126,7 @@ def _collect_gate_results(*, task_kind: str | None = None) -> dict[str, GateResu
         "historical_exemptions": gate_historical_exemptions,
         "network_strings": gate_network_strings,
         "task_lint": gate_task_lint,
+        "runbook_staleness": gate_runbook_staleness,
         "prereg_lock_coverage": gate_prereg_lock_coverage,
         "raw_retention": gate_raw_retention,
         "program_conformance": gate_program_conformance,

@@ -99,7 +99,17 @@ def collect_disclosure_evidence(repo: Path) -> dict[str, object]:
                 event_counts["invalid_event_record"] += 1
                 continue
             if isinstance(event, dict):
-                event_counts[str(event.get("event") or event.get("type") or "untyped_event")] += 1
+                event_name = str(event.get("event") or event.get("type") or "untyped_event")
+                # Seeded-defect drills write to their OWN ledger, never here.  A
+                # drill event in the compliance journal is a regression, so FAIL
+                # CLOSED: the disclosure hash-binds this whole file as released
+                # provenance, and drill bytes must never be published as such.
+                if event_name.startswith("seeded_drill") or str(event.get("actor_session") or "") == "seeded-drill-kernel":
+                    raise ValueError(
+                        "seeded_drill event found in the compliance journal "
+                        f"({events_path}); drills must write DRILL_JOURNAL_PATH only"
+                    )
+                event_counts[event_name] += 1
 
     return {
         "schema_version": SCHEMA_VERSION,

@@ -741,6 +741,25 @@ def lint_task_files(
             if key not in frontmatter:
                 _diagnostic(diagnostics, task, key, "missing_required_field", "present", None)
 
+        # Program-template workstreams are deliberately closed-shaped.  A
+        # Planner must bind every new task to one exact template node while the
+        # task is still in development; release-time program_conformance is too
+        # late to prevent an improvised W6/W7/W8 DAG.  Historical v1 tasks have
+        # already returned through the exemption branch above.
+        workstream = _string(frontmatter.get("workstream"))
+        if workstream in {"W6", "W7", "W8"}:
+            for field in ("program_id", "program_node"):
+                value = _string(frontmatter.get(field))
+                if value is None:
+                    _diagnostic(
+                        diagnostics,
+                        task,
+                        field,
+                        "template_program_tag_required",
+                        f"non-empty {field} for {workstream}",
+                        frontmatter.get(field),
+                    )
+
         if fields.task_kind not in TASK_KIND_VALUES:
             _diagnostic(
                 diagnostics, task, "task_kind", "invalid_task_kind", list(TASK_KIND_VALUES), fields.task_kind

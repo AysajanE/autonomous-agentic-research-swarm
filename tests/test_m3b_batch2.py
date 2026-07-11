@@ -143,9 +143,18 @@ def _valid_report(root: Path, *, audited_sha: str = "a" * 40) -> dict[str, objec
                 }
             ],
             "profile": "scratch-worktree",
-            "network": "off",
+            "network": "requested_off",
             "commit_push_allowed": False,
             "scratch_kind": "hermetic_temp_copy",
+            "effective_confinement": {
+                "capability_probe": "fixture_no_namespace",
+                "os_enforced": False,
+                # backend is "claude" (live) -> honest live tuple: vendor cred +
+                # unrestricted egress, not a mock-style scrub/proxy claim.
+                "effective_network": "unrestricted_process_egress",
+                "credential_isolation": "vendor_credential_retained",
+                "filesystem_isolation": "scratch_worktree_plus_mutation_detection",
+            },
         },
         "repo_confinement": {
             "excluded_prefixes": [".git/", "reports/status/integrity_audit/"],
@@ -404,6 +413,25 @@ class IntegrityAuditTest(unittest.TestCase):
             with chdir(root):
                 result = quality_gates.gate_integrity_audit()
             self.assertIn("integrity_audit_executor_contract_mismatch", _reasons(result))
+
+    def test_unknown_backend_is_rejected_by_confinement_binding(self) -> None:
+        # An unimplemented/typo'd backend, made consistent across framework +
+        # report so the executor-contract match passes, must NOT inherit a live
+        # confinement tuple by default — the gate rejects unknown backends.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            report = _valid_report(root)
+            fw_path = root / "contracts/framework.json"
+            framework = json.loads(fw_path.read_text(encoding="utf-8"))
+            framework["executors"]["integrity_audit"]["backend"] = "claude_typo"
+            write_json(root, "contracts/framework.json", framework)
+            report["executor"]["backend"] = "claude_typo"
+            _write_audit(root, "reports/status/integrity_audit/audit.json", report)
+            with chdir(root):
+                result = quality_gates.gate_integrity_audit()
+            self.assertFalse(result.ok)
+            self.assertIn("integrity_audit_unknown_backend", _reasons(result))
 
     def test_gate_rehashes_bytes_even_when_report_flags_claim_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

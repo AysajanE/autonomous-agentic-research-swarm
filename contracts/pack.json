@@ -104,5 +104,8 @@
     "daily_rollup_panel_2026-04-08.json": "daily_rollup_panel_2026-04-09.json",
     "vendor_daily_rollup_panel_2026-04-01.json": "vendor_daily_rollup_panel_2026-04-09.json",
     "vendor_daily_rollup_panel_2026-04-08.json": "vendor_daily_rollup_panel_2026-04-09.json"
+  },
+  "integrity": {
+    "historical_exemptions_sha256": "1863c9f47dfc4abf83d4976df8729374247769a44e4b1109bc43eeef1231326b"
   }
 }

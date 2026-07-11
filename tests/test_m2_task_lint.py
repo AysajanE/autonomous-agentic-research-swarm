@@ -366,6 +366,8 @@ gates:
                 "T___": "T822",
                 "<concise task title>": "Template lint fixture",
                 "W__": "W8",
+                "# program_id: w6_analysis  # required when instantiating a contracts/program_templates node": "program_id: bridge_campaign",
+                "# program_node: estimation_plan  # exact node_id from the selected mode template": "program_node: calibration",
                 "<observable completion statement>": "The declared output exists",
                 "<offline command or artifact pointer>": "make gate",
                 "<upstream manifest path>": "data/processed_manifest/input.json",

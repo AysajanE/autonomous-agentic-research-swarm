@@ -12,9 +12,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 559,
+      "bytes": 706,
       "path": "Makefile",
-      "sha256": "0ce265f8974ddd08c68ffebf519d178fcf40b41d1f98e22822c0af5147ab32c1",
+      "sha256": "c6802f386d345cbccacff6c0ead5eb3cd7f3aab2f61b09cedfd441fb198251a0",
       "verification_bar": "byte_identity"
     },
     {
@@ -30,9 +30,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 6110,
+      "bytes": 6538,
       "path": "contracts/CHANGELOG.md",
-      "sha256": "431ee229dd91517eac6a5db673b69084e53a399404b4e9d7dc918f741c903525",
+      "sha256": "c3f5170750dbc0142aea461c012de113ed6ac02aae7d9a97da3e6004152a5fc0",
       "verification_bar": "byte_identity"
     },
     {
@@ -150,9 +150,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 5567,
+      "bytes": 5692,
       "path": "contracts/pack.json",
-      "sha256": "6ba9172dd9c35921da2cd5970f96475e2e4e06cee9089ddb24cb705e32e84f86",
+      "sha256": "227d4b6137c94b0f6eb04bb8deb605a4c43d401cbc9eca0eb7aee1c6d95c221c",
       "verification_bar": "byte_identity"
     },
     {
@@ -324,9 +324,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 6600,
+      "bytes": 7352,
       "path": "contracts/schemas/integrity_audit_v1.json",
-      "sha256": "4a9bae5f2e34586d39e0ecc41ed3eb0898d7e1d042357d0b27c4a567740b7125",
+      "sha256": "5f037ef29b63e63e9e29dcc5d90c4a263c656085d796b41f0766a5d956685fe7",
       "verification_bar": "byte_identity"
     },
     {
@@ -354,9 +354,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 8287,
+      "bytes": 8492,
       "path": "contracts/schemas/pack_config_v1.json",
-      "sha256": "c8407f5ef56f171c4806fa284332e81643043656feb1c4847d8af5ac343976ca",
+      "sha256": "423f42b6b9d0434b1cab658c9fa0daaf4e5e57f7510929827b61b07053cd8d50",
       "verification_bar": "byte_identity"
     },
     {
@@ -786,15 +786,21 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 73789,
+      "bytes": 87760,
       "path": "docs/first_class_swarm_execution_log.md",
-      "sha256": "42b44258a06ed783a0bdb4b16467049854cb03348f2e04cdb771c0bfe1cdabd2",
+      "sha256": "4b1d3ed0c2cea7133443382756d5f24c4c1e1427553443aee255825b976f892f",
       "verification_bar": "byte_identity"
     },
     {
       "bytes": 108383,
       "path": "docs/first_class_swarm_production_plan_2026-07-09.md",
       "sha256": "864b3b901113bbaafc6dc91121dc7ab6513e7b8a222c91e54d5ba75214c46640",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 11495,
+      "path": "docs/operator_runbook.md",
+      "sha256": "53b675342bac659604c12efc44c93eda49c6517dca951ec6c3cf52bb6746d21d",
       "verification_bar": "byte_identity"
     },
     {
@@ -1622,9 +1628,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 10120,
+      "bytes": 10829,
       "path": "scripts/generate_disclosure.py",
-      "sha256": "b33361a30a0e43182245a0464f8d3591e44fc601cd726d36b5e376f4a60f98c2",
+      "sha256": "afa2fb5025a8f2efddcfdc582249412e497fa778bbca4171b23d11be409009b9",
       "verification_bar": "byte_identity"
     },
     {
@@ -1634,9 +1640,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 39575,
+      "bytes": 44982,
       "path": "scripts/integrity_audit.py",
-      "sha256": "1fda53cc7737005f511fa6bd4e03c8f55a88d9a630e8487230e13b43d5d971b3",
+      "sha256": "e68ce0b41af6ca0f895f8c2df35893b6bafd312ec8e60a90fd0231e8749b412a",
       "verification_bar": "byte_identity"
     },
     {
@@ -1676,9 +1682,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 472407,
+      "bytes": 478064,
       "path": "scripts/quality_gates.py",
-      "sha256": "0131ddf6cb651a6bd06d1622c5c8d06593198b7491bee3e7185aa8737f0954e1",
+      "sha256": "e6ef8425560a18a5f0464dddbf758f7044ae80d18a476afe6e82fb50a41b3a4f",
       "verification_bar": "byte_identity"
     },
     {
@@ -1718,15 +1724,21 @@
       "verification_bar": "byte_identity"
     },
     {
+      "bytes": 10993,
+      "path": "scripts/seeded_drill.py",
+      "sha256": "2f2b5378965915d045b3fb151daa8e2b65dfc39169f819ebd1ea7fee0c7ff3e8",
+      "verification_bar": "byte_identity"
+    },
+    {
       "bytes": 14918,
       "path": "scripts/spec_curve.py",
       "sha256": "3f925d32f2002e40b1034e08bb3c4d7a5385390a4c61e616746d850368223263",
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 401436,
+      "bytes": 401905,
       "path": "scripts/swarm.py",
-      "sha256": "3dc6f3a95fa32df47c727efc7813b9a28adc09e53b322d665cb7cb057fb7b767",
+      "sha256": "31ac2bbfdeaab0749faad7116e5546b13bdf414651140e56bf10548498fcf85e",
       "verification_bar": "byte_identity"
     },
     {
@@ -1742,9 +1754,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 4884,
+      "bytes": 7124,
       "path": "scripts/swarm_events.py",
-      "sha256": "42425dc9a3062d7f63cea73f23890c4784a29deb2cb2b5534e9091bc955f628c",
+      "sha256": "84b7653b2e83eddf43d558d85c4ae2a5f784dd4e5f7e608345c103cd431561e0",
       "verification_bar": "byte_identity"
     },
     {
@@ -1760,9 +1772,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 49589,
+      "bytes": 50540,
       "path": "scripts/swarm_taskfile.py",
-      "sha256": "2630a2023c80d1f6768e757b80bf7e5c3bfdeccb2d7535a52c03694d85a57b30",
+      "sha256": "2a1c9eeb8c7d9ce5b473d0af55b72abecba788c84078d5712bdfa7c4da24b527",
       "verification_bar": "byte_identity"
     },
     {
