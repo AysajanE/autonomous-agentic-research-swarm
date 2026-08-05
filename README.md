@@ -1,288 +1,376 @@
 # Autonomous Agentic Research Swarm
 
-Autonomous Agentic Research Swarm is a repo-native framework for executing research through explicit contracts, task state, review gates, and git-scoped work isolation.
+**Run AI coding agents on a research project without letting them wreck it.**
 
-This repository should be read framework-first. It currently includes an empirical research project that has been used as a reference implementation to exercise the framework end to end, but the repository itself is not defined by that single project.
+You give the swarm a queue of research tasks. It runs AI agents — Codex CLI or Claude
+Code — one task at a time, each in its own git worktree, each allowed to touch only the
+files its task declared. Work that fails its checks does not merge. No agent can approve
+its own work. Every run leaves a manifest behind, so months later you can still answer
+"who produced this number, from what input, and who checked it."
 
-The framework is designed to support three research modes:
+It is built for research that has to survive scrutiny: empirical data work, modeling and
+simulation, or a hybrid of the two.
 
-- empirical
-- modeling
-- hybrid
+---
 
-Its central operating idea is simple:
+## See it work in 60 seconds
 
-> the repository is the shared memory
-
-Agents do not rely on hidden conversational context to coordinate. They coordinate through task files, contracts, manifests, review logs, release artifacts, and git history. That makes the workflow inspectable, reproducible, and reviewable.
-
-## Why This Exists
-
-Most agentic workflows break down on the same points:
-
-- work scope widens implicitly
-- state lives in chat instead of durable files
-- review and provenance are bolted on after the fact
-- parallel work collides because ownership is unclear
-- release outputs exist without a clean chain of evidence
-
-This framework addresses those failures directly by treating the repository as both the execution substrate and the control plane.
-
-## Framework Overview
-
-The framework is built from a small set of explicit architectural pieces.
-
-### Repo-native control plane
-
-The local control plane lives under [`.orchestrator/`](.orchestrator/). Task markdown files carry the authoritative `State:` field, while folder placement under backlog, active, blocked, and done is only a projection maintained by tooling.
-
-Relevant surfaces:
-
-- [`.orchestrator/`](.orchestrator/)
-- [`.orchestrator/workstreams.md`](.orchestrator/workstreams.md)
-- [`scripts/sweep_tasks.py`](scripts/sweep_tasks.py)
-
-### Contract-first execution
-
-The framework separates framework policy from project policy.
-
-- [`contracts/framework.json`](contracts/framework.json) defines framework capabilities, roles, states, task semantics, execution engines, and release policy.
-- [`contracts/pack.json`](contracts/pack.json) defines project-owned names, paths, workstream meanings, and the compatible kernel range.
-- [`contracts/kernel_interface.json`](contracts/kernel_interface.json) versions the kernel surfaces consumed by packs.
-- [`contracts/project.yaml`](contracts/project.yaml) defines the currently instantiated research project.
-- [`docs/protocol.md`](docs/protocol.md) locks empirical definitions when the current project is empirical.
-- [`contracts/model_spec.md`](contracts/model_spec.md) is the modeling specification surface.
-- [`contracts/hybrid_interface_v1.yaml`](contracts/hybrid_interface_v1.yaml) defines the only allowed empirical-to-modeling bridge.
-
-That separation is deliberate. The framework is meant to be reusable across projects; the current project contract is only one instantiation.
-
-The Python distribution metadata in `pyproject.toml` names the reusable kernel. Pack identity is separate and is validated from `project.package_name` in `contracts/pack.json`; a new pack does not rename the kernel distribution.
-
-### Explicit role separation
-
-The operating model is built around four formal roles:
-
-- `Planner`: scopes work, writes tasks, maintains workstreams, and manages lifecycle projection
-- `Worker`: executes exactly one task in one isolated branch/worktree and edits only the allowed scope
-- `Judge`: reruns declared gates, verifies outputs and provenance, and is the only role that can mark scientific work `done`
-- `Operator`: owns preflight, supervision, repair handling, release assembly, and shared operational surfaces
-
-The role model is enforced through [AGENTS.md](AGENTS.md), [`contracts/framework.json`](contracts/framework.json), and the prompt templates under [`docs/prompts/`](docs/prompts/).
-
-### Worktree-scoped execution
-
-The framework assumes strict task isolation:
-
-- one task
-- one branch
-- one worktree
-
-Tasks declare bounded ownership through fields such as:
-
-- `allowed_paths`
-- `outputs`
-- `gates`
-- `stop_conditions`
-
-This keeps parallelism tractable and makes it clear when the correct action is to block rather than improvise.
-
-### Deterministic gates and review bundles
-
-The merge firewall is designed to stay offline and deterministic by default.
-
-Primary runtime and gate surfaces:
-
-- [`scripts/swarm.py`](scripts/swarm.py)
-- [`scripts/quality_gates.py`](scripts/quality_gates.py)
-- [`scripts/sweep_tasks.py`](scripts/sweep_tasks.py)
-- [`scripts/release_assembly.py`](scripts/release_assembly.py)
-
-Durable runtime and review artifacts live under:
-
-- [`reports/status/swarm_runs/`](reports/status/swarm_runs/)
-- [`reports/status/reviews/`](reports/status/reviews/)
-
-The framework treats these review bundles as first-class outputs, not optional metadata.
-
-### Two execution paths
-
-The framework defines two execution paths.
-
-- The default path is the local swarm runtime: [`scripts/swarm.py`](scripts/swarm.py) plus [`.orchestrator/`](.orchestrator/).
-- The high-stakes path is the reviewed `staged-workflow-runner`, reserved for major replans, architecture rewrites, and release assessments under Operator control.
-
-This separation prevents ordinary task execution from being overloaded with high-consequence synthesis work.
-
-## Supported Research Modes
-
-The framework supports the modes declared in [`contracts/framework.json`](contracts/framework.json).
-
-### Empirical
-
-Empirical mode is for workflows that move from source acquisition to processed datasets, validation artifacts, analytical outputs, manuscript source, and release surfaces.
-
-Relevant framework surfaces include:
-
-- [`docs/protocol.md`](docs/protocol.md)
-- [`registry/`](registry/)
-- [`data/raw_manifest/`](data/raw_manifest/)
-- [`data/processed_manifest/`](data/processed_manifest/)
-- [`reports/validation/`](reports/validation/)
-
-### Modeling
-
-Modeling mode is for solver, simulation, optimization, or proof-oriented workflows that require explicit instance and experiment definitions rather than informal inputs.
-
-Relevant framework surfaces include:
-
-- [`contracts/model_spec.md`](contracts/model_spec.md)
-- [`contracts/instances/`](contracts/instances/)
-- [`contracts/experiments/`](contracts/experiments/)
-- [`src/model/`](src/model/)
-- [`reports/models/`](reports/models/)
-
-### Hybrid
-
-Hybrid mode is for workflows where empirical outputs are transformed into declared modeling instances through a contract-bound interface.
-
-Relevant framework surfaces include:
-
-- [`contracts/hybrid_interface_v1.yaml`](contracts/hybrid_interface_v1.yaml)
-- [`contracts/instances/`](contracts/instances/)
-- [`contracts/experiments/`](contracts/experiments/)
-
-The key rule is that modeling work consumes declared instance manifests, not arbitrary empirical data paths.
-
-## Framework vs. Current Repository Instance
-
-This repository currently contains both:
-
-- the reusable operational kernel under `scripts/`
-- one active reference pack whose project science body lives under `src/`
-
-The current project instance, defined in [`contracts/project.yaml`](contracts/project.yaml), is an empirical research project on L2-to-L1 rent. Its `src/` analysis, ETL, and validation code is STR-specific pack science and is replaced—not generalized—when starting another project. It should be understood as a real end-to-end validation of the framework's empirical path, not as the definition of the framework.
-
-At the current state of this repository, the strongest operational evidence is:
-
-- the repo-native control-plane model is working
-- the local swarm runtime is working
-- the deterministic gate and Judge review path is working
-- the empirical mode has been exercised through release assembly on a real project
-
-What is present architecturally but not yet exercised to the same depth:
-
-- full modeling runtime maturity on a populated model specification and live instance set
-- full hybrid runtime maturity beyond the current bridge contract
-
-That distinction matters. The framework supports empirical, modeling, and hybrid work by design, but the current deepest evidence comes from the empirical reference implementation.
-
-## Repository Structure
-
-- [`AGENTS.md`](AGENTS.md): role boundaries and operating rules
-- [`.orchestrator/`](.orchestrator/): task lifecycle, templates, handoffs, and control-plane state
-- [`contracts/`](contracts/): framework policy, project contract, model spec, hybrid interface, schemas, instances, and experiments
-- [`docs/`](docs/): runbooks, prompts, and protocol documents
-- [`scripts/`](scripts/): swarm runtime, quality gates, lifecycle sweep, and release assembly
-- [`src/`](src/): pack-owned science implementations for ETL, validation, analysis, and modeling
-- [`registry/`](registry/): registry surfaces for empirical projects
-- [`data/`](data/): raw, processed, sample, and manifest-backed datasets
-- [`reports/`](reports/): validation outputs, figures, tables, models, paper artifacts, release manifests, and review logs
-- [`tests/`](tests/): fast offline verification
-
-## How To Work With This Repo
-
-You can use this repository in two different ways.
-
-### 1. Operate the current reference instance
-
-Use the repo as-is to inspect or extend the current empirical project that has been used to exercise the framework.
-
-### 2. Use the framework for a different research project
-
-Generate a compatible inactive pack scaffold, then replace its project-specific contract surfaces:
-
-```sh
-python3.11 scripts/swarm_init.py --mode empirical --output ../my-empirical-pack
-make -C ../my-empirical-pack gate
+```bash
+make demo
 ```
 
-- update `contracts/pack.json`
-- update [`contracts/project.yaml`](contracts/project.yaml)
-- update the relevant empirical, modeling, or hybrid contracts
-- replace the documented `src/analysis/project_analysis.py` placeholder with the new pack's science body
-- define the task queue under [`.orchestrator/`](.orchestrator/)
-- keep the same role, state, gate, and review semantics
+No API key. No network. No cost. Nothing in your repository changes.
 
-Use `--mode modeling` or `--mode hybrid` for the other program templates. The generated Makefile points at this repo-native kernel for M5a; physical installable packaging remains the separate M5b decision.
+The demo builds a throwaway research project in a temp directory and runs two Workers and
+a Judge through the real runtime, using a scripted `mock` agent instead of a live model:
 
-`swarm_init` provides a contract-valid, orchestration-testable scaffold. It intentionally does not generate a runnable scientific analysis pipeline: each new pack must author its own `src/` science body. Reusing the operational kernel means no edits to `scripts/`; it does not mean copying the STR implementation from this repository.
+| | what happens |
+|---|---|
+| **Act 1** | A Worker writes exactly the file its task declared → gates pass, work is accepted, artifact appears |
+| **Act 2** | A Worker tries to rewrite `contracts/project.yaml`, which its task does not own → **refused**, task blocked, file byte-identical |
+| **Act 3** | The Judge is asked to approve the work this same session just produced → **refused**, with reasons written to a review log |
 
-The framework is intended to generalize. The current empirical project is only one concrete instantiation.
+```
+========================================================================
+  Act 2 — a Worker that reaches out of scope
+========================================================================
+--- run-task result ----------------------------------------------------
+  { "blocked_reasons": ["executor_failed"],
+    "state_after": "blocked", "state_before": "backlog", "task_id": "T901" }
+------------------------------------------------------------------------
+  BLOCKED  the out-of-scope write was refused
+           contracts/project.yaml is byte-identical
+```
 
-## Getting Started
+Those are the three failures that ruin unsupervised agent runs — scope creep, silent
+merges, and self-approval — being stopped by the same code that runs in production.
+
+---
+
+## Who this is for
+
+You are running AI agents on work where being wrong is expensive and being unable to
+*prove* you were right is just as bad. A paper, a report, a model someone will act on.
+
+If you just want an agent to refactor a service, this is far too much machinery. The
+overhead here buys you provenance, and provenance is only worth paying for when someone
+will eventually audit the result.
+
+## The problem it solves
+
+Agentic workflows tend to fail the same five ways:
+
+- scope widens quietly — the agent "helpfully" edits things it was not asked to touch
+- state lives in a chat window, so nothing survives the session
+- review is bolted on afterwards, if at all
+- parallel agents collide because nobody owns which files
+- outputs exist with no clean chain of evidence back to their inputs
+
+The fix here is one idea:
+
+> **the repository is the shared memory**
+
+Agents do not coordinate through conversation. They coordinate through task files,
+contracts, manifests, review logs, and git history. Everything is inspectable because
+everything is a file you can `cat`, `diff`, and `git log`.
+
+---
+
+## How it works
+
+```
+  .orchestrator/backlog/T042.md        a task file: scope, gates, allowed paths
+             │
+             ▼
+   ┌──── Planner ─────┐                scopes work, writes tasks   (human-approved)
+   │                  │
+   ▼                  │
+  swarm.py tick ──────┘                claims one ready task, takes a lease
+   │
+   ▼
+  git worktree ../wt-T042              one task · one branch · one worktree
+   │
+   ▼
+  Worker  (Codex CLI / Claude Code)    may write ONLY the task's allowed_paths
+   │                                   out-of-scope write ⇒ run fails
+   ▼
+  declared gates                       `make gate`, tests, project checks
+   │                                   offline by default; failure ⇒ state: blocked
+   ▼
+  Judge  (separate actor)              reruns gates, verifies provenance
+   │                                   only role that can mark work `done`
+   ▼
+  reports/status/{swarm_runs,reviews}/ durable run manifest + review log
+```
+
+Four roles, enforced by the runtime rather than by good intentions:
+
+| role | may do | may not |
+|---|---|---|
+| **Planner** | scope work, write task files, maintain the queue | execute tasks |
+| **Worker** | execute exactly one task in one worktree | write outside `allowed_paths` |
+| **Judge** | rerun gates, verify provenance, mark work `done` | review its own session's work |
+| **Operator** | preflight, supervision, repair, release assembly | skip the review path |
+
+### The unit of work is a task file, not a prompt
+
+Every task is a markdown file whose YAML frontmatter *is* the contract:
+
+```yaml
+task_id: T060
+title: "Analysis: release STR figures and tables from validated artifacts"
+role: Worker
+dependencies: ["T040", "T050"]
+allowed_paths:                       # the only files this Worker may write
+  - "src/analysis/build_str_release_outputs.py"
+  - "reports/figures/str_ecosystem_timeseries.svg"
+  - "reports/tables/str_regime_summary.csv"
+disallowed_paths:
+  - "docs/protocol.md"
+  - "contracts/"
+outputs:
+  - "reports/tables/str_regime_summary.csv"
+gates:
+  - make gate                        # must pass or the task blocks
+stop_conditions:
+  - "Contract ambiguity"             # stop and ask; do not improvise
+```
+
+The `State:` field inside the file is authoritative. The `backlog/`, `active/`,
+`blocked/`, `done/` folders are only a projection that tooling maintains — so a task
+never gets "lost" because someone moved a file.
+
+---
+
+## What actually stops a bad run
+
+These are enforced in code, not advice in a prompt. Most of them fire in `make demo`.
+
+**Scope**
+- A Worker writing outside its `allowed_paths` fails the run. The write does not land.
+- One task, one branch, one worktree. Parallel agents cannot collide.
+- Leases prevent two runners from claiming the same task.
+
+**Review**
+- Only a Judge marks work `done`, and the Judge reruns the gates itself.
+- An actor-separation window blocks a session from reviewing work it just produced.
+- Commits landing after a run manifest is sealed are detected (`post_manifest_commits`).
+
+**Gate execution**
+- Gates may only be `make <target>` or `python <repo-relative>.py`. Inline code
+  (`-c`), module execution (`-m`), and stdin are rejected — an agent-authored gate can
+  never become an arbitrary-code channel.
+- Gates run with the network disabled by default and an allowlisted environment.
+
+**Blast radius**
+- Unattended runs refuse to start unless you have attested containment — *and* the
+  runtime scans for readable AWS, SSH, gcloud, netrc, and Docker credentials and
+  refuses if it finds any. The waiver must live in the signed attestation, never in an
+  environment variable.
+- `scaffold: true` fails closed: a pack still claiming to be a scaffold cannot ship
+  real outputs.
+
+**Scientific integrity**
+- Preregistration locks can block analysis tasks until the analysis plan is frozen.
+- A claim–evidence ledger ties manuscript numbers to the artifacts that produced them.
+- Cross-family referees: work authored by one model family is reviewed by another.
+
+---
+
+## Run real agents
+
+The demo uses `mock`. To use live models, swap the backend:
+
+```bash
+# one task, attended — you watch it
+python3.11 scripts/swarm.py run-task --task-id T042 --executor-backend codex
+
+# the whole ready queue
+python3.11 scripts/swarm.py tick --executor-backend codex --max-workers 2
+
+# crash-only supervisor loop (long-running)
+python3.11 scripts/swarm.py supervise --executor-backend codex
+```
+
+**Engines.** Workers run through Codex CLI (`--executor-backend codex`). The Planner and
+the referee panel run through Claude Code (`--planner-backend claude`,
+`--referee-backend claude`). Models are pinned in `contracts/framework.json` under
+`executors`, not hardcoded in the runtime.
+
+**Cost.** Executor token usage is recorded per run and aggregated:
+
+```bash
+python3.11 scripts/swarm.py costs
+```
+
+Tasks declare their own ceiling in frontmatter — `budgets: {max_wall_clock: 1h,
+max_tokens: 100000, max_cost_usd: 10}`.
+
+**Before going unattended.** Read [`docs/operator_runbook.md`](docs/operator_runbook.md).
+Unattended mode requires, deliberately:
+
+```bash
+python3.11 scripts/swarm.py attest-containment --attested-by <name>
+python3.11 scripts/swarm.py ack-vendor-policy --vendor <vendor> --note <policy> --acked-by <name>
+export SWARM_UNATTENDED_I_UNDERSTAND=1
+```
+
+and it will still refuse to run if your home directory has readable cloud credentials.
+Run it in a sandbox or container that holds only this repository. `--codex-sandbox
+danger-full-access` exists; it is not a default and you should have a reason.
+
+---
+
+## Getting started
 
 ### Prerequisites
 
-- Python `3.11`
+- Python **3.11** (the Makefile calls `python3.11`; 3.9 will not work)
 - `git`
-- `pip`
+- Optional: `quarto` (paper builds), `tmux` (supervisor sessions), `gh` (PRs)
 
-Useful optional tools:
-
-- `quarto`
-- `tmux`
-- `gh`
-
-### Install
+### Install and verify
 
 ```bash
-python -m pip install .
+python3.11 -m pip install .
+make demo     # 60-second narrated walkthrough, no cost
+make gate     # deterministic contract + integrity gates
+make test     # 554 offline tests
 ```
 
-### Validate the repository
+`make gate` prints one `ok=True` line per gate; many report `skipped: True` because they
+only apply to other modes or task kinds. That is normal.
+
+### Look at the live control plane
 
 ```bash
-make gate
-make test
+python3.11 scripts/swarm.py status --no-fetch
 ```
 
-### Inspect control-plane status
+```
+Swarm status
+backlog: (none)
+active: (none)
+blocked: (none)
+done: T000, T005, T010, T015, T020, ...
+journal: events=1 malformed=0 escalations=0
+```
+
+> **Note:** `swarm.py tick` appends to the provenance journal at
+> `reports/status/events/events.jsonl` **even with `--dry-run`**, and an uncommitted
+> journal entry will make `make test` fail two release-integrity tests. If that happens,
+> `git status` will show the file; remove or commit it. Prefer `status` for read-only
+> inspection.
+
+### Read the framework in this order
+
+1. [AGENTS.md](AGENTS.md) — role boundaries and operating rules
+2. [`contracts/framework.json`](contracts/framework.json) — capabilities, roles, states, engines
+3. [`.orchestrator/workstreams.md`](.orchestrator/workstreams.md) — how work is grouped
+4. [`docs/runbook_swarm.md`](docs/runbook_swarm.md) — the manual loop, step by step
+5. [`docs/operator_runbook.md`](docs/operator_runbook.md) — supervision, escalation, attestation
+6. [`contracts/project.yaml`](contracts/project.yaml) — the project currently instantiated
+
+There is also a one-page visual: [`docs/swarm_workflow_poster.svg`](docs/swarm_workflow_poster.svg).
+
+---
+
+## Start your own research project
+
+This repo ships the reusable kernel (`scripts/`) plus one reference project (`src/`).
+To start a new project, generate a pack and replace the project-specific parts:
 
 ```bash
-python scripts/swarm.py plan --remote origin --base-branch main
+python3.11 scripts/swarm_init.py --mode empirical --output ../my-pack
+make -C ../my-pack gate
 ```
 
-### Read the framework in the right order
+Use `--mode modeling` or `--mode hybrid` for the other templates. Then:
 
-1. [AGENTS.md](AGENTS.md)
-2. [`contracts/framework.json`](contracts/framework.json)
-3. [`.orchestrator/workstreams.md`](.orchestrator/workstreams.md)
-4. [`docs/runbook_swarm.md`](docs/runbook_swarm.md)
-5. [`docs/runbook_swarm_automation.md`](docs/runbook_swarm_automation.md)
-6. the current project contract in [`contracts/project.yaml`](contracts/project.yaml)
+1. Set `project.package_name`, paths, and workstream meanings in `contracts/pack.json`
+2. Define the project in [`contracts/project.yaml`](contracts/project.yaml)
+3. Fill the mode contracts — `docs/protocol.md` (empirical),
+   [`contracts/model_spec.md`](contracts/model_spec.md) (modeling),
+   [`contracts/hybrid_interface_v1.yaml`](contracts/hybrid_interface_v1.yaml) (hybrid)
+4. Replace the `src/analysis/project_analysis.py` placeholder with your own science
+5. Write your task queue under `.orchestrator/`
+6. **Set `"scaffold": false` in `contracts/pack.json`** once the pack does real work
 
-For modeling or hybrid work, then continue with:
+Step 6 is not optional. `scaffold: true` fails closed: as soon as the pack produces run
+manifests, figures, tables, or processed data, `make gate` fails with
+`scaffold_asserted_on_instantiated_repo`. That is the flag telling you the pack has
+graduated from template to project.
 
-- [`contracts/model_spec.md`](contracts/model_spec.md)
-- [`contracts/hybrid_interface_v1.yaml`](contracts/hybrid_interface_v1.yaml)
-- [`contracts/instances/`](contracts/instances/)
-- [`contracts/experiments/`](contracts/experiments/)
+You should not need to edit `scripts/` — that is the kernel. What you replace is `src/`
+(your science) and the contracts. `swarm_init` gives you a contract-valid, orchestration-
+testable scaffold; it deliberately does **not** generate a runnable analysis pipeline.
 
-## Design Principles
+---
 
-The framework is built around a small set of strong rules:
+## Research modes
+
+| mode | for | key contracts |
+|---|---|---|
+| **empirical** | source data → processed datasets → validation → analysis → manuscript | [`docs/protocol.md`](docs/protocol.md), [`registry/`](registry/), [`data/*_manifest/`](data/) |
+| **modeling** | solvers, simulation, optimization, proofs | [`contracts/model_spec.md`](contracts/model_spec.md), [`contracts/instances/`](contracts/instances/), [`contracts/experiments/`](contracts/experiments/) |
+| **hybrid** | empirical outputs feeding declared modeling instances | [`contracts/hybrid_interface_v1.yaml`](contracts/hybrid_interface_v1.yaml) |
+
+In hybrid mode, modeling work consumes declared instance manifests — never arbitrary
+empirical data paths. That bridge is the only sanctioned crossing.
+
+## What is proven, and what is not
+
+Being straight about this, because it changes whether you should adopt it:
+
+**Exercised end to end on a real project.** The control plane, the swarm runtime, the
+deterministic gate and Judge review path, and the full empirical mode — source data
+through figures, tables, manuscript, paper build, and release manifest. The reference
+project is an empirical study of L2-to-L1 rent, defined in
+[`contracts/project.yaml`](contracts/project.yaml).
+
+**Architecturally present, not yet exercised to the same depth.** Modeling runtime
+maturity against a populated model spec and live instance set; hybrid runtime maturity
+beyond the bridge contract itself.
+
+So: the framework is designed for three modes, and the deep evidence today is empirical.
+
+## Glossary
+
+| term | meaning |
+|---|---|
+| **kernel** | the reusable machinery in `scripts/`. You do not edit it per project. |
+| **pack** | one project's contracts, tasks, and science (`contracts/`, `src/`, `.orchestrator/`) |
+| **gate** | a declared check that must pass for work to count |
+| **lease** | a claim on a task, so two runners never take the same one |
+| **projection** | folder placement, derived from the authoritative `State:` field |
+| **run manifest** | the durable record of one execution under `reports/status/swarm_runs/` |
+| **integration_ready** | a state for interface work downstream tasks need before full review |
+| **STR** | Settlement Take Rate, the reference project's metric; pack-specific, not framework |
+
+## Repository map
+
+| path | contents |
+|---|---|
+| [`AGENTS.md`](AGENTS.md) | role boundaries and operating rules |
+| [`.orchestrator/`](.orchestrator/) | task lifecycle, templates, handoffs, control-plane state |
+| [`contracts/`](contracts/) | framework and project policy, schemas, instances, experiments |
+| [`docs/`](docs/) | runbooks, prompts, protocol |
+| [`scripts/`](scripts/) | the kernel: swarm runtime, gates, sweep, release assembly |
+| [`src/`](src/) | pack-owned science: ETL, validation, analysis, modeling |
+| [`data/`](data/), [`registry/`](registry/) | manifest-backed datasets and registry surfaces |
+| [`reports/`](reports/) | validation, figures, tables, paper, releases, run manifests, reviews |
+| [`tests/`](tests/) | fast offline verification |
+
+## Design principles
 
 - the repository is the shared memory
-- task-file state is authoritative
-- folder placement is only a projection
+- task-file state is authoritative; folder placement is only a projection
 - contracts outrank chat
 - one task executes in one isolated worktree
 - gates stay deterministic and offline by default
-- review and release artifacts are required outputs
-- agents should stop on ambiguity instead of widening scope informally
+- review and release artifacts are required outputs, not metadata
+- agents stop on ambiguity instead of widening scope
 
-## Current Status
+## License
 
-This repository now demonstrates a complete empirical reference run through figures, tables, manuscript source, paper build, catalog, and release manifest surfaces. That is evidence that the framework can carry a real research project end to end.
-
-It is not yet evidence that every supported mode has equal runtime maturity. The framework is broader than the current reference project, and the README is written to reflect that boundary explicitly.
+See [LICENSE](LICENSE).
