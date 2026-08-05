@@ -1,6 +1,11 @@
 PYTHON ?= python3.11
 
-.PHONY: gate reproduce-analysis paper drill eval-heldout bt2a-rehearsal
+.PHONY: gate reproduce-analysis paper drill eval-heldout bt2a-rehearsal demo
+
+# Narrated end-to-end demo in a throwaway temp repo.
+# No API key, no network, no cost, no changes to this repository.
+demo:
+	$(PYTHON) scripts/demo.py
 
 gate:
 	$(PYTHON) scripts/quality_gates.py
