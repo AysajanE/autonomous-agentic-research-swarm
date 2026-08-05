@@ -12,9 +12,9 @@
       "verification_bar": "byte_identity"
     },
     {
-      "bytes": 775,
+      "bytes": 933,
       "path": "Makefile",
-      "sha256": "bfc0d96d40e4224b5ae2f0534379a442a9d69da4f9cbd0e790bc94f55cf4171d",
+      "sha256": "38e1d02787219801f1d3ea618e5d87a712538a534fd187c869f973ef226128f5",
       "verification_bar": "byte_identity"
     },
     {
@@ -1625,6 +1625,12 @@
       "bytes": 35489,
       "path": "scripts/calibrate_referee.py",
       "sha256": "c583200f084444f9a78703672a06a1df9e6a1db3207cc85a97dcfe9d0fdd9ca3",
+      "verification_bar": "byte_identity"
+    },
+    {
+      "bytes": 14047,
+      "path": "scripts/demo.py",
+      "sha256": "e4372167dc70146913be9b8ec2997a5cd449f8f142f83e68516b9d4011bcd7df",
       "verification_bar": "byte_identity"
     },
     {
